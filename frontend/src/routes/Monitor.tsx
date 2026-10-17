@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import { LoaderCircle, Pin, PinOff, X } from 'lucide-react'
 import { CandidateList, DecisionCard } from '@/components/monitor/Decision'
 import { GameStage } from '@/components/monitor/GameStage'
-import { HandStrip, ResultCard, ResultPages, ScoreStrip, SeatColumns } from '@/components/monitor/Table'
-import { Diagnostics, EventList, FaultCard } from '@/components/monitor/Details'
+import { HandStrip, ResultCard, ScoreStrip, SeatColumns } from '@/components/monitor/Table'
+import { FaultCard } from '@/components/monitor/Details'
+import { GamePages } from '@/components/monitor/Game'
 import { Settings } from '@/components/monitor/Settings'
 import { Statistics } from '@/components/monitor/Stats'
 import { Faces } from '@/components/monitor/Tiles'
 import { useMonitor } from '@/hooks/useMonitor'
 import { pickShow } from '@/lib/botShow'
+import { rememberGroup, savedGroup, type Group } from '@/lib/settingsGroup'
 import {
   MONITOR_DEFAULTS, alertsOf, candidatesOf, decisionView, healthOf, linkOf, roundLabel, seatWind, tableOf,
   type Alert, type Candidate, type DecisionView, type GameView, type Health, type MonitorConfig, type MonitorSnapshot,
@@ -27,8 +29,10 @@ import { localized, tr, useLang } from '@/lib/i18n'
 const STAGE = { w: 1280, h: 720 }
 const DOCK = { w: 1280, h: 240 }
 
-type Tab = 'decision' | 'table' | 'result' | 'events' | 'stats' | 'link' | 'settings'
-const TABS: Array<[Tab, string]> = localized([['decision', '决策'], ['table', '牌桌'], ['result', '结果'], ['events', '事件'], ['stats', '统计'], ['link', '连接'], ['settings', '设置']])
+// From the move to the game: this decision, the hand it is in, the game the hand
+// is in. Then the record over games, and the settings, which hold the links.
+type Tab = 'decision' | 'hand' | 'game' | 'stats' | 'settings'
+const TABS: Array<[Tab, string]> = localized([['decision', '决策'], ['hand', '本局'], ['game', '对局'], ['stats', '统计'], ['settings', '设置']])
 
 /** The stage the game is shown in may not be smaller than this; `resize_monitor_game` rejects less than 100. */
 const STAGE_MIN = 160
@@ -124,6 +128,8 @@ function Dock({ m, tab: chosen, setTab, tools, options, onAutoplay, onPin, onTra
   }
   useEffect(() => () => window.clearTimeout(pending.current), [])
   const tab = peek ?? chosen
+  const [group, setGroup] = useState<Group>(savedGroup)
+  const openGroup = (next: Group) => { setGroup(next); rememberGroup(next) }
   return <aside className="md" onMouseLeave={() => hover(null)}>
     <header className="md-bar">
       <Round s={s} />
@@ -136,11 +142,11 @@ function Dock({ m, tab: chosen, setTab, tools, options, onAutoplay, onPin, onTra
         <div className="mtools">{tools}</div>
       </div>
       <nav className="md-tabs" role="tablist" aria-label={tr('监视内容')}>
-        {/* The links have one light, on their tab: everything behind it is run by this window. */}
+        {/* The links have one light, on the settings' tab, where they are: everything behind it is run by this window. */}
         {TABS.map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} data-kept={chosen === key || undefined}
           onClick={() => { hover(null); setTab(key) }} onMouseEnter={() => hover(key)} onMouseLeave={() => window.clearTimeout(pending.current)}
-          title={key === 'link' ? tr('连接：{0}', link.summary) : undefined}>
-          {label}{key === 'link' && <i className="mdot md-tab-dot" data-tone={link.tone} />}
+          title={key === 'settings' ? tr('连接：{0}', link.summary) : undefined}>
+          {label}{key === 'settings' && <i className="mdot md-tab-dot" data-tone={link.tone} />}
         </button>)}
       </nav>
     </header>
@@ -150,17 +156,15 @@ function Dock({ m, tab: chosen, setTab, tools, options, onAutoplay, onPin, onTra
       {/* At the end of a round its result stands where the candidates and the hand were. */}
       {tab === 'decision' && (s?.result ? <ResultCard result={s.result} snapshot={s} />
         : <>
-          <Slot m={m} onDetails={() => setTab('link')} />
+          <Slot m={m} onDetails={() => { openGroup('link'); setTab('settings') }} />
           {game ? <div className="md-side"><HandStrip game={game} suggestion={view.live ? s?.decision?.response ?? null : null} /><ScoreStrip game={game} /></div>
             : <p className="mslot-empty">{tr('对局开始后，这里显示手牌和四家点数')}</p>}
         </>)}
-      {tab === 'table' && (s?.game ? <SeatColumns snapshot={s} /> : <p className="mslot-empty md-wide">{tr('对局开始后，这里显示公开的牌河、副露和点数')}</p>)}
-      {tab === 'result' && (s ? <ResultPages key={s.context.game} snapshot={s} /> : <p className="mslot-empty md-wide">{tr('正在连接监视数据')}</p>)}
-      {tab === 'events' && (s ? <EventList key={s.context.game} snapshot={s} /> : <p className="mslot-empty md-wide">{tr('正在连接监视数据')}</p>)}
+      {tab === 'hand' && (s?.game ? <SeatColumns snapshot={s} /> : <p className="mslot-empty md-wide">{tr('对局开始后，这里显示公开的牌河、副露和点数')}</p>)}
+      {tab === 'game' && (s ? <GamePages key={s.context.game} snapshot={s} /> : <p className="mslot-empty md-wide">{tr('正在连接监视数据')}</p>)}
       {/* The record can change when a game starts or ends, and at no other time. */}
       {tab === 'stats' && <Statistics refresh={`${s?.context.game ?? 0}:${s?.game_ended ?? true}`} />}
-      {tab === 'link' && <Diagnostics snapshot={s} health={m.health} now={m.now} />}
-      {tab === 'settings' && <Settings snapshot={s} options={options} now={m.now} onPin={onPin} onAutoplay={onAutoplay} onTrail={onTrail} onLean={onLean}
+      {tab === 'settings' && <Settings group={group} onGroup={openGroup} snapshot={s} options={options} health={m.health} now={m.now} onPin={onPin} onAutoplay={onAutoplay} onTrail={onTrail} onLean={onLean}
         onConfirm={onConfirm} onAutoWin={onAutoWin}
         onStream={onStream} onCopyStream={onCopyStream} onGameView={onGameView} onSpout={onSpout} />}
     </div>
@@ -268,7 +272,7 @@ export function Monitor() {
   const d = s?.decision ?? null
   const view = decisionView(s)
   const thinking = view.phase === 'thinking'
-  const now = useNow(thinking || tab === 'link' || tab === 'settings', thinking ? 100 : 1000)
+  const now = useNow(thinking || tab === 'settings', thinking ? 100 : 1000)
   const alerts = alertsOf(s, { ui: uiError, bridge: bridgeError })
   const local = alerts.filter(a => a.key === 'ui' || a.key === 'bridge')
   const faults = alerts.filter(a => a.key !== 'ui' && a.key !== 'bridge')

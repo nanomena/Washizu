@@ -51,7 +51,7 @@ export function Statistics({ refresh }: { refresh: string }) {
   const figures = useMemo(() => figuresOf(t), [t])
   const waiting = failed ? tr('读不到对局记录：{0}', failed) : records == null ? tr('正在读取对局记录') : null
 
-  return <div className="mstats">
+  return <div className="md-page mstats">
     <section className="mstat mstat-rank">
       <header className="msec-head">
         <h3>{tr('段位分与顺位')}</h3>
@@ -76,14 +76,14 @@ export function Statistics({ refresh }: { refresh: string }) {
       <footer><span>{tr('平均顺位')} <b>{t.averagePlace != null ? t.averagePlace.toFixed(2) : '—'}</b></span><span>{tr('{0} 场', t.games)}</span></footer>
     </section>
 
-    <section className="mstat">
+    <section className="mstat mstat-figures">
       <header className="msec-head"><h3>{tr('数据')}<span>{tr('{0} 局', t.hands)}</span></h3></header>
       <dl className="mstat-scroll">
         {figures.map(f => <div key={f.name} className="mfact" title={f.note}><dt>{f.name}</dt><dd>{f.value}</dd></div>)}
       </dl>
     </section>
 
-    <section className="mstat">
+    <section className="mstat mstat-yakus">
       <header className="msec-head"><h3>{tr('役种')}<span>{tr('{0} 次和了', t.scoredWins)}</span></h3></header>
       {t.yaku.length === 0 ? <p className="mslot-empty">{tr('役种从记录它的版本起开始累计')}</p>
         : <ol className="mstat-scroll">

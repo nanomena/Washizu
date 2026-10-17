@@ -85,8 +85,8 @@ describe('monitor user states', () => {
     fixture.snapshot!.service = 'error'; fixture.snapshot!.service_error = 'Socket closed'
     fixture.snapshot!.decision!.state = 'expired'
     render(<Monitor />)
-    // The links have one light, on their tab, and it says which link is down.
-    const links = screen.getByRole('tab', { name: '连接' })
+    // The links have one light, on the settings' tab, and it says which link is down.
+    const links = screen.getByRole('tab', { name: '设置' })
     expect(links.querySelector('.mdot')?.getAttribute('data-tone')).toBe('bad')
     expect(links.title).toBe('连接：模型断开')
     expect(screen.getByRole('alert').textContent).toContain('模型服务断开')
@@ -99,15 +99,15 @@ describe('monitor user states', () => {
   it('shows a tab while the pointer rests on it, and keeps the one clicked', async () => {
     const { container } = render(<Monitor />)
     const shown = () => container.querySelector('[role="tabpanel"]')!.getAttribute('data-tab')
-    fireEvent.mouseEnter(screen.getByRole('tab', { name: '牌桌' }))
-    await waitFor(() => expect(shown()).toBe('table'))
+    fireEvent.mouseEnter(screen.getByRole('tab', { name: '本局' }))
+    await waitFor(() => expect(shown()).toBe('hand'))
     // Leaving the dock goes back to the tab kept.
     fireEvent.mouseLeave(container.querySelector('aside.md')!)
     expect(shown()).toBe('decision')
-    fireEvent.mouseEnter(screen.getByRole('tab', { name: '事件' }))
-    fireEvent.click(screen.getByRole('tab', { name: '事件' }))
+    fireEvent.mouseEnter(screen.getByRole('tab', { name: '对局' }))
+    fireEvent.click(screen.getByRole('tab', { name: '对局' }))
     fireEvent.mouseLeave(container.querySelector('aside.md')!)
-    expect(shown()).toBe('events')
+    expect(shown()).toBe('game')
   })
 
   it('keeps the confirmed action as history but drops its candidates at round end', () => {
@@ -144,12 +144,14 @@ describe('monitor user states', () => {
 
   it('keeps the decision in place on every tab of the dock', () => {
     render(<Monitor />)
-    for (const name of ['牌桌', '结果', '事件', '连接']) {
+    for (const name of ['本局', '对局', '统计', '设置']) {
       fireEvent.click(screen.getByRole('tab', { name }))
       expect(screen.getByRole('status').textContent).toBe('待确认')
       expect(within(decision()).getByText('9万')).toBeTruthy()
     }
+    fireEvent.click(screen.getByRole('button', { name: '连接' }))
     expect(screen.getByText('牌局同步')).toBeTruthy()
+    expect(screen.getByRole('status').textContent).toBe('待确认')
   })
 
   it('shows no action and no candidates while the model is still being asked', () => {
@@ -218,7 +220,8 @@ describe('monitor user states', () => {
       { round: 2, bakaze: 'E', kyoku: 2, honba: 0, result: null, events: 3 },
     ]
     render(<Monitor />)
-    fireEvent.click(screen.getByRole('tab', { name: '结果' }))
+    fireEvent.click(screen.getByRole('tab', { name: '对局' }))
+    fireEvent.click(screen.getByRole('button', { name: /东1局/ }))
     const reveal = screen.getByText('自摸').closest('.mreveal') as HTMLElement
     const shown = within(reveal).getAllByRole('img').map(img => img.getAttribute('alt'))
     expect(shown.slice(0, 3)).toEqual(['1万', '1万', '中'])
@@ -257,7 +260,7 @@ describe('the game as a whole', () => {
 
   it('shows the links as one light that is green when everything the window runs is up', () => {
     const { unmount } = render(<Monitor />)
-    const light = () => screen.getByRole('tab', { name: '连接' }).querySelector('.mdot')?.getAttribute('data-tone')
+    const light = () => screen.getByRole('tab', { name: '设置' }).querySelector('.mdot')?.getAttribute('data-tone')
     expect(light()).toBe('ok')
     expect(screen.queryByRole('button', { name: '连接状态' })).toBeNull()
     unmount()
@@ -271,48 +274,52 @@ describe('the game as a whole', () => {
     expect(light()).toBe('idle')
   })
 
-  it('turns through every hand the game has finished, the latest first', () => {
+  it('lists every hand of the game, and shows the one picked: how it ended, or how it went', async () => {
     fixture.snapshot!.hands = [
       { round: 1, bakaze: 'E', kyoku: 1, honba: 0, result: draw, events: 40 },
       { round: 2, bakaze: 'E', kyoku: 1, honba: 1, result: win, events: 55 },
       { round: 3, bakaze: 'E', kyoku: 2, honba: 0, result: null, events: 3 },
     ]
+    fixture.handEvents = [{ seq: 12, ts_ms: 0, event: { type: 'dahai', actor: 1, pai: '3m', tsumogiri: false } }]
     render(<Monitor />)
-    fireEvent.click(screen.getByRole('tab', { name: '结果' }))
-    const card = () => screen.getByText('2 / 2', { exact: false }).closest('section')!
-    expect(within(card()).getByText('东1局 1 本场')).toBeTruthy()
-    expect(within(card()).getByText('和牌')).toBeTruthy()
-    expect((screen.getByRole('button', { name: '下一局' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('tab', { name: '对局' }))
+    const detail = () => document.querySelector('.mgame-detail') as HTMLElement
+    const line = (name: RegExp) => screen.getByRole('button', { name })
+    // A line a hand, by how it ended; the hand in play has not.
+    expect(line(/东1局.*流局/)).toBeTruthy()
+    expect(line(/东1局.*1 本场.*和牌/)).toBeTruthy()
+    expect(line(/东2局/).textContent).toContain('进行中')
+    // The hand in play is the one shown, and it has only its events.
+    expect(line(/东2局/).getAttribute('aria-pressed')).toBe('true')
+    expect(within(detail()).getByText('东2局 0 本场')).toBeTruthy()
+    expect((within(detail()).getByRole('button', { name: '结局' }) as HTMLButtonElement).disabled).toBe(true)
 
-    fireEvent.click(screen.getByRole('button', { name: '上一局' }))
-    expect(screen.getByText('东1局 0 本场')).toBeTruthy()
-    expect(screen.getByText('1 / 2')).toBeTruthy()
-    expect((screen.getByRole('button', { name: '上一局' }) as HTMLButtonElement).disabled).toBe(true)
-    // The hand still being played has no result and no page.
-    expect(screen.queryByText('东2局 0 本场')).toBeNull()
+    // A finished hand opens on its end.
+    fireEvent.click(line(/东1局.*1 本场/))
+    expect(line(/东1局.*1 本场/).getAttribute('aria-pressed')).toBe('true')
+    expect(within(detail()).getByText('东1局 1 本场')).toBeTruthy()
+    expect(within(detail()).getByText('和牌')).toBeTruthy()
+    expect(within(detail()).getByText('+8,000')).toBeTruthy()
+    // How it went is asked for once.
+    fireEvent.click(within(detail()).getByRole('button', { name: '过程' }))
+    expect(await within(detail()).findByText('手切')).toBeTruthy()
+    expect(fixture.calls.filter(([cmd]) => cmd === 'get_hand_events')).toEqual([['get_hand_events', { round: 2 }]])
   })
 
-  it('keeps the earlier hands of the game folded on the events tab and opens one when asked', async () => {
+  it('follows the hand in play as it goes, and keeps a hand picked when the next is dealt', () => {
     fixture.snapshot!.hands = [
       { round: 1, bakaze: 'E', kyoku: 1, honba: 0, result: draw, events: 40 },
       { round: 2, bakaze: 'E', kyoku: 1, honba: 1, result: null, events: 1 },
     ]
     fixture.snapshot!.events = [{ seq: 90, ts_ms: 0, event: { type: 'reach', actor: 2 } }]
-    fixture.handEvents = [{ seq: 12, ts_ms: 0, event: { type: 'dahai', actor: 1, pai: '3m', tsumogiri: false } }]
-    render(<Monitor />)
-    fireEvent.click(screen.getByRole('tab', { name: '事件' }))
-    // The hand in play is open; the one before it is a line of its own.
+    const { rerender } = render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '对局' }))
     expect(screen.getByText('宣告立直')).toBeTruthy()
-    const earlier = screen.getByRole('button', { name: /东1局 0 本场/ })
-    expect(earlier.getAttribute('aria-expanded')).toBe('false')
-    expect(earlier.textContent).toContain('40 条')
-    expect(screen.queryByText('手切')).toBeNull()
-
-    fireEvent.click(earlier)
-    expect(await screen.findByText('手切')).toBeTruthy()
-    expect(fixture.calls).toContainEqual(['get_hand_events', { round: 1 }])
-    fireEvent.click(screen.getByRole('button', { name: /东1局 0 本场/ }))
-    expect(screen.queryByText('手切')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /东1局.*流局/ }))
+    expect(screen.getByText('东1局 0 本场')).toBeTruthy()
+    fixture.snapshot = { ...fixture.snapshot!, revision: 2, hands: [...fixture.snapshot!.hands, { round: 3, bakaze: 'E', kyoku: 2, honba: 0, result: null, events: 0 }] }
+    rerender(<Monitor />)
+    expect(screen.getByRole('button', { name: /东1局.*流局/ }).getAttribute('aria-pressed')).toBe('true')
   })
 })
 
@@ -393,6 +400,22 @@ describe('the settings', () => {
     expect(screen.queryByRole('switch', { name: '快速确认' })).toBeNull()
     group('应用')
     await waitFor(() => expect(line('版本')).toBe('0.1.0'))
+  })
+
+  it('holds the links, a line each, and opens on them from a fault', () => {
+    fixture.snapshot!.service = 'error'; fixture.snapshot!.service_error = 'Socket closed'
+    fixture.snapshot!.decision!.state = 'expired'
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('button', { name: /连接详情/ }))
+    expect(screen.getByRole('tab', { name: '设置' }).getAttribute('aria-selected')).toBe('true')
+    const links = screen.getByRole('button', { name: '连接' })
+    expect(links.getAttribute('aria-pressed')).toBe('true')
+    expect(links.querySelector('.mdot')?.getAttribute('data-tone')).toBe('bad')
+    const service = screen.getByText('模型服务').closest('.mset-link')!
+    expect(service.getAttribute('data-tone')).toBe('bad')
+    expect(service.textContent).toContain('断开')
+    expect(service.textContent).toContain('Socket closed')
+    expect(screen.getByText('采集').closest('.mset-link')!.getAttribute('data-tone')).toBe('ok')
   })
 
   it('opens the group last looked at again', () => {
@@ -495,13 +518,22 @@ describe('another language', () => {
       return [copy.textContent ?? '', ...[...copy.querySelectorAll('*')].flatMap(el => ['title', 'aria-label', 'alt'].map(name => el.getAttribute(name) ?? ''))].join('\n')
     }
     const tabs = screen.getAllByRole('tab').map(tab => tab.textContent ?? '')
-    expect(tabs).toHaveLength(7)
+    expect(tabs).toEqual(['Decision', 'Hand', 'Game', 'Stats', 'Settings'])
     for (const name of tabs) {
       fireEvent.click(screen.getByRole('tab', { name }))
       await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
       const left = shown().split('\n').filter(line => chinese.test(line))
       expect(left, `on the ${name} tab`).toEqual([])
     }
+    // Every group of the settings, the links among them.
+    for (const name of ['Display & window', 'Link', 'Model & service', 'App']) {
+      fireEvent.click(screen.getByRole('button', { name }))
+      expect(shown().split('\n').filter(line => chinese.test(line)), `in ${name}`).toEqual([])
+    }
+    // An earlier hand's end, in the game tab.
+    fireEvent.click(screen.getByRole('tab', { name: 'Game' }))
+    fireEvent.click(screen.getAllByRole('button', { name: /^E1/ })[0])
+    expect(shown().split('\n').filter(line => chinese.test(line))).toEqual([])
     // The record's own words too, once it has been read.
     fireEvent.click(screen.getByRole('tab', { name: 'Stats' }))
     expect(await screen.findByText('Riichi')).toBeTruthy()
