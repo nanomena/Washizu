@@ -22,6 +22,11 @@ pub struct MonitorConfig {
     /// Some while after our riichi, switch the client's own auto-win on; the
     /// client switches it off for every new hand (see `autoplay::acts`).
     pub riichi_auto_win: bool,
+    /// Play game after game: with autoplay on, press through the game's own
+    /// screens after its end — the standings, the rank, the room's rewards —
+    /// and "play again" (see `autoplay::acts`). The level of autoplay above
+    /// playing a game; switched off during a game, that game is the last.
+    pub auto_continue: bool,
     /// Offer the game view — the game alone, without the dock or any pointer
     /// drawn over it — at a local address a streaming program can show. The
     /// shell serves it while this is on.

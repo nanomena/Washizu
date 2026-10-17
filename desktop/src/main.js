@@ -120,7 +120,7 @@ let gameAt = null
  * The window's options as the core last saved them, the build's version, and
  * where the stream is served while it is.
  * @typedef {{ always_on_top: boolean, pointer_trail?: boolean, pointer_lean?: boolean,
- *   quick_confirm?: boolean, riichi_auto_win?: boolean,
+ *   quick_confirm?: boolean, riichi_auto_win?: boolean, auto_continue?: boolean,
  *   stream_output?: boolean, stream_port?: number, stream_token?: string, stream_url?: string, version?: string,
  *   game_view?: GameView, game_view_now?: GameView, spout_output?: boolean, spout_available?: boolean,
  *   spout_state?: string, spout_name?: string }} Options
@@ -612,6 +612,11 @@ const commands = {
   },
   async set_monitor_auto_win({ enabled }) {
     const saved = /** @type {{ riichi_auto_win: boolean }} */ (await running().call('set_monitor_auto_win', { enabled: enabled === true }))
+    options = { ...options, ...saved }
+    return options
+  },
+  async set_monitor_continue({ enabled }) {
+    const saved = /** @type {{ auto_continue: boolean }} */ (await running().call('set_monitor_continue', { enabled: enabled === true }))
     options = { ...options, ...saved }
     return options
   },

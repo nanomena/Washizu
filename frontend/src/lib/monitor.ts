@@ -8,6 +8,8 @@ import { localized, tr } from '@/lib/i18n'
 export type MonitorConfig = {
   always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean
   quick_confirm?: boolean; riichi_auto_win?: boolean
+  /** Play game after game: with autoplay on, the game's own screens after its end are pressed through to "play again". */
+  auto_continue?: boolean
   stream_output?: boolean; stream_port?: number; stream_token?: string; stream_url?: string
   version?: string
   /** How the game is shown from the next start, and how it is shown now: in the window, or drawn offscreen. */
@@ -16,7 +18,23 @@ export type MonitorConfig = {
   spout_output?: boolean; spout_available?: boolean; spout_state?: 'off' | 'starting' | 'sending' | 'failed' | 'stopped'; spout_name?: string
 }
 export type GameView = 'window' | 'offscreen'
-export const MONITOR_DEFAULTS: MonitorConfig = { always_on_top: false, pointer_trail: false, pointer_lean: false, quick_confirm: false, riichi_auto_win: false }
+export const MONITOR_DEFAULTS: MonitorConfig = { always_on_top: false, pointer_trail: false, pointer_lean: false, quick_confirm: false, riichi_auto_win: false, auto_continue: false }
+
+/** How far autoplay goes: not at all (suggestions only), the game in play, or
+ *  game after game. Two settings make it: autoplay itself, which the core
+ *  reports in the snapshot, and playing on, which is only read while autoplay is on. */
+export type AutoplayLevel = 'off' | 'play' | 'continue'
+export const AUTOPLAY_LEVELS: readonly AutoplayLevel[] = ['off', 'play', 'continue']
+export function levelOf(s: MonitorSnapshot | null, options: MonitorConfig): AutoplayLevel | null {
+  if (!s) return null
+  return !s.autoplay_enabled ? 'off' : options.auto_continue ? 'continue' : 'play'
+}
+/** What a level does, in a line. */
+export function levelAbout(level: AutoplayLevel): string {
+  return level === 'off' ? tr('只显示建议，不替你操作')
+    : level === 'play' ? tr('替你打牌；一场结束后，结束画面留给你')
+    : tr('替你打牌；一场结束后点过结束画面，再来一场')
+}
 export type DecisionContext = { game: number; round: number; event_seq: number }
 export type MonitorDecision = {
   /** Which decision this is, for the life of the process; `number` is its place among its game's. */

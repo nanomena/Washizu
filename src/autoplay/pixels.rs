@@ -6,7 +6,8 @@
 //! sort, auto win, no calls, auto tsumogiri) is on is whether its glyph is
 //! green, and whether a hand's result is ready to confirm is whether its
 //! confirm button, blue with gold words, has been drawn (the game's own
-//! screens after its last result have a yellow one in the same place). A
+//! screens after its last result have a yellow one in the same place, and
+//! the last of them a "play again" beside it, blue with gold words too). A
 //! screenshot of the page reads them, cropped here to the box that matters.
 //!
 //! The screenshot is of the whole view, as the stream's are: a clipped one
@@ -39,8 +40,11 @@ pub enum Sight {
     /// A hand's result's confirm button, bottom right: blue with gold words.
     Button,
     /// The yellow confirm of the game's own screens after its last result,
-    /// in the same place: its standings, then its rank.
+    /// in the same place: its standings, its rank, then the room's rewards.
     Standings,
+    /// "Play again", left of the yellow confirm on the last of the game's
+    /// own screens.
+    Rematch,
     /// No button: the result is still being drawn, or it has gone.
     Nothing,
     /// The screen could not be read.
@@ -58,6 +62,28 @@ pub fn result_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
         Sight::Button
     } else if is_game_confirm(&face) {
         Sight::Standings
+    } else {
+        Sight::Nothing
+    }
+}
+
+/// What the game's own screens after its last result show in `image`, as
+/// [`result_sight`] takes it: "play again" where it shows (the last of them),
+/// else the yellow confirm of each, else a hand's blue confirm (the last
+/// result still up), else nothing yet.
+pub fn end_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
+    let face = |(left, top, right, bottom): (f64, f64, f64, f64)| {
+        let (x0, y0) = rect.pixel(left, top);
+        let (x1, y1) = rect.pixel(right, bottom);
+        image.crop(x0 * scale, y0 * scale, (x1 - x0) * scale, (y1 - y0) * scale)
+    };
+    let confirm = face(coords::CONFIRM_FACE);
+    if is_confirm(&face(coords::REMATCH_FACE)) && is_game_confirm(&confirm) {
+        Sight::Rematch
+    } else if is_game_confirm(&confirm) {
+        Sight::Standings
+    } else if is_confirm(&confirm) {
+        Sight::Button
     } else {
         Sight::Nothing
     }
@@ -503,5 +529,59 @@ mod tests {
             }
         }
         assert_eq!(result_sight(&standings, 2.0, rect), Sight::Standings);
+    }
+
+    /// The game's own screens are read by their buttons: "play again" only
+    /// beside the yellow confirm, the yellow confirm alone, a hand's blue
+    /// confirm, or nothing. A blue box where "play again" would be, with no
+    /// yellow confirm beside it, is not "play again".
+    #[test]
+    fn the_end_screens_are_seen_by_their_buttons() {
+        let rect = CanvasRect {
+            x: 20.0,
+            y: 10.0,
+            width: 160.0,
+            height: 90.0,
+        };
+        let (width, height) = (400, 220);
+        let table = Image {
+            width,
+            height,
+            pixels: vec![[30, 50, 87]; width * height],
+        };
+        let paint = |image: &mut Image,
+                     (left, top, right, bottom): (f64, f64, f64, f64),
+                     face: [u8; 3],
+                     words: [u8; 3]| {
+            let (x0, y0) = rect.pixel(left, top);
+            let (x1, y1) = rect.pixel(right, bottom);
+            for y in (y0 * 2.0) as usize..(y1 * 2.0) as usize {
+                for x in (x0 * 2.0) as usize..(x1 * 2.0) as usize {
+                    image.pixels[y * width + x] = if (x + y) % 10 == 0 { words } else { face };
+                }
+            }
+        };
+        let (blue, gold) = ([48, 80, 144], [224, 176, 112]);
+        let (yellow, red) = ([241, 206, 107], [110, 51, 51]);
+        assert_eq!(end_sight(&table, 2.0, rect), Sight::Nothing);
+        let mut standings = table.clone();
+        paint(&mut standings, coords::CONFIRM_FACE, yellow, red);
+        assert_eq!(end_sight(&standings, 2.0, rect), Sight::Standings);
+        let mut last = standings.clone();
+        paint(&mut last, coords::REMATCH_FACE, blue, gold);
+        assert_eq!(end_sight(&last, 2.0, rect), Sight::Rematch);
+        let mut alone = table.clone();
+        paint(&mut alone, coords::REMATCH_FACE, blue, gold);
+        assert_eq!(end_sight(&alone, 2.0, rect), Sight::Nothing);
+        let mut result = table.clone();
+        paint(
+            &mut result,
+            coords::CONFIRM_FACE,
+            [53, 69, 124],
+            [221, 174, 121],
+        );
+        assert_eq!(end_sight(&result, 2.0, rect), Sight::Button);
+        // A hand's result never reads as "play again".
+        assert_eq!(result_sight(&last, 2.0, rect), Sight::Standings);
     }
 }

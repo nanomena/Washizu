@@ -13,7 +13,7 @@ const READY_TIMEOUT_MS = 30_000
 const STDERR_KEPT = 4_000
 
 /**
- * @typedef {{ brand: string, monitor: { always_on_top: boolean, pointer_trail?: boolean, pointer_lean?: boolean, quick_confirm?: boolean, riichi_auto_win?: boolean }, version: string }} Ready
+ * @typedef {{ brand: string, monitor: { always_on_top: boolean, pointer_trail?: boolean, pointer_lean?: boolean, quick_confirm?: boolean, riichi_auto_win?: boolean, auto_continue?: boolean }, version: string }} Ready
  * @typedef {{ done: (value: unknown) => void, fail: (reason: Error) => void }} Waiting
  */
 

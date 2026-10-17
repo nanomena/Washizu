@@ -456,6 +456,13 @@ pub fn reach_of(at: (f64, f64)) -> crate::autoplay::pointer::aim::Reach {
             half_y: 0.16,
             from_top: false,
         }
+    } else if is(&[coords::GAME_CONFIRM, coords::REMATCH]) {
+        // Each is about 2.08 wide and 0.6 high.
+        Reach {
+            half_x: 0.6,
+            half_y: 0.18,
+            from_top: false,
+        }
     } else if is(&[
         coords::AUTO_SORT,
         coords::AUTO_WIN,
@@ -952,6 +959,15 @@ mod tests {
         assert_eq!((unknown.half_x, unknown.half_y), (0.12, 0.12));
         // Half a tile slot across: a press within the reach stays on its tile.
         assert!(tile.half_x < (TILES[1].0 - TILES[0].0) / 2.0);
+        // The game's end screens: a press on "play again" stays clear of the
+        // yellow confirm beside it.
+        let again = reach_of(coords::REMATCH);
+        assert_eq!(reach_of(coords::GAME_CONFIRM), again);
+        assert!(coords::REMATCH.0 + again.half_x < coords::GAME_CONFIRM.0 - again.half_x);
+        assert!(
+            coords::REMATCH.0 + again.half_x < 13.21
+                && coords::GAME_CONFIRM.0 - again.half_x > 13.49
+        );
     }
     use crate::autoplay::context::CanvasRect;
     use crate::config::MajsoulAutoplayConfig;

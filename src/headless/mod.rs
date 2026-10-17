@@ -28,6 +28,7 @@
 //! | `set_monitor_lean`     | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_confirm`  | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_auto_win` | `{enabled}`              | `MonitorConfig`   |
+//! | `set_monitor_continue` | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_stream`   | `{enabled, port, token}` | `MonitorConfig`   |
 //! | `set_user_pointer`     | `{active, x?, y?}`       | `null`            |
 //! | `set_monitor_autoplay` | `{enabled}`              | `null`            |
@@ -389,6 +390,13 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
                 .await?;
             reply(config.monitor)
         }
+        "set_monitor_continue" => {
+            let Enabled { enabled } = parse(params)?;
+            let config = state
+                .save_config(|c| c.monitor.auto_continue = enabled)
+                .await?;
+            reply(config.monitor)
+        }
         "set_monitor_stream" => {
             let stream: Stream = parse(params)?;
             stream.check()?;
@@ -659,7 +667,7 @@ mod tests {
                 "brand": "Akagi",
                 "monitor": {
                     "always_on_top": true, "pointer_trail": false, "pointer_lean": false,
-                    "quick_confirm": true, "riichi_auto_win": false,
+                    "quick_confirm": true, "riichi_auto_win": false, "auto_continue": false,
                     "stream_output": false, "stream_port": 0, "stream_token": "",
                 },
                 "version": "1.2.3",

@@ -1,9 +1,14 @@
 //! The presses between decisions ([`crate::autoplay::acts`]): through a
-//! hand's result once its confirm button shows, and on the client's auto-win
-//! toggle after a riichi.
+//! hand's result once its confirm button shows, on the client's auto-win
+//! toggle after a riichi, and through the game's own screens after its end
+//! to play again.
 //!
 //! Majsoul only, with autoplay on, each behind its own switch
-//! (`monitor.quick_confirm`, `monitor.riichi_auto_win`).
+//! (`monitor.quick_confirm`, `monitor.riichi_auto_win`, and
+//! `monitor.auto_continue`, the level of autoplay that plays game after game).
+//! An act that is not wanted when it comes due is dropped, and what would
+//! have followed it with it: switching game after game off during a game
+//! leaves its end to the player.
 
 use super::AutoplayManager;
 use crate::autoplay::acts::Act;
@@ -11,7 +16,7 @@ use crate::autoplay::cdp_input::user_active;
 use crate::autoplay::context::CanvasRect;
 use crate::autoplay::humanize;
 use crate::autoplay::majsoul::{coords, reach_of};
-use crate::autoplay::pixels::{self, Glyph, Sight};
+use crate::autoplay::pixels::{self, Glyph, Image, Sight};
 use crate::autoplay::pointer::{aim, spots, Touch};
 use crate::config::Platform;
 use std::time::{Duration, Instant};
@@ -30,6 +35,7 @@ impl AutoplayManager {
             let wanted = match act {
                 Act::Look | Act::Burst(_) => on && cfg.monitor.quick_confirm,
                 Act::AutoWinOn => on && cfg.monitor.riichi_auto_win,
+                Act::EndLook | Act::EndPress(_) => on && cfg.monitor.auto_continue,
             };
             let majsoul = &cfg.autoplay.majsoul;
             (wanted, majsoul.hover_delay_ms, majsoul.click_hold_ms)
@@ -39,13 +45,19 @@ impl AutoplayManager {
         }
         // A look moves nothing: it goes ahead whatever the user's hand does.
         if act == Act::Look {
-            let sight = self.look_at_result().await;
+            let sight = self.look_at("result", pixels::result_sight).await;
             self.acts.looked(
                 sight,
                 Instant::now(),
                 self.ctx.input_watch.confirmed(),
                 &mut rand::rng(),
             );
+            return;
+        }
+        if act == Act::EndLook {
+            let sight = self.look_at("game's end", pixels::end_sight).await;
+            self.acts
+                .end_looked(sight, Instant::now(), &mut rand::rng());
             return;
         }
         // The user's hand is on the mouse; and switching auto-win on can wait
@@ -64,14 +76,16 @@ impl AutoplayManager {
         match act {
             Act::Burst(presses) => self.press_through(presses, hover_ms, hold_ms).await,
             Act::AutoWinOn => self.switch_auto_win_on(hover_ms, hold_ms).await,
-            Act::Look => {}
+            Act::EndPress(sight) => self.press_end(sight, hover_ms, hold_ms).await,
+            Act::Look | Act::EndLook => {}
         }
     }
 
-    /// What the screen shows of a hand's result: its confirm button, the
-    /// yellow one of the game's own screens after its last result, or
-    /// neither yet.
-    async fn look_at_result(&mut self) -> Sight {
+    /// What the screen shows, read by `read`: of a hand's result, its
+    /// confirm button, the yellow one of the game's own screens after its
+    /// last result, or neither yet ([`pixels::result_sight`]); of the game's
+    /// end, which of its own screens ([`pixels::end_sight`]).
+    async fn look_at(&mut self, what: &str, read: fn(&Image, f64, CanvasRect) -> Sight) -> Sight {
         let Some(rect) = self.canvas.resolve(&self.ctx).await else {
             return Sight::Unread;
         };
@@ -80,17 +94,43 @@ impl AutoplayManager {
             return Sight::Unread;
         };
         let sight = match pixels::shot(page).await {
-            Ok((image, scale)) => pixels::result_sight(&image, scale, rect),
+            Ok((image, scale)) => read(&image, scale, rect),
             Err(e) => {
-                warn!("autoplay: reading the result's screen failed: {e:#}");
+                warn!("autoplay: reading the {what}'s screen failed: {e:#}");
                 Sight::Unread
             }
         };
         match sight {
-            Sight::Nothing => debug!("autoplay: a look at the result: no button yet"),
-            sight => info!("autoplay: a look at the result: {sight:?}"),
+            Sight::Nothing => debug!("autoplay: a look at the {what}: no button yet"),
+            sight => info!("autoplay: a look at the {what}: {sight:?}"),
         }
         sight
+    }
+
+    /// One press on the game's own screen showing `sight`: its yellow
+    /// confirm, or "play again" beside it.
+    async fn press_end(&mut self, sight: Sight, hover_ms: u32, hold_ms: u32) {
+        let (target, what) = match sight {
+            Sight::Rematch => (coords::REMATCH, "play again"),
+            _ => (coords::GAME_CONFIRM, "the game's confirm"),
+        };
+        if let Some(rect) = self.canvas.resolve(&self.ctx).await {
+            let at = aim::again(target, reach_of(target), &mut rand::rng());
+            let touch = Touch {
+                hover_ms,
+                hold_ms,
+                jiggle: false,
+            };
+            if self
+                .hand
+                .press("game's end", rect.pixel(at.0, at.1), rect, touch)
+                .await
+            {
+                info!("autoplay: pressed {what}");
+            }
+        }
+        self.acts
+            .end_pressed(sight, Instant::now(), &mut rand::rng());
     }
 
     /// One burst of `presses` at the result's confirm button: the first

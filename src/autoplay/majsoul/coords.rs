@@ -59,6 +59,19 @@ pub const CONFIRM: (f64, f64) = (14.59, 8.37);
 /// screens at 2560x1440 (2026-10-16).
 pub const CONFIRM_FACE: (f64, f64, f64, f64) = (13.95, 8.13, 15.25, 8.59);
 
+/// The yellow confirm of the game's own screens after its last result — the
+/// standings, the rank, then the room's rewards — about where a hand's
+/// confirm is, a little higher. Its face is read in [`CONFIRM_FACE`].
+/// Measured on the client's end screens at 2560x1440 (2026-10-17): 13.49 to
+/// 15.57 across, 7.94 to 8.56 down.
+pub const GAME_CONFIRM: (f64, f64) = (14.53, 8.25);
+/// "Play again" (再来一场), blue with gold words like a hand's confirm, left
+/// of the yellow confirm on the last of those screens. Measured as above:
+/// 11.13 to 13.21 across, 7.94 to 8.53 down.
+pub const REMATCH: (f64, f64) = (12.17, 8.23);
+/// Its face, inside its rounded edge, as (left, top, right, bottom).
+pub const REMATCH_FACE: (f64, f64, f64, f64) = (11.30, 8.02, 13.05, 8.46);
+
 /// The client's own toggles down the left of the table, top to bottom: auto
 /// sort, auto win, no calls, auto tsumogiri. Each is a glyph, green while on.
 /// Measured on the client's table (2026-10-15).

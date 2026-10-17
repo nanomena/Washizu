@@ -394,6 +394,29 @@ pub const AUTO_WIN_ON: Hazard = Hazard {
     most: 600_000.0,
 };
 
+/// From a game's end to the first look for its own screens, in ms, when its
+/// last result is not being looked at: the last result plays first.
+pub const END_LOOK_FIRST_MS: u64 = 1500;
+/// Between two looks for the game's own screens while none is in sight, in
+/// ms. They stay until pressed, so there is no hurry.
+pub const END_LOOK_EVERY_MS: u64 = 400;
+/// From one of the game's own screens after its end showing — the
+/// standings, the rank, the room's rewards with "play again" — to the press
+/// on it: a person reads it first, then any moment as likely as the next.
+/// About two and a half seconds on average; nothing counts down there.
+pub const END_SEEN: Hazard = Hazard {
+    floor: 1500.0,
+    mean: 1200.0,
+    most: 8_000.0,
+};
+/// From a press on one of those screens to the look for the next: the next
+/// is drawn first.
+pub const END_PAUSE: Hazard = Hazard {
+    floor: 400.0,
+    mean: 300.0,
+    most: 3_000.0,
+};
+
 /// How many presses a burst has: any number from [`BURST_LEAST`] to
 /// [`BURST_MOST`], each as likely.
 pub fn burst_len<R: Rng + ?Sized>(rng: &mut R) -> u32 {

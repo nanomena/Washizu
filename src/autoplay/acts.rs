@@ -18,9 +18,17 @@
 //!   the client confirms nothing more, so the hand cannot count it gone. Its
 //!   two screens are pressed through all the same, a press at a time. The
 //!   game's own screens that follow, the final standings and then the rank,
-//!   are left to the player: they have a yellow confirm in the same place,
-//!   and the first sight of it ends the presses. Nothing is pressed on a
-//!   clock at the end.
+//!   are not the result's: they have a yellow confirm in the same place, and
+//!   the first sight of it ends the presses. Nothing is pressed on a clock at
+//!   the end.
+//! - **The game's own screens, to play again.** After the game's end the
+//!   hand looks for them: the standings, the rank, then the room's rewards
+//!   with "play again" beside the yellow confirm. Each is read for a while
+//!   (`humanize::END_SEEN`) and pressed once, its yellow confirm, until
+//!   "play again" shows; that is pressed instead, and then only it, until
+//!   it has gone. A screen it does not know is never pressed, nor one that
+//!   cannot be read. The manager makes these only at the level of autoplay
+//!   that plays game after game; below it the player's own.
 //! - **Auto-win after a riichi.** Once our riichi is accepted, the hand may
 //!   switch the client's own auto-win on, at any moment as likely as the next
 //!   (`humanize::AUTO_WIN_ON`): an early riichi, with longer to go, is the
@@ -31,8 +39,9 @@
 //! reads the toggle's colour to know where it stands (`autoplay::pixels`).
 
 use crate::autoplay::humanize::{
-    self, Hazard, AUTO_WIN_ON, CONFIRM_SEEN, CONFIRM_SEEN_MOST_MS, OUR_BUTTON_LINGER,
-    OUR_WIN_LINGER, RESULT_LOOK_EVERY_MS, RESULT_LOOK_FIRST_MS, RESULT_PAUSE, RESULT_START,
+    self, Hazard, AUTO_WIN_ON, CONFIRM_SEEN, CONFIRM_SEEN_MOST_MS, END_LOOK_EVERY_MS,
+    END_LOOK_FIRST_MS, END_PAUSE, END_SEEN, OUR_BUTTON_LINGER, OUR_WIN_LINGER,
+    RESULT_LOOK_EVERY_MS, RESULT_LOOK_FIRST_MS, RESULT_PAUSE, RESULT_START,
 };
 use crate::autoplay::pixels::Sight;
 use rand::Rng;
@@ -45,6 +54,12 @@ const RESULT_MOST: Duration = Duration::from_secs(30);
 /// The longest the game's last result is pressed after the game's end: its
 /// two screens are past by then.
 const LAST_MOST: Duration = Duration::from_secs(45);
+/// The longest the game's own screens are looked for after its end: the
+/// next game is matched well within it.
+const END_MOST: Duration = Duration::from_secs(180);
+/// The most presses on the game's own screens: three or four go by in a
+/// game's end, and one that does not go is left after this.
+const END_PRESSES: u32 = 8;
 
 /// What to do now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +70,11 @@ pub enum Act {
     Burst(u32),
     /// Switch the client's auto-win on.
     AutoWinOn,
+    /// Look at the game's own screens after its end.
+    EndLook,
+    /// Press the button of the game's own screen in sight, once: its yellow
+    /// confirm ([`Sight::Standings`]) or "play again" ([`Sight::Rematch`]).
+    EndPress(Sight),
 }
 
 /// What comes next for a result on screen.
@@ -90,11 +110,37 @@ struct Shown {
     last: bool,
 }
 
+/// What comes next at the game's end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndStep {
+    Look,
+    Press(Sight),
+}
+
+/// The game's own screens after its end.
+#[derive(Debug, Clone, Copy)]
+struct Ending {
+    /// Until when they are looked for at most.
+    until: Instant,
+    /// When the next step goes, and which; `None` while one is under way.
+    next: Option<(Instant, EndStep)>,
+    /// The button the last look saw, if it saw one of theirs.
+    in_sight: Option<Sight>,
+    /// When the button in sight is pressed, if the look then still sees it.
+    press_at: Option<Instant>,
+    /// Presses made on them so far.
+    presses: u32,
+    /// "Play again" has been pressed: nothing else is, and once it has gone
+    /// the game's end is over.
+    again: bool,
+}
+
 /// The acts in hand.
 #[derive(Debug, Default)]
 pub struct Acts {
     result: Option<Shown>,
     win_on_at: Option<Instant>,
+    end: Option<Ending>,
 }
 
 fn after<R: Rng + ?Sized>(now: Instant, wait: Hazard, rng: &mut R) -> Instant {
@@ -174,21 +220,43 @@ impl Acts {
     }
 
     /// The game is over at `now`. Its last result, if one is on screen, is
-    /// still pressed through, up to the game's own screens; nothing else is
-    /// due.
+    /// still pressed through, up to the game's own screens; those are looked
+    /// for after it.
     pub fn game_over(&mut self, now: Instant) {
         self.win_on_at = None;
         if let Some(shown) = &mut self.result {
             shown.last = true;
             shown.until = now + LAST_MOST;
         }
+        self.end = Some(Ending {
+            until: now + END_MOST,
+            next: Some((
+                now + Duration::from_millis(END_LOOK_FIRST_MS),
+                EndStep::Look,
+            )),
+            in_sight: None,
+            press_at: None,
+            presses: 0,
+            again: false,
+        });
+    }
+
+    /// Whether the game's own screens are looked at now: not while the last
+    /// result is (its looks see the first of them, and end it).
+    fn end_turn(&self) -> bool {
+        self.result.is_none_or(|r| r.next.is_none())
     }
 
     /// When [`Self::next`] next has something to do.
     pub fn due(&self) -> Option<Instant> {
+        let end = self
+            .end
+            .filter(|_| self.end_turn())
+            .and_then(|e| e.next.map(|n| n.0));
         [
             self.result.and_then(|r| r.next.map(|n| n.0)),
             self.win_on_at,
+            end,
         ]
         .into_iter()
         .flatten()
@@ -219,6 +287,20 @@ impl Acts {
             self.win_on_at = None;
             return Some(Act::AutoWinOn);
         }
+        if !self.end_turn() {
+            return None;
+        }
+        if let Some(end) = &mut self.end {
+            if now >= end.until {
+                self.end = None;
+            } else if let Some((_, step)) = end.next.filter(|(at, _)| now >= *at) {
+                end.next = None;
+                return Some(match step {
+                    EndStep::Look => Act::EndLook,
+                    EndStep::Press(button) => Act::EndPress(button),
+                });
+            }
+        }
         None
     }
 
@@ -234,10 +316,11 @@ impl Acts {
             self.result = None;
             return;
         };
-        // The yellow button is the game's own, after its last result: its
-        // standings and rank are the player's, so it ends the presses.
+        // The yellow button is the game's own, after its last result: it
+        // ends the result's presses, and the game's own screens are next.
         let sight = match sight {
             Sight::Standings if !shown.last => Sight::Nothing,
+            Sight::Rematch => Sight::Nothing,
             sight => sight,
         };
         let button = (sight == Sight::Button).then_some(sight);
@@ -253,7 +336,7 @@ impl Acts {
         let every = now + Duration::from_millis(RESULT_LOOK_EVERY_MS);
         shown.next = match sight {
             Sight::Standings => None,
-            Sight::Nothing => Some((every, Step::Look)),
+            Sight::Nothing | Sight::Rematch => Some((every, Step::Look)),
             // A button in sight: watched while the reaction lasts, then
             // pressed; one still there after a burst is pressed now.
             Sight::Button => match shown.press_at {
@@ -268,6 +351,54 @@ impl Acts {
             Sight::Unread => Some((shown.blind_at.max(now), Step::Burst)),
         };
         self.result = shown.next.is_some().then_some(shown);
+    }
+
+    /// A look at the game's own screens made at `now` found `sight`. One of
+    /// them in sight is read for a while, then looked at once more, and
+    /// pressed if it is still there; anything else is looked at again in a
+    /// while, and pressed never. After "play again" only it is.
+    pub fn end_looked<R: Rng + ?Sized>(&mut self, sight: Sight, now: Instant, rng: &mut R) {
+        let Some(end) = &mut self.end else {
+            return;
+        };
+        let button = match sight {
+            Sight::Rematch => Some(sight),
+            Sight::Standings if !end.again => Some(sight),
+            _ => None,
+        };
+        if end.again && button.is_none() {
+            // "Play again" has gone: the room is matching the next game.
+            self.end = None;
+            return;
+        }
+        if button != end.in_sight {
+            end.in_sight = button;
+            end.press_at = button.map(|_| after(now, END_SEEN, rng));
+        }
+        let every = now + Duration::from_millis(END_LOOK_EVERY_MS);
+        end.next = Some(match (button, end.press_at) {
+            (Some(button), Some(at)) if now >= at => (now, EndStep::Press(button)),
+            (Some(_), Some(at)) => (at, EndStep::Look),
+            _ => (every, EndStep::Look),
+        });
+    }
+
+    /// A press on the game's own screen showing `sight` is over at `now`:
+    /// the next screen, or the same one if the press did not take, is looked
+    /// for after a pause, and read afresh.
+    pub fn end_pressed<R: Rng + ?Sized>(&mut self, sight: Sight, now: Instant, rng: &mut R) {
+        let Some(end) = &mut self.end else {
+            return;
+        };
+        end.presses += 1;
+        if end.presses >= END_PRESSES {
+            self.end = None;
+            return;
+        }
+        end.again |= sight == Sight::Rematch;
+        end.in_sight = None;
+        end.press_at = None;
+        end.next = Some((after(now, END_PAUSE, rng), EndStep::Look));
     }
 
     /// Whether the result a burst is pressing is still up.
@@ -296,6 +427,11 @@ impl Acts {
                 }
             }
             Act::AutoWinOn => self.win_on_at = Some(at),
+            Act::EndLook | Act::EndPress(_) => {
+                if let Some(end) = &mut self.end {
+                    end.next = Some((at, EndStep::Look));
+                }
+            }
         }
     }
 }
@@ -479,7 +615,7 @@ mod tests {
                     (bursts, last) = (bursts + 1, at);
                     acts.burst_done(at, 0, &mut rng);
                 }
-                Act::AutoWinOn => unreachable!(),
+                Act::AutoWinOn | Act::EndLook | Act::EndPress(_) => unreachable!(),
             }
         }
         assert!(bursts >= 1);
@@ -512,12 +648,15 @@ mod tests {
             let (look, _) = step(&mut acts, 7, &mut rng).unwrap();
             acts.looked(Sight::Nothing, look, 7, &mut rng);
         }
-        // The standings: not pressed, and nothing more is.
+        // The standings: not the result's to press; the game's own screens are next.
         let (look, act) = step(&mut acts, 7, &mut rng).unwrap();
         assert_eq!(act, Act::Look);
         acts.looked(Sight::Standings, look, 7, &mut rng);
-        assert_eq!(acts.due(), None);
         assert!(!acts.result_up(7));
+        assert_eq!(
+            step(&mut acts, 7, &mut rng).map(|s| s.1),
+            Some(Act::EndLook)
+        );
     }
 
     /// The yellow button belongs to the game's end: in a hand's result it is
@@ -545,32 +684,177 @@ mod tests {
         acts.game_over(t0);
         let (at, _) = step(&mut acts, 0, &mut rng).unwrap();
         acts.looked(Sight::Unread, at, 0, &mut rng);
-        assert_eq!(acts.due(), None);
+        assert!(acts.result.is_none(), "not pressed blind");
 
         let mut acts = Acts::default();
         acts.result_shown(0, false, t0, &mut rng);
         acts.game_over(t0);
         let (at, _) = step(&mut acts, 0, &mut rng).unwrap();
         acts.looked(Sight::Nothing, at, 0, &mut rng);
-        assert_eq!(acts.next(t0 + LAST_MOST, 0, &mut rng), None);
-        assert_eq!(acts.due(), None);
+        let late = acts.next(t0 + LAST_MOST, 0, &mut rng);
+        assert!(!matches!(late, Some(Act::Look | Act::Burst(_))), "{late:?}");
+        assert!(acts.result.is_none());
     }
 
-    /// A game that ends with no result on screen leaves nothing to press, and
-    /// a new hand or game clears what was due.
+    /// A game that ends with no result on screen leaves nothing of its
+    /// hands to press, only its own screens to look for; a new hand or game
+    /// clears what was due.
     #[test]
-    fn nothing_is_pressed_after_the_end_without_a_result() {
+    fn nothing_but_the_end_s_screens_after_the_end_without_a_result() {
         let mut rng = StdRng::seed_from_u64(8);
         let t0 = Instant::now();
         let mut acts = Acts::default();
         acts.riichi_accepted(t0, &mut rng);
         acts.game_over(t0);
-        assert_eq!(acts.due(), None);
+        assert_eq!(acts.due(), Some(ms(t0, END_LOOK_FIRST_MS)));
+        assert_eq!(acts.next(ms(t0, 60_000), 0, &mut rng), Some(Act::EndLook));
         acts.result_shown(0, false, t0, &mut rng);
         acts.game_over(t0);
         acts.hand_over();
         assert_eq!(acts.due(), None);
         assert_eq!(acts.next(ms(t0, 5000), 0, &mut rng), None);
+    }
+
+    /// Steps the game's end to its next press, every look seeing `sight`;
+    /// returns when it is pressed.
+    fn end_until_press(acts: &mut Acts, sight: Sight, rng: &mut StdRng) -> Instant {
+        loop {
+            let (at, act) = step(acts, 0, rng).expect("something due");
+            match act {
+                Act::EndLook => acts.end_looked(sight, at, rng),
+                Act::EndPress(button) => {
+                    assert_eq!(button, sight);
+                    return at;
+                }
+                act => panic!("not an act of the end: {act:?}"),
+            }
+        }
+    }
+
+    /// The game's own screens are pressed through, each once after it has
+    /// been read, the yellow confirm until "play again" shows; "play again"
+    /// is pressed, and once it has gone the end is over.
+    #[test]
+    fn the_game_s_screens_are_pressed_through_to_play_again() {
+        let mut rng = StdRng::seed_from_u64(21);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.game_over(t0);
+        let mut since = t0;
+        for sight in [Sight::Standings, Sight::Standings, Sight::Rematch] {
+            // The screen is drawn first.
+            let (look, act) = step(&mut acts, 0, &mut rng).unwrap();
+            assert_eq!(act, Act::EndLook);
+            acts.end_looked(Sight::Nothing, look, &mut rng);
+            let (seen, _) = step(&mut acts, 0, &mut rng).unwrap();
+            assert_eq!(seen, look + Duration::from_millis(END_LOOK_EVERY_MS));
+            acts.end_looked(sight, seen, &mut rng);
+            let pressed = end_until_press(&mut acts, sight, &mut rng);
+            assert!(
+                pressed >= seen + Duration::from_millis(END_SEEN.floor as u64),
+                "read first"
+            );
+            assert!(pressed > since);
+            since = pressed;
+            acts.end_pressed(sight, pressed, &mut rng);
+        }
+        // "Play again" has gone: nothing more.
+        let (look, act) = step(&mut acts, 0, &mut rng).unwrap();
+        assert_eq!(act, Act::EndLook);
+        assert!(look >= since + Duration::from_millis(END_PAUSE.floor as u64));
+        acts.end_looked(Sight::Nothing, look, &mut rng);
+        assert_eq!(acts.due(), None);
+    }
+
+    /// After "play again" only it is pressed again (the press did not take);
+    /// a yellow confirm then is something else, and ends the presses.
+    #[test]
+    fn after_play_again_only_play_again_is_pressed() {
+        let mut rng = StdRng::seed_from_u64(22);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.game_over(t0);
+        let (look, _) = step(&mut acts, 0, &mut rng).unwrap();
+        acts.end_looked(Sight::Rematch, look, &mut rng);
+        let pressed = end_until_press(&mut acts, Sight::Rematch, &mut rng);
+        acts.end_pressed(Sight::Rematch, pressed, &mut rng);
+        let again = end_until_press(&mut acts, Sight::Rematch, &mut rng);
+        acts.end_pressed(Sight::Rematch, again, &mut rng);
+        let (look, _) = step(&mut acts, 0, &mut rng).unwrap();
+        acts.end_looked(Sight::Standings, look, &mut rng);
+        assert_eq!(acts.due(), None);
+    }
+
+    /// A screen of the game's own that is gone by the look before the press
+    /// is not pressed; nothing unknown is ever pressed, nor anything after
+    /// a few minutes or a few presses.
+    #[test]
+    fn nothing_unknown_or_gone_is_pressed_at_the_end() {
+        let mut rng = StdRng::seed_from_u64(23);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.game_over(t0);
+        let (look, _) = step(&mut acts, 0, &mut rng).unwrap();
+        acts.end_looked(Sight::Standings, look, &mut rng);
+        let (again, act) = step(&mut acts, 0, &mut rng).unwrap();
+        assert_eq!(act, Act::EndLook);
+        acts.end_looked(Sight::Nothing, again, &mut rng);
+        // Unknown, unreadable, or a hand's blue confirm: looked at, never pressed.
+        let mut at = again;
+        for sight in [Sight::Button, Sight::Unread, Sight::Nothing]
+            .into_iter()
+            .cycle()
+        {
+            let Some((next, act)) = step(&mut acts, 0, &mut rng) else {
+                break;
+            };
+            assert_eq!(act, Act::EndLook);
+            at = next;
+            acts.end_looked(sight, at, &mut rng);
+        }
+        assert!(
+            at < t0 + END_MOST && at + Duration::from_millis(END_LOOK_EVERY_MS) >= t0 + END_MOST
+        );
+
+        // A yellow confirm that never goes is pressed a few times, then left.
+        let mut acts = Acts::default();
+        acts.game_over(t0);
+        let mut presses = 0;
+        while let Some((at, act)) = step(&mut acts, 0, &mut rng) {
+            match act {
+                Act::EndLook => acts.end_looked(Sight::Standings, at, &mut rng),
+                Act::EndPress(sight) => {
+                    presses += 1;
+                    acts.end_pressed(sight, at, &mut rng);
+                }
+                act => panic!("{act:?}"),
+            }
+        }
+        assert_eq!(presses, END_PRESSES);
+    }
+
+    /// The game's last result is looked at first; the game's own screens
+    /// only once its looks have seen the first of them.
+    #[test]
+    fn the_last_result_comes_before_the_game_s_screens() {
+        let mut rng = StdRng::seed_from_u64(24);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.result_shown(3, false, t0, &mut rng);
+        acts.game_over(ms(t0, 2));
+        let (look, act) = step(&mut acts, 3, &mut rng).unwrap();
+        assert_eq!(act, Act::Look, "the result's look");
+        acts.looked(Sight::Nothing, look, 3, &mut rng);
+        let (look, act) = step(&mut acts, 3, &mut rng).unwrap();
+        assert_eq!(
+            act,
+            Act::Look,
+            "still the result's, though the end's first look is past due"
+        );
+        acts.looked(Sight::Standings, look, 3, &mut rng);
+        assert!(!acts.result_up(3));
+        let (at, act) = step(&mut acts, 3, &mut rng).unwrap();
+        assert_eq!((at, act), (ms(t0, 2 + END_LOOK_FIRST_MS), Act::EndLook));
     }
 
     /// A riichi has auto-win switched on at some moment after it, once.
