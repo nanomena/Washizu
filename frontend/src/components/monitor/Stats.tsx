@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { invoke } from '@/lib/host'
 import { ROOMS, ROOM_NAME, figuresOf, roomOf, totalsOf, yakuName, type GameRecord, type Room } from '@/lib/history'
 import { rungOf, type AccountLevels } from '@/lib/ladder'
@@ -42,24 +42,36 @@ function Ladder({ account, players }: { account: AccountLevels | null; players: 
  *  whatever is in them: where we stand now, rank points and placement; the
  *  figures a riichi player looks for first; and the yaku our wins were made
  *  of. The last two scroll. It opens on the room we play in now, the latest
- *  game's; another range picked holds while the tab is open. `refresh`
- *  changes when the record may have: a game has started or ended. Where we
- *  stand is the platform's word (`account`), the same whatever range is picked. */
-export function Statistics({ refresh, account }: { refresh: string; account: AccountLevels | null }) {
-  const [records, setRecords] = useState<GameRecord[] | null>(null)
+ *  game's; another range picked holds while the tab is open.
+ *
+ *  Where we stand is the platform's word (`account`), the same whatever range
+ *  is picked; the rest is the games on file. The two are taken together, at
+ *  one moment, so that they never disagree: when the platform says where we
+ *  stand — at login, and some twenty seconds after each game, by when that
+ *  game is on file. Where the platform says nothing of ranks, the games are
+ *  read again when one starts or ends (`game`). */
+export function Statistics({ game, account }: { game: string; account: AccountLevels | null }) {
+  const [loaded, setLoaded] = useState<{ records: GameRecord[]; account: AccountLevels | null } | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
   const [picked, setPicked] = useState<Room | 'all' | null>(null)
+  // The account as it stands when the games read come back: kept after each render, read in the effect.
+  const latestAccount = useRef(account)
+  useEffect(() => { latestAccount.current = account })
+  const said = account?.at ?? null
+  const moment = said ?? game
   useEffect(() => {
     let live = true
     const read = () => invoke<GameRecord[]>('get_history').then(
-      found => { if (live) { setRecords(found); setFailed(null) } },
+      found => { if (live) { setLoaded({ records: found, account: latestAccount.current }); setFailed(null) } },
       e => { if (live) setFailed(String(e)) },
     )
     void read()
-    // A game that has just ended is written a moment after its last event.
-    const again = setTimeout(() => void read(), 1500)
+    // A game that has just ended is written a moment after its last event; by
+    // the time the platform says where we stand it has long been.
+    const again = said == null ? setTimeout(() => void read(), 1500) : undefined
     return () => { live = false; clearTimeout(again) }
-  }, [refresh])
+  }, [moment, said])
+  const records = loaded?.records ?? null
 
   const rooms = useMemo(() => ROOMS.filter(key => (records ?? []).some(r => roomOf(r) === key)), [records])
   // The core lists the games oldest first.
@@ -73,7 +85,7 @@ export function Statistics({ refresh, account }: { refresh: string; account: Acc
   return <div className="md-page mstats">
     <section className="mstat mstat-rank" aria-label={tr('段位分与顺位')}>
       <header className="msec-head">
-        <Ladder account={account} players={latest?.num_players ?? 4} />
+        <Ladder account={loaded?.account ?? null} players={latest?.num_players ?? 4} />
         <select className="mselect" aria-label={tr('统计范围')} value={room} onChange={e => setPicked(e.target.value as Room | 'all')}>
           <option value="all">{tr('全部场次')}</option>
           {rooms.map(key => <option key={key} value={key}>{ROOM_NAME[key]}</option>)}
