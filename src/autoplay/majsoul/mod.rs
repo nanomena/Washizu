@@ -463,13 +463,6 @@ pub fn reach_of(at: (f64, f64)) -> crate::autoplay::pointer::aim::Reach {
             half_y: 0.18,
             from_top: false,
         }
-    } else if is(&[coords::END_TAP]) {
-        // The round's display in the middle of the table, about 2 by 1.
-        Reach {
-            half_x: 0.5,
-            half_y: 0.12,
-            from_top: false,
-        }
     } else if is(&[coords::REMATCH_ASK_CONFIRM]) {
         // About 2.55 wide and 0.6 high.
         Reach {

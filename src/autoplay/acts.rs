@@ -28,9 +28,10 @@
 //!   "play again" shows; that is pressed instead. Whatever shows between
 //!   the confirms and "play again" without a button the hand knows — the
 //!   rewards of a room's chest whose bar has filled, which a press anywhere
-//!   puts away, or a screen still being drawn — is tapped through in bursts
-//!   in the middle of the table, from a moment after a confirm until "play
-//!   again" shows. "Play again" asks whether
+//!   puts away, or a screen still being drawn — is tapped through where
+//!   "play again" comes, a tap at a time after a look, from a moment after
+//!   a confirm until "play again" shows (a tap may press it as it comes).
+//!   "Play again" asks whether
 //!   to match another game, a moment after; that question is answered
 //!   (`humanize::ASK_SEEN`), its confirm, and the room matches the next game.
 //!   After "play again" only it and its question are pressed. A screen it
@@ -67,9 +68,9 @@ const END_MOST: Duration = Duration::from_secs(180);
 /// The most presses on the game's own screens: four or five go by in a
 /// game's end, and one that does not go is left after this.
 const END_PRESSES: u32 = 8;
-/// The most bursts of taps at a game's end: a screen that does not go is
-/// left after them.
-const END_TAPS: u32 = 12;
+/// The most taps at a game's end: a screen that does not go is left after
+/// them.
+const END_TAPS: u32 = 20;
 /// How long after "play again" its question is waited for: it comes with a
 /// little animation, and a look may fall before it.
 const ASK_WAIT: Duration = Duration::from_secs(5);
@@ -89,9 +90,9 @@ pub enum Act {
     /// confirm ([`Sight::Standings`]), "play again" ([`Sight::Rematch`]), or
     /// the confirm of the question that asks ([`Sight::RematchAsk`]).
     EndPress(Sight),
-    /// Tap the middle of the table this many times: whatever shows between
-    /// the game's confirms and "play again" without a button the hand knows.
-    EndTap(u32),
+    /// Tap once where "play again" comes: whatever shows between the game's
+    /// confirms and "play again" without a button the hand knows.
+    EndTap,
 }
 
 /// What comes next for a result on screen.
@@ -156,7 +157,7 @@ struct Ending {
     /// When a yellow confirm was last pressed: from a moment after it, until
     /// "play again", what shows without a button is tapped through.
     confirmed_at: Option<Instant>,
-    /// Bursts of taps made so far.
+    /// Taps made so far.
     taps: u32,
 }
 
@@ -326,7 +327,7 @@ impl Acts {
                 return Some(match step {
                     EndStep::Look => Act::EndLook,
                     EndStep::Press(button) => Act::EndPress(button),
-                    EndStep::Tap => Act::EndTap(humanize::burst_len(rng)),
+                    EndStep::Tap => Act::EndTap,
                 });
             }
         }
@@ -386,7 +387,8 @@ impl Acts {
     /// them in sight is read for a while, then looked at once more, and
     /// pressed if it is still there; anything else is looked at again in a
     /// while, and pressed never. After "play again" only it and its
-    /// question are, the question only then.
+    /// question are; the question only after "play again" was pressed here,
+    /// or tapped where it comes.
     pub fn end_looked<R: Rng + ?Sized>(&mut self, sight: Sight, now: Instant, rng: &mut R) {
         let Some(end) = &mut self.end else {
             return;
@@ -394,7 +396,7 @@ impl Acts {
         let button = match sight {
             Sight::Rematch if !end.asked => Some(sight),
             Sight::Standings if end.again.is_none() => Some(sight),
-            Sight::RematchAsk if end.again.is_some() => Some(sight),
+            Sight::RematchAsk if end.again.is_some() || end.taps > 0 => Some(sight),
             _ => None,
         };
         if let (Some(again), None) = (end.again, button) {
@@ -417,6 +419,7 @@ impl Acts {
         // tapped through, once the next screen has had a moment to be drawn.
         let tap = sight == Sight::Nothing
             && end.again.is_none()
+            && !end.asked
             && end.taps < END_TAPS
             && end
                 .confirmed_at
@@ -430,8 +433,8 @@ impl Acts {
         });
     }
 
-    /// A burst of taps through the game's end is over at `now`: a look after
-    /// a pause says whether another follows.
+    /// A tap through the game's end is over at `now`: a look after a pause
+    /// says whether another follows.
     pub fn end_tapped<R: Rng + ?Sized>(&mut self, now: Instant, rng: &mut R) {
         let Some(end) = &mut self.end else {
             return;
@@ -460,7 +463,11 @@ impl Acts {
         if sight == Sight::Standings {
             end.confirmed_at = Some(now);
         }
-        end.asked |= sight == Sight::RematchAsk;
+        if sight == Sight::RematchAsk {
+            // Asked after a tap pressed "play again": it was pressed here all the same.
+            end.asked = true;
+            end.again.get_or_insert(now);
+        }
         end.in_sight = None;
         end.press_at = None;
         end.next = Some((after(now, END_PAUSE, rng), EndStep::Look));
@@ -492,7 +499,7 @@ impl Acts {
                 }
             }
             Act::AutoWinOn => self.win_on_at = Some(at),
-            Act::EndLook | Act::EndPress(_) | Act::EndTap(_) => {
+            Act::EndLook | Act::EndPress(_) | Act::EndTap => {
                 if let Some(end) = &mut self.end {
                     end.next = Some((at, EndStep::Look));
                 }
@@ -680,9 +687,7 @@ mod tests {
                     (bursts, last) = (bursts + 1, at);
                     acts.burst_done(at, 0, &mut rng);
                 }
-                Act::AutoWinOn | Act::EndLook | Act::EndPress(_) | Act::EndTap(_) => {
-                    unreachable!()
-                }
+                Act::AutoWinOn | Act::EndLook | Act::EndPress(_) | Act::EndTap => unreachable!(),
             }
         }
         assert!(bursts >= 1);
@@ -857,8 +862,9 @@ mod tests {
 
     /// Between the game's confirms and "play again", what shows without a
     /// button the hand knows (the rewards of a filled chest) is tapped
-    /// through in bursts, from a moment after the confirm; once "play again"
-    /// shows it is pressed as ever, and after it nothing is tapped.
+    /// through, a tap after each look, from a moment after the confirm; once
+    /// "play again" shows it is pressed as ever, and after it nothing is
+    /// tapped.
     #[test]
     fn what_shows_before_play_again_is_tapped_through() {
         let mut rng = StdRng::seed_from_u64(26);
@@ -874,10 +880,7 @@ mod tests {
             let (at, act) = step(&mut acts, 0, &mut rng).unwrap();
             match act {
                 Act::EndLook => acts.end_looked(Sight::Nothing, at, &mut rng),
-                Act::EndTap(n) => {
-                    assert!((humanize::BURST_LEAST..=humanize::BURST_MOST).contains(&n));
-                    break at;
-                }
+                Act::EndTap => break at,
                 act => panic!("{act:?}"),
             }
         };
@@ -889,7 +892,7 @@ mod tests {
         assert!(look >= first + Duration::from_millis(RESULT_PAUSE.floor as u64));
         acts.end_looked(Sight::Nothing, look, &mut rng);
         let (again, act) = step(&mut acts, 0, &mut rng).unwrap();
-        assert!(matches!(act, Act::EndTap(_)));
+        assert_eq!(act, Act::EndTap);
         assert_eq!(again, look);
         acts.end_tapped(again, &mut rng);
         // Gone: "play again", pressed as ever; after it, a blank look is not tapped.
@@ -903,7 +906,38 @@ mod tests {
         }
     }
 
-    /// A screen that never goes is tapped a dozen times, then only looked at.
+    /// A tap may press "play again" as it comes: its question is answered
+    /// all the same, and nothing is tapped after.
+    #[test]
+    fn a_tap_that_pressed_play_again_has_its_question_answered() {
+        let mut rng = StdRng::seed_from_u64(28);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.game_over(t0);
+        let (look, _) = step(&mut acts, 0, &mut rng).unwrap();
+        acts.end_looked(Sight::Standings, look, &mut rng);
+        let confirmed = end_until_press(&mut acts, Sight::Standings, &mut rng);
+        acts.end_pressed(Sight::Standings, confirmed, &mut rng);
+        let tapped = loop {
+            let (at, act) = step(&mut acts, 0, &mut rng).unwrap();
+            match act {
+                Act::EndLook => acts.end_looked(Sight::Nothing, at, &mut rng),
+                Act::EndTap => break at,
+                act => panic!("{act:?}"),
+            }
+        };
+        acts.end_tapped(tapped, &mut rng);
+        let (look, _) = step(&mut acts, 0, &mut rng).unwrap();
+        acts.end_looked(Sight::RematchAsk, look, &mut rng);
+        let answered = end_until_press(&mut acts, Sight::RematchAsk, &mut rng);
+        acts.end_pressed(Sight::RematchAsk, answered, &mut rng);
+        let (look, act) = step(&mut acts, 0, &mut rng).unwrap();
+        assert_eq!(act, Act::EndLook);
+        acts.end_looked(Sight::Nothing, look, &mut rng);
+        assert_eq!(acts.due(), None, "matching: nothing more, nothing tapped");
+    }
+
+    /// A screen that never goes is tapped a score of times, then only looked at.
     #[test]
     fn taps_at_the_end_are_few() {
         let mut rng = StdRng::seed_from_u64(27);
@@ -918,7 +952,7 @@ mod tests {
         while let Some((at, act)) = step(&mut acts, 0, &mut rng) {
             match act {
                 Act::EndLook => acts.end_looked(Sight::Nothing, at, &mut rng),
-                Act::EndTap(_) => {
+                Act::EndTap => {
                     bursts += 1;
                     acts.end_tapped(at, &mut rng);
                 }

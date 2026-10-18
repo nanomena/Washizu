@@ -35,7 +35,7 @@ impl AutoplayManager {
             let wanted = match act {
                 Act::Look | Act::Burst(_) => on && cfg.monitor.quick_confirm,
                 Act::AutoWinOn => on && cfg.monitor.riichi_auto_win,
-                Act::EndLook | Act::EndPress(_) | Act::EndTap(_) => on && cfg.monitor.auto_continue,
+                Act::EndLook | Act::EndPress(_) | Act::EndTap => on && cfg.monitor.auto_continue,
             };
             let majsoul = &cfg.autoplay.majsoul;
             (wanted, majsoul.hover_delay_ms, majsoul.click_hold_ms)
@@ -77,7 +77,7 @@ impl AutoplayManager {
             Act::Burst(presses) => self.press_through(presses, hover_ms, hold_ms).await,
             Act::AutoWinOn => self.switch_auto_win_on(hover_ms, hold_ms).await,
             Act::EndPress(sight) => self.press_end(sight, hover_ms, hold_ms).await,
-            Act::EndTap(taps) => self.tap_end(taps, hover_ms, hold_ms).await,
+            Act::EndTap => self.tap_end(hover_ms, hold_ms).await,
             Act::Look | Act::EndLook => {}
         }
     }
@@ -244,52 +244,24 @@ impl AutoplayManager {
         self.hand.rest(rect);
     }
 
-    /// A burst of `taps` in the middle of the table, through what shows
-    /// between the game's confirms and "play again": the first as any press
-    /// between decisions, the rest quick and on the spot, as a burst on a
-    /// result's confirm. Only the user's hand on the mouse stops it.
-    async fn tap_end(&mut self, taps: u32, hover_ms: u32, hold_ms: u32) {
+    /// One tap where "play again" comes, through what shows between the
+    /// game's confirms and it: the rewards of a filled chest go at a press
+    /// anywhere, and "play again" itself may be there by now.
+    async fn tap_end(&mut self, hover_ms: u32, hold_ms: u32) {
         if let Some(rect) = self.canvas.resolve(&self.ctx).await {
-            let reach = reach_of(coords::END_TAP);
-            let mut at = aim::again(coords::END_TAP, reach, &mut rand::rng());
-            for tap in 0..taps {
-                if tap > 0 {
-                    let gap = humanize::BURST_GAP.draw_ms(&mut rand::rng());
-                    tokio::time::sleep(Duration::from_millis(u64::from(gap))).await;
-                    at = spots::nudge(
-                        at,
-                        coords::END_TAP,
-                        reach,
-                        humanize::TAP_DRIFT_X,
-                        humanize::TAP_DRIFT_Y,
-                        &mut rand::rng(),
-                    );
-                }
-                if user_active() {
-                    break;
-                }
-                let touch = if tap == 0 {
-                    Touch {
-                        hover_ms,
-                        hold_ms,
-                        jiggle: false,
-                    }
-                } else {
-                    Touch {
-                        hover_ms: 0,
-                        hold_ms: humanize::TAP_HOLD_MS,
-                        jiggle: false,
-                    }
-                };
-                if !self
-                    .hand
-                    .press("game's end", rect.pixel(at.0, at.1), rect, touch)
-                    .await
-                {
-                    break;
-                }
+            let at = aim::again(coords::REMATCH, reach_of(coords::REMATCH), &mut rand::rng());
+            let touch = Touch {
+                hover_ms,
+                hold_ms,
+                jiggle: false,
+            };
+            if self
+                .hand
+                .press("game's end", rect.pixel(at.0, at.1), rect, touch)
+                .await
+            {
+                info!("autoplay: tapped where play again comes");
             }
-            info!("autoplay: tapped through the game's end, a burst of {taps}");
         }
         self.acts.end_tapped(Instant::now(), &mut rand::rng());
     }

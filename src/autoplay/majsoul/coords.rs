@@ -77,12 +77,6 @@ pub const REMATCH_FACE: (f64, f64, f64, f64) = (11.30, 8.02, 13.05, 8.46);
 /// with "play again" behind the veil as the rule: the confirm 5.18 to 7.73
 /// across, the cancel 8.16 to 10.73, both 6.28 to 6.89 down.
 pub const REMATCH_ASK_CONFIRM: (f64, f64) = (6.46, 6.59);
-/// Where the hand taps through what shows between the game's confirms and
-/// "play again" — the rewards of a room's chest whose bar has filled (a
-/// band across the view that a press anywhere puts away), a screen still
-/// being drawn: the middle of the table, the round's display on the rank and
-/// rewards screens, where a press opens nothing.
-pub const END_TAP: (f64, f64) = (8.0, 3.0);
 /// The two buttons' faces, as (left, top, right, bottom).
 pub const REMATCH_ASK_CONFIRM_FACE: (f64, f64, f64, f64) = (5.45, 6.38, 7.45, 6.80);
 pub const REMATCH_ASK_CANCEL_FACE: (f64, f64, f64, f64) = (8.36, 6.38, 10.53, 6.80);
