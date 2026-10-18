@@ -25,7 +25,9 @@
 //!   hand looks for them: the standings, the rank, then the room's rewards
 //!   with "play again" beside the yellow confirm. Each is read for a while
 //!   (`humanize::END_SEEN`) and pressed once, its yellow confirm, until
-//!   "play again" shows; that is pressed instead. "Play again" asks whether
+//!   "play again" shows; that is pressed instead. A room's chest whose bar
+//!   fills gives its rewards on a band over the last screen first; it is
+//!   read the same and pressed away. "Play again" asks whether
 //!   to match another game, a moment after; that question is answered
 //!   (`humanize::ASK_SEEN`), its confirm, and the room matches the next game.
 //!   After "play again" only it and its question are pressed. A screen it
@@ -329,7 +331,7 @@ impl Acts {
         // ends the result's presses, and the game's own screens are next.
         let sight = match sight {
             Sight::Standings if !shown.last => Sight::Nothing,
-            Sight::Rematch | Sight::RematchAsk => Sight::Nothing,
+            Sight::Rematch | Sight::RematchAsk | Sight::Reward => Sight::Nothing,
             sight => sight,
         };
         let button = (sight == Sight::Button).then_some(sight);
@@ -345,7 +347,9 @@ impl Acts {
         let every = now + Duration::from_millis(RESULT_LOOK_EVERY_MS);
         shown.next = match sight {
             Sight::Standings => None,
-            Sight::Nothing | Sight::Rematch | Sight::RematchAsk => Some((every, Step::Look)),
+            Sight::Nothing | Sight::Rematch | Sight::RematchAsk | Sight::Reward => {
+                Some((every, Step::Look))
+            }
             // A button in sight: watched while the reaction lasts, then
             // pressed; one still there after a burst is pressed now.
             Sight::Button => match shown.press_at {
@@ -373,7 +377,7 @@ impl Acts {
         };
         let button = match sight {
             Sight::Rematch if !end.asked => Some(sight),
-            Sight::Standings if end.again.is_none() => Some(sight),
+            Sight::Standings | Sight::Reward if end.again.is_none() => Some(sight),
             Sight::RematchAsk if end.again.is_some() => Some(sight),
             _ => None,
         };
@@ -762,7 +766,12 @@ mod tests {
         let mut acts = Acts::default();
         acts.game_over(t0);
         let mut since = t0;
-        for sight in [Sight::Standings, Sight::Standings, Sight::Rematch] {
+        for sight in [
+            Sight::Standings,
+            Sight::Standings,
+            Sight::Reward,
+            Sight::Rematch,
+        ] {
             // The screen is drawn first.
             let (look, act) = step(&mut acts, 0, &mut rng).unwrap();
             assert_eq!(act, Act::EndLook);
@@ -819,7 +828,15 @@ mod tests {
         while let Some((at, act)) = step(&mut acts, 0, &mut rng) {
             assert_eq!(act, Act::EndLook, "nothing pressed");
             last = at;
-            acts.end_looked(Sight::Standings, at, &mut rng);
+            acts.end_looked(
+                if at.duration_since(again).as_millis() % 2 == 0 {
+                    Sight::Standings
+                } else {
+                    Sight::Reward
+                },
+                at,
+                &mut rng,
+            );
         }
         assert!(last >= again + ASK_WAIT && last < again + ASK_WAIT + Duration::from_secs(4));
     }

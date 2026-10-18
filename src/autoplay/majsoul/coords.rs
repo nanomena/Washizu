@@ -77,6 +77,18 @@ pub const REMATCH_FACE: (f64, f64, f64, f64) = (11.30, 8.02, 13.05, 8.46);
 /// with "play again" behind the veil as the rule: the confirm 5.18 to 7.73
 /// across, the cancel 8.16 to 10.73, both 6.28 to 6.89 down.
 pub const REMATCH_ASK_CONFIRM: (f64, f64) = (6.46, 6.59);
+/// The rewards a room's chest gives when its bar fills, over the last end
+/// screen before "play again" shows: a dark band across the whole view,
+/// edged by thin pale lines, the rewards on it; a press anywhere puts it
+/// away. The band's top and bottom edges, down the view, as measured on a
+/// screenshot of the client's window (2026-10-17) with the chest page's
+/// hearts as the rule; how far either way of them a line is looked for.
+pub const REWARD_LINES: [f64; 2] = [2.76, 6.17];
+pub const REWARD_LINE_HALF: f64 = 0.08;
+/// Where the band is pressed away: its middle, above the rewards' icons
+/// (3.3 down) and below its top edge, over nothing of the table that a
+/// press could open.
+pub const REWARD_AWAY: (f64, f64) = (8.0, 3.0);
 /// The two buttons' faces, as (left, top, right, bottom).
 pub const REMATCH_ASK_CONFIRM_FACE: (f64, f64, f64, f64) = (5.45, 6.38, 7.45, 6.80);
 pub const REMATCH_ASK_CANCEL_FACE: (f64, f64, f64, f64) = (8.36, 6.38, 10.53, 6.80);

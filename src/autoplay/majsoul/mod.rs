@@ -463,6 +463,13 @@ pub fn reach_of(at: (f64, f64)) -> crate::autoplay::pointer::aim::Reach {
             half_y: 0.18,
             from_top: false,
         }
+    } else if is(&[coords::REWARD_AWAY]) {
+        // Between the band's top edge (2.76) and the rewards' icons (3.3).
+        Reach {
+            half_x: 0.6,
+            half_y: 0.08,
+            from_top: false,
+        }
     } else if is(&[coords::REMATCH_ASK_CONFIRM]) {
         // About 2.55 wide and 0.6 high.
         Reach {
@@ -975,6 +982,13 @@ mod tests {
             coords::REMATCH.0 + again.half_x < 13.21
                 && coords::GAME_CONFIRM.0 - again.half_x > 13.49
         );
+        // The rewards' band: a press stays between its top edge and the icons.
+        let away = reach_of(coords::REWARD_AWAY);
+        assert!(
+            coords::REWARD_AWAY.1 - away.half_y
+                > coords::REWARD_LINES[0] + coords::REWARD_LINE_HALF
+        );
+        assert!(coords::REWARD_AWAY.1 + away.half_y < 3.3);
         // The question's confirm: a press stays clear of the cancel beside it.
         let ask = reach_of(coords::REMATCH_ASK_CONFIRM);
         assert!(coords::REMATCH_ASK_CONFIRM.0 + ask.half_x < 8.16);

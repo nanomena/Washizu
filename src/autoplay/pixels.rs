@@ -48,6 +48,9 @@ pub enum Sight {
     /// What "play again" asks: match another game of the room? Its yellow
     /// confirm left of a blue cancel, over a veiled table.
     RematchAsk,
+    /// The rewards of a room's chest whose bar has filled, on a dark band
+    /// across the view edged by thin pale lines; a press anywhere puts it away.
+    Reward,
     /// No button: the result is still being drawn, or it has gone.
     Nothing,
     /// The screen could not be read.
@@ -85,6 +88,8 @@ pub fn end_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
         && is_blue_face(&face(coords::REMATCH_ASK_CANCEL_FACE))
     {
         Sight::RematchAsk
+    } else if is_reward_band(image, scale, rect) {
+        Sight::Reward
     } else if is_confirm(&face(coords::REMATCH_FACE)) && is_game_confirm(&confirm) {
         Sight::Rematch
     } else if is_game_confirm(&confirm) {
@@ -117,6 +122,33 @@ pub fn is_confirm(pixels: &[[u8; 3]]) -> bool {
         r >= 170 && (110..=215).contains(&g) && b <= 150 && r - b >= 70
     });
     face >= 0.25 && words >= 0.03
+}
+
+/// Whether the rewards' band is across the view: each of its two edges, a
+/// thin pale line, crosses nearly all of it where the band has them. A
+/// column sees an edge where any pixel near the edge's place is pale; the
+/// end screens without the band have such pixels in a quarter of the
+/// columns at most (white tiles, light words), the band in all of them.
+fn is_reward_band(image: &Image, scale: f64, rect: CanvasRect) -> bool {
+    let pale = |&[r, g, b]: &[u8; 3]| {
+        let (lo, hi) = (r.min(g).min(b), r.max(g).max(b));
+        lo >= 110 && hi - lo <= 70 && r >= b
+    };
+    coords::REWARD_LINES.iter().all(|&line| {
+        let columns = 61;
+        let crossed = (0..columns)
+            .filter(|&i| {
+                let across = 0.5 + 0.25 * f64::from(i);
+                let (x, y0) = rect.pixel(across, line - coords::REWARD_LINE_HALF);
+                let (_, y1) = rect.pixel(across, line + coords::REWARD_LINE_HALF);
+                image
+                    .crop(x * scale, y0 * scale, 1.0, (y1 - y0) * scale)
+                    .iter()
+                    .any(pale)
+            })
+            .count();
+        crossed as f64 >= 0.85 * f64::from(columns)
+    })
 }
 
 /// Whether most of a box is the blue-violet face of the client's blue
@@ -612,6 +644,25 @@ mod tests {
             end_sight(&half, 2.0, rect),
             Sight::Nothing,
             "a yellow box alone is not the question"
+        );
+        // The rewards' band: its two pale edges across the view, over whatever is there.
+        let mut reward = standings.clone();
+        for line in coords::REWARD_LINES {
+            let (_, y) = rect.pixel(0.0, line);
+            for x in 0..width {
+                reward.pixels[(y * 2.0) as usize * width + x] = [177, 168, 141];
+            }
+        }
+        assert_eq!(end_sight(&reward, 2.0, rect), Sight::Reward);
+        let mut one = table.clone();
+        let (_, y) = rect.pixel(0.0, coords::REWARD_LINES[0]);
+        for x in 0..width {
+            one.pixels[(y * 2.0) as usize * width + x] = [177, 168, 141];
+        }
+        assert_eq!(
+            end_sight(&one, 2.0, rect),
+            Sight::Nothing,
+            "one pale line is not the band"
         );
         // A hand's result never reads as "play again".
         assert_eq!(result_sight(&last, 2.0, rect), Sight::Standings);
