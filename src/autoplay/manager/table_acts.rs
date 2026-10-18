@@ -35,7 +35,7 @@ impl AutoplayManager {
             let wanted = match act {
                 Act::Look | Act::Burst(_) => on && cfg.monitor.quick_confirm,
                 Act::AutoWinOn => on && cfg.monitor.riichi_auto_win,
-                Act::EndLook | Act::EndPress(_) => on && cfg.monitor.auto_continue,
+                Act::EndLook | Act::EndPress(_) | Act::EndTap => on && cfg.monitor.auto_continue,
             };
             let majsoul = &cfg.autoplay.majsoul;
             (wanted, majsoul.hover_delay_ms, majsoul.click_hold_ms)
@@ -77,6 +77,7 @@ impl AutoplayManager {
             Act::Burst(presses) => self.press_through(presses, hover_ms, hold_ms).await,
             Act::AutoWinOn => self.switch_auto_win_on(hover_ms, hold_ms).await,
             Act::EndPress(sight) => self.press_end(sight, hover_ms, hold_ms).await,
+            Act::EndTap => self.tap_end(hover_ms, hold_ms).await,
             Act::Look | Act::EndLook => {}
         }
     }
@@ -108,8 +109,8 @@ impl AutoplayManager {
     }
 
     /// One press on the game's own screen showing `sight`: its yellow
-    /// confirm, "play again" beside it, the rewards' band (pressed away),
-    /// or the confirm of the question "play again" asks.
+    /// confirm, "play again" beside it, or the confirm of the question
+    /// "play again" asks.
     async fn press_end(&mut self, sight: Sight, hover_ms: u32, hold_ms: u32) {
         let (target, what) = match sight {
             Sight::Rematch => (coords::REMATCH, "play again"),
@@ -117,7 +118,6 @@ impl AutoplayManager {
                 coords::REMATCH_ASK_CONFIRM,
                 "the confirm of play again's question",
             ),
-            Sight::Reward => (coords::REWARD_AWAY, "away the chest's rewards"),
             _ => (coords::GAME_CONFIRM, "the game's confirm"),
         };
         if let Some(rect) = self.canvas.resolve(&self.ctx).await {
@@ -242,6 +242,28 @@ impl AutoplayManager {
             ),
         }
         self.hand.rest(rect);
+    }
+
+    /// One tap where "play again" comes, through what shows between the
+    /// game's confirms and it: the rewards of a filled chest go at a press
+    /// anywhere, and "play again" itself may be there by now.
+    async fn tap_end(&mut self, hover_ms: u32, hold_ms: u32) {
+        if let Some(rect) = self.canvas.resolve(&self.ctx).await {
+            let at = aim::again(coords::REMATCH, reach_of(coords::REMATCH), &mut rand::rng());
+            let touch = Touch {
+                hover_ms,
+                hold_ms,
+                jiggle: false,
+            };
+            if self
+                .hand
+                .press("game's end", rect.pixel(at.0, at.1), rect, touch)
+                .await
+            {
+                info!("autoplay: tapped where play again comes");
+            }
+        }
+        self.acts.end_tapped(Instant::now(), &mut rand::rng());
     }
 
     /// What the toggle whose glyph is at `at` (a normalised point) shows.
