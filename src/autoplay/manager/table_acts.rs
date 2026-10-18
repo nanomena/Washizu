@@ -35,7 +35,7 @@ impl AutoplayManager {
             let wanted = match act {
                 Act::Look | Act::Burst(_) => on && cfg.monitor.quick_confirm,
                 Act::AutoWinOn => on && cfg.monitor.riichi_auto_win,
-                Act::EndLook | Act::EndPress(_) => on && cfg.monitor.auto_continue,
+                Act::EndLook | Act::EndPress(_) | Act::EndTap(_) => on && cfg.monitor.auto_continue,
             };
             let majsoul = &cfg.autoplay.majsoul;
             (wanted, majsoul.hover_delay_ms, majsoul.click_hold_ms)
@@ -77,6 +77,7 @@ impl AutoplayManager {
             Act::Burst(presses) => self.press_through(presses, hover_ms, hold_ms).await,
             Act::AutoWinOn => self.switch_auto_win_on(hover_ms, hold_ms).await,
             Act::EndPress(sight) => self.press_end(sight, hover_ms, hold_ms).await,
+            Act::EndTap(taps) => self.tap_end(taps, hover_ms, hold_ms).await,
             Act::Look | Act::EndLook => {}
         }
     }
@@ -108,8 +109,8 @@ impl AutoplayManager {
     }
 
     /// One press on the game's own screen showing `sight`: its yellow
-    /// confirm, "play again" beside it, the rewards' band (pressed away),
-    /// or the confirm of the question "play again" asks.
+    /// confirm, "play again" beside it, or the confirm of the question
+    /// "play again" asks.
     async fn press_end(&mut self, sight: Sight, hover_ms: u32, hold_ms: u32) {
         let (target, what) = match sight {
             Sight::Rematch => (coords::REMATCH, "play again"),
@@ -117,7 +118,6 @@ impl AutoplayManager {
                 coords::REMATCH_ASK_CONFIRM,
                 "the confirm of play again's question",
             ),
-            Sight::Reward => (coords::REWARD_AWAY, "away the chest's rewards"),
             _ => (coords::GAME_CONFIRM, "the game's confirm"),
         };
         if let Some(rect) = self.canvas.resolve(&self.ctx).await {
@@ -242,6 +242,56 @@ impl AutoplayManager {
             ),
         }
         self.hand.rest(rect);
+    }
+
+    /// A burst of `taps` in the middle of the table, through what shows
+    /// between the game's confirms and "play again": the first as any press
+    /// between decisions, the rest quick and on the spot, as a burst on a
+    /// result's confirm. Only the user's hand on the mouse stops it.
+    async fn tap_end(&mut self, taps: u32, hover_ms: u32, hold_ms: u32) {
+        if let Some(rect) = self.canvas.resolve(&self.ctx).await {
+            let reach = reach_of(coords::END_TAP);
+            let mut at = aim::again(coords::END_TAP, reach, &mut rand::rng());
+            for tap in 0..taps {
+                if tap > 0 {
+                    let gap = humanize::BURST_GAP.draw_ms(&mut rand::rng());
+                    tokio::time::sleep(Duration::from_millis(u64::from(gap))).await;
+                    at = spots::nudge(
+                        at,
+                        coords::END_TAP,
+                        reach,
+                        humanize::TAP_DRIFT_X,
+                        humanize::TAP_DRIFT_Y,
+                        &mut rand::rng(),
+                    );
+                }
+                if user_active() {
+                    break;
+                }
+                let touch = if tap == 0 {
+                    Touch {
+                        hover_ms,
+                        hold_ms,
+                        jiggle: false,
+                    }
+                } else {
+                    Touch {
+                        hover_ms: 0,
+                        hold_ms: humanize::TAP_HOLD_MS,
+                        jiggle: false,
+                    }
+                };
+                if !self
+                    .hand
+                    .press("game's end", rect.pixel(at.0, at.1), rect, touch)
+                    .await
+                {
+                    break;
+                }
+            }
+            info!("autoplay: tapped through the game's end, a burst of {taps}");
+        }
+        self.acts.end_tapped(Instant::now(), &mut rand::rng());
     }
 
     /// What the toggle whose glyph is at `at` (a normalised point) shows.
