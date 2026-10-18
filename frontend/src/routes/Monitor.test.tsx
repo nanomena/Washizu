@@ -394,6 +394,29 @@ describe('the record', () => {
     expect(screen.getByText('雀杰三')).toBeTruthy()
   })
 
+  it('changes where we stand, the points and the placings together, when the platform says where we stand', async () => {
+    fixture.snapshot!.account = { level: { id: 10303, score: 1274 }, level3: null, at: '2026-10-18T21:00:00Z' }
+    const { rerender } = render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('2 场的段位分变化')).toBeTruthy()
+    const place = (n: number) => screen.getByText(`${n} 位`).closest('li')!.querySelector('b')!.textContent
+    expect(place(1)).toBe('1')
+    // A game ends and is on file at once; the panel waits for the platform's word.
+    fixture.history = [...fixture.history, game(1, 105, 9, { round: 9, agari: 2, houjuu: 0, riichi: 1 })]
+    fixture.snapshot = { ...fixture.snapshot!, revision: 2, game_ended: true, context: { ...fixture.snapshot!.context, game: 2 } }
+    rerender(<Monitor />)
+    await new Promise(done => setTimeout(done, 1700))
+    expect(screen.getByText('2 场的段位分变化')).toBeTruthy()
+    expect(place(1)).toBe('1')
+    expect(screen.getByText('雀杰三').closest('.mstat-ladder')!.textContent).toContain('1,274')
+    // Some twenty seconds later it says where we stand: all of it changes at once.
+    fixture.snapshot = { ...fixture.snapshot!, revision: 3, account: { level: { id: 10303, score: 1379 }, level3: null, at: '2026-10-18T21:00:20Z' } }
+    rerender(<Monitor />)
+    expect(await screen.findByText('3 场的段位分变化')).toBeTruthy()
+    expect(place(1)).toBe('2')
+    expect(screen.getByText('雀杰三').closest('.mstat-ladder')!.textContent).toContain('1,379')
+  })
+
   it('says nothing of a rank until the platform has', async () => {
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '统计' }))
