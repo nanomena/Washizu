@@ -92,8 +92,11 @@ export function Statistics({ game, account }: { game: string; account: AccountLe
         </select>
       </header>
       <div className="mstat-points">
-        <strong>{t.pointGames > 0 ? signed(t.points.at(-1)!) : '—'}</strong>
-        <small>{waiting ?? (t.pointGames > 0 ? tr('{0} 场的段位分变化', t.pointGames) : tr('还没有记录到段位分'))}</small>
+        <p>
+          <strong>{t.pointGames > 0 ? signed(t.points.at(-1)!) : '—'}</strong>
+          <small>{waiting ?? (t.pointGames > 0 ? tr('{0} 场的段位分变化', t.pointGames) : tr('还没有记录到段位分'))}</small>
+        </p>
+        <p className="mstat-sum"><span>{tr('平均顺位')} <b>{t.averagePlace != null ? t.averagePlace.toFixed(2) : '—'}</b></span><span>{tr('{0} 场', t.games)}</span></p>
         <Spark points={t.points} />
       </div>
       <ol className="mstat-places">
@@ -104,7 +107,6 @@ export function Statistics({ game, account }: { game: string; account: AccountLe
           <small>{share(n, t.games)}</small>
         </li>)}
       </ol>
-      <footer><span>{tr('平均顺位')} <b>{t.averagePlace != null ? t.averagePlace.toFixed(2) : '—'}</b></span><span>{tr('{0} 场', t.games)}</span></footer>
     </section>
 
     <section className="mstat mstat-figures">

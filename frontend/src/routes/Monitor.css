@@ -147,7 +147,7 @@
 /* ------------------------------------------------------------- atoms ---- */
 
 /* A panel: white, a hairline, a soft shadow. */
-.mdec, .mresult, .mgame-hands, .mgame-detail, .mstat, .mscorestrip > div, .mscores > div, .mon-start-card {
+.mdec, .mcands, .mresult, .mgame-hands, .mgame-detail, .mstat, .mscorestrip > div, .mscores--row > div, .mon-start-card {
   background: var(--m-panel); border: 1px solid var(--m-line); border-radius: 10px; box-shadow: var(--m-shadow);
 }
 
@@ -173,7 +173,7 @@
 .mseat-tag[data-rel='self'] { color: #fff; background: var(--m-ink); border-color: var(--m-ink); }
 .mseat-tag[data-rel='none'] { background: none; border-color: transparent; }
 
-.msec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 22px; }
+.msec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: var(--line); }
 .msec-head h3 { display: flex; align-items: center; gap: 8px; min-width: 0; font: 500 13px/1 var(--m-display); white-space: nowrap; }
 .msec-head h3 > span:not(.mtag) { font-weight: 400; color: var(--m-dim); }
 .msec-aside { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 11.5px; color: var(--m-dim); }
@@ -245,11 +245,11 @@
 
 /* ---------------------------------------------------------- decision ---- */
 
-/* 408 × 192 in the dock. Four rows that every state fills: heading 22,
- * action 88, progress 18, note 18. */
+/* 408 × 191 in the dock, on its seven lines: the heading one, the action four,
+ * the progress one, the note one. Every state fills them. */
 .mdec {
   --tone: var(--m-idle);
-  min-width: 0; display: grid; grid-template-rows: 22px minmax(0, 1fr) 18px 18px; row-gap: 8px; padding: 10px 14px;
+  min-width: 0; display: grid; grid-template-rows: var(--line) calc(4 * var(--line)) var(--line) var(--line); padding: 7px 14px;
   border-color: color-mix(in srgb, var(--tone) 45%, var(--m-line)); transition: border-color 0.18s;
 }
 .mdec[data-phase='idle'] { border-color: var(--m-line); }
@@ -331,16 +331,18 @@
 
 /* -------------------------------------------------------- candidates ---- */
 
-/* 303 × 192 in the dock: a 20 heading, then five white rows 4 apart. The part
- * of a row that is filled is its probability. The one the model chose is olive
- * while it is only suggested, and navy once the game has done it. */
-.mcands { display: grid; grid-template-rows: 20px minmax(0, 1fr); row-gap: 4px; min-width: 0; min-height: 0; }
-.mcands > .msec-head { height: 20px; }
-.mcand-list { display: grid; grid-template-rows: repeat(5, minmax(0, 1fr)); row-gap: 4px; min-height: 0; }
+/* 303 × 191 in the dock, a panel on its seven lines: the heading, then a line a
+ * candidate, five of them. The part of a line that is filled is its
+ * probability. The one the model chose is olive while it is only suggested,
+ * and navy once the game has done it. */
+.mcands { display: grid; grid-template-rows: var(--line) minmax(0, 1fr); min-width: 0; min-height: 0; padding: 7px 10px; }
+.mcands > .msec-head { padding: 0 4px; }
+.mcands > .mslot-empty { border: 0; padding: 0; }
+.mcand-list { display: grid; grid-auto-rows: var(--line); align-content: start; min-height: 0; }
 .mcand {
-  --th: 24px;
-  position: relative; display: grid; grid-template-columns: 10px 56px 70px minmax(0, 1fr) 50px; align-items: center; column-gap: 7px; min-height: 0; padding: 0 10px 0 8px;
-  border-radius: 6px; overflow: hidden; background: var(--m-panel); box-shadow: inset 0 0 0 1px var(--m-line); animation: m-fade 0.16s ease-out;
+  --th: 20px;
+  position: relative; display: grid; grid-template-columns: 10px 56px 70px minmax(0, 1fr) 50px; align-items: center; column-gap: 7px; min-height: 0; padding: 0 8px 0 4px;
+  border-radius: 5px; overflow: hidden; animation: m-fade 0.16s ease-out;
 }
 .mcand::before { content: ''; position: absolute; inset: 0 auto 0 0; width: var(--share); background: var(--m-row); transition: width 0.2s ease-out; }
 .mcand > * { position: relative; }
@@ -352,6 +354,7 @@
 .mcand-val { text-align: right; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .mcand-mark { min-width: 0; overflow: hidden; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .mcand[data-chosen] { box-shadow: inset 0 0 0 1px hsl(73 70% 36% / 0.6); }
+.mcand-val { font-size: 13.5px; }
 .mcand[data-chosen]::before { background: var(--m-live-bg); }
 .mcand[data-chosen] .mcand-mark { color: color-mix(in srgb, var(--m-live) 85%, var(--m-ink)); }
 .mcands[data-state='done'] .mcand[data-chosen] { box-shadow: inset 0 0 0 1px hsl(228 65% 32% / 0.5); }
@@ -365,7 +368,7 @@
 .mcand[data-taken] { box-shadow: inset 0 0 0 1px hsl(0 60% 50% / 0.55); }
 .mcand[data-taken]::before { background: hsl(0 60% 50% / 0.15); }
 .mcand[data-taken] .mcand-mark { color: var(--m-bad); }
-.mcand--skeleton { box-shadow: none; background: var(--m-row); animation: m-breathe 1.1s ease-in-out infinite; }
+.mcand--skeleton { box-shadow: none; background: var(--m-row); background-clip: content-box; padding: 2px 0; animation: m-breathe 1.1s ease-in-out infinite; }
 .mcand--skeleton::before { content: none; }
 /* A reply in the usual hundred-odd milliseconds should not flash placeholders. */
 .mcand-list--loading { animation: m-fade 0.2s ease-out 0.3s both; }
@@ -373,7 +376,7 @@
 /* The reason there are no candidates, in the candidates' own slot. */
 .mfault {
   --tone: var(--m-bad);
-  display: grid; grid-template-rows: minmax(0, 1fr) auto; row-gap: 6px; min-width: 0; min-height: 0; padding: 12px 14px 10px; border-radius: 10px;
+  display: grid; grid-template-rows: minmax(0, 1fr) var(--line); min-width: 0; min-height: 0; padding: 7px 14px; border-radius: 10px;
   background: color-mix(in srgb, var(--m-bad) 8%, var(--m-panel)); border: 1px solid hsl(0 60% 50% / 0.35); box-shadow: var(--m-shadow);
 }
 .mfault ul { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden; }
@@ -385,72 +388,76 @@
 }
 .mfault[data-count='2'] p { -webkit-line-clamp: 3; }
 .mfault[data-count='3'] p { -webkit-line-clamp: 1; }
-.mfault footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 20px; }
+.mfault footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .mfault small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--m-ink2); }
 .mfault button { display: inline-flex; align-items: center; gap: 1px; flex: none; margin-left: auto; padding: 2px 4px 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; color: var(--m-bad); }
 .mfault button:hover { background: hsl(0 60% 50% / 0.1); }
 
 /* -------------------------------------------------------------- hand ---- */
 
-/* The hand lies on the table: 513 × 104 in the dock, a small label over the
- * tiles, which stand on the floor with the room a lifted tile needs above. */
-.mhandsec { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 6px 12px 0; border-radius: 10px; background: var(--m-table); border: 1px solid hsl(35 30% 80%); }
-.mhandsec .msec-head { height: 18px; }
+/* The hand lies on the table: 513 × 116 in the dock, four lines — a small label
+ * over the tiles, which stand on the floor of the other three with the room a
+ * lifted tile and its mark need. */
+.mhandsec { display: grid; grid-template-rows: var(--line) calc(3 * var(--line)); min-width: 0; min-height: 0; padding: 7px 12px; border-radius: 10px; background: var(--m-table); border: 1px solid hsl(35 30% 80%); }
 .mhandsec .msec-head h3 { font-size: 11.5px; font-weight: 400; color: var(--m-ink2); }
-.mhandsec-row { flex: 1; display: flex; align-items: flex-end; gap: 14px; min-height: 0; padding-bottom: 9px; }
+.mhandsec-row { display: flex; align-items: flex-end; gap: 14px; min-height: 0; padding-bottom: 13px; }
 .mdora { --th: 24px; display: flex; align-items: center; gap: 6px; min-width: 0; height: 26px; overflow: hidden; font-size: 11.5px; color: var(--m-ink2); white-space: nowrap; }
 
-/* Four seats, ours first: 513 × 80 in the dock. */
+/* Four seats, ours first: 513 × 66 in the dock, two lines each — the seat, then its score. */
 .mscorestrip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; min-height: 0; }
-.mscorestrip > div { display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 0 12px; }
+.mscorestrip > div { display: grid; grid-template-rows: var(--line) var(--line); align-items: center; padding: 7px 12px; }
 .mscorestrip > div[data-self] { border-color: var(--m-line-strong); }
 .mscorestrip dt { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--m-ink2); white-space: nowrap; }
 /* The dealer, as the system's passive role chip. */
 .mscorestrip dt i, .mseat > header i { padding: 0 4px; border-radius: 4px; font-size: 10px; line-height: 1.6; color: var(--m-ink2); background: rgb(0 0 0 / 0.06); }
 .mscorestrip dt em { margin-left: auto; font-size: 11px; font-weight: 600; color: var(--m-riichi); }
-.mscorestrip dd { font-size: 19px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.mscorestrip dd { font-size: 19px; font-weight: 600; line-height: var(--line); font-variant-numeric: tabular-nums; }
 
 /* ------------------------------------------------------------ result ---- */
 
-/* Columns 5 to 12, 828 × 192, where the candidates and the hand were: the
- * revealed hands one to a line on the left, the settled scores on the right. */
-.mresult { display: grid; grid-template: 22px minmax(0, 1fr) / minmax(0, 1fr) 210px; gap: 8px 16px; min-height: 0; padding: 10px 14px; }
+/* Columns 5 to 12, 828 × 191, where the candidates and the hand were: the
+ * heading, then the revealed hands a line each on the left and the settled
+ * scores a line each on the right, a seat's score beside its hand. */
+.mresult { display: grid; grid-template: var(--line) minmax(0, 1fr) / minmax(0, 1fr) 210px; column-gap: 16px; min-height: 0; padding: 7px 14px; }
 .mresult > .msec-head { grid-column: 1 / -1; }
-.mresult-hands { display: grid; grid-template-rows: repeat(4, minmax(0, 1fr)); row-gap: 4px; min-height: 0; }
-.mresult-hands > .mslot-empty { grid-row: 1 / -1; }
-/* A revealed hand: who and how, the hand, the ura markers — three columns the
- * same in every line, so hands stand under one another. */
-.mreveal { display: grid; grid-template-columns: 112px minmax(0, 1fr) 96px; align-items: center; column-gap: 12px; min-width: 0; min-height: 0; }
-.mreveal-who { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 7px; min-width: 0; font-size: 13px; line-height: 1.25; white-space: nowrap; }
-.mreveal-who > .mseat-tag { grid-row: 1 / 3; }
+.mresult-hands { display: grid; grid-auto-rows: var(--line); align-content: start; min-height: 0; }
+.mresult-hands > .mslot-empty { grid-row: span 4; }
+/* A revealed hand, one line: who and how, the hand, the ura markers — three
+ * columns the same in every line, so hands stand under one another. */
+.mreveal { display: grid; grid-template-columns: 150px minmax(0, 1fr) 96px; align-items: center; column-gap: 12px; min-width: 0; min-height: 0; }
+.mreveal-who { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; white-space: nowrap; }
 .mreveal-who > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.mreveal-who > span:not(.mseat-tag) { grid-column: 2; font-size: 11.5px; color: var(--m-ink2); }
+.mreveal-who > :is(.mseat-tag, b) { flex: none; }
+.mreveal-who > span:not(.mseat-tag) { font-size: 11.5px; color: var(--m-ink2); }
 .mreveal-ura { --th: 22px; display: flex; align-items: center; justify-content: flex-end; gap: 5px; min-width: 0; overflow: hidden; font-size: 11px; color: var(--m-ink2); white-space: nowrap; }
 .mreveal .mhand-box { flex: none; width: 100%; }
 
-/* What it cost each seat: one line a seat. */
-.mscores { display: grid; grid-template-rows: repeat(4, minmax(0, 1fr)); row-gap: 4px; min-height: 0; }
-.mscores > div { display: grid; grid-template-columns: minmax(0, 1fr) auto 62px; align-items: center; gap: 10px; padding: 0 10px 0 8px; border-radius: 6px; box-shadow: none; font-size: 12.5px; }
-.mscores > div[data-self] { border-color: var(--m-line-strong); }
+/* What it cost each seat: a line a seat, ours on a well. */
+.mscores { display: grid; grid-auto-rows: var(--line); align-content: start; min-height: 0; }
+.mscores > div { display: grid; grid-template-columns: minmax(0, 1fr) auto 62px; align-items: center; gap: 10px; padding: 0 10px 0 8px; border-radius: 6px; font-size: 12.5px; }
+.mscores > div + div { box-shadow: 0 -1px 0 var(--m-line); }
+.mscores > div[data-self] { background: var(--m-well); }
 .mscores dt { display: flex; align-items: center; gap: 7px; }
 .mscores dd { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
 .mscores dd + dd { font-size: 12.5px; font-weight: 500; }
-/* The four seats side by side, each by its letter alone. */
-.mscores--row { grid-template: minmax(0, 1fr) / repeat(4, minmax(0, 1fr)); column-gap: 8px; }
-.mscores--row > div { grid-template-columns: auto minmax(0, 1fr) 52px; gap: 8px; padding: 0 8px 0 6px; }
+/* The four seats side by side, each by its letter alone, in boxes a line high. */
+.mscores--row { grid-template: var(--line) / repeat(4, minmax(0, 1fr)); column-gap: 8px; }
+.mscores--row > div { grid-template-columns: auto minmax(0, 1fr) 52px; gap: 8px; padding: 0 8px 0 6px; border-radius: 6px; box-shadow: none; }
+.mscores--row > div + div { box-shadow: none; }
+.mscores--row > div[data-self] { background: var(--m-panel); border-color: var(--m-line-strong); }
 .mscores--row dt > span:not(.mseat-tag) { display: none; }
 .mscores--row dd { font-size: 13px; }
 
 /* ------------------------------------------------------------- table ---- */
 
-/* The hand's table, columns 5 to 12: one table, two columns a seat — a heading,
- * a pond three rows tall and a line for melds. The lines between the seats run
+/* The hand's table, columns 5 to 12: one table, two columns a seat — a heading
+ * line, a pond of three rows on five lines and a line for melds. The lines between the seats run
  * down the dock's gutters. */
 .mseats {
-  grid-column: 5 / 13; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 12px; min-height: 0; padding: 8px 0;
+  grid-column: 5 / 13; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 12px; min-height: 0; padding: 7px 0;
   border-radius: 10px; background: var(--m-table); border: 1px solid hsl(35 30% 80%);
 }
-.mseat { position: relative; display: grid; grid-template-rows: 22px 120px minmax(0, 1fr); row-gap: 4px; min-width: 0; min-height: 0; padding: 0 10px; }
+.mseat { position: relative; display: grid; grid-template-rows: var(--line) calc(5 * var(--line)) var(--line); min-width: 0; min-height: 0; padding: 0 10px; }
 .mseat + .mseat::before { content: ''; position: absolute; inset: 0 auto 0 -6.5px; border-left: 1px solid hsl(35 30% 80%); }
 .mseat > header { display: grid; grid-template-columns: auto 14px 16px minmax(0, 1fr) 54px; align-items: center; column-gap: 6px; min-width: 0; font-size: 13px; white-space: nowrap; }
 .mseat > header > span:nth-child(2) { font-weight: 600; }
@@ -458,7 +465,7 @@
 .mseat-riichi { display: grid; place-items: center; height: 16px; border-radius: 4px; font-size: 10.5px; font-weight: 600; line-height: 1; color: #fff; background: var(--m-riichi); }
 .mseat-riichi:empty { visibility: hidden; }
 .mseat-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; color: var(--m-ink2); }
-.mseat-pond { --u: 40px; min-width: 0; min-height: 0; }
+.mseat-pond { --u: 40px; display: flex; align-items: center; min-width: 0; min-height: 0; }
 .mseat-foot { display: flex; align-items: center; min-width: 0; min-height: 0; }
 .mseat-foot small { font-size: 11.5px; color: var(--m-ink2); white-space: nowrap; }
 
@@ -468,15 +475,19 @@
 
 /* -------------------------------------------------------------- game ---- */
 
-/* The game, columns 5 to 12: every hand dealt down columns 5 and 6, the one
- * picked across 7 to 12 — its end (the hands revealed, then the four scores in
- * a line) or its events, six lines in sight. */
-.mgame-hands {
-  grid-column: 1 / 3; display: flex; flex-direction: column; gap: 2px; min-width: 0; min-height: 0; padding: 6px; overflow: hidden auto;
-  scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent;
+/* The game, columns 5 to 12: every hand dealt down columns 5 and 6, a line
+ * each, seven in sight; the one picked across 7 to 12 — its end (the hands
+ * revealed, a line each, then the four scores in a line) or its events, six
+ * lines in sight under the heading. Lists scroll a line at a time. */
+.mgame-hands { grid-column: 1 / 3; display: grid; min-width: 0; min-height: 0; padding: 7px 6px; }
+/* The list scrolls inside the panel, its sight its seven lines and no more: a line
+ * scrolled past does not show in the panel's margin. */
+.mgame-hand-list {
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden auto;
+  scroll-snap-type: y mandatory; scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent;
 }
 /* A hand's line: which, how it ended, our score's change — each in a place of its own. */
-.mgame-hand { flex: none; height: 24px; }
+.mgame-hand { flex: none; height: var(--line); scroll-snap-align: start; }
 .mgame-hand button { display: grid; grid-template-columns: 70px minmax(0, 1fr) 50px; align-items: center; column-gap: 6px; width: 100%; height: 100%; padding: 0 8px; border-radius: 6px; text-align: left; font-size: 12px; color: var(--m-ink2); }
 .mgame-hand button:hover { background: hsl(35 20% 14% / 0.05); }
 .mgame-hand button[aria-pressed='true'] { color: var(--m-ink); background: var(--m-well); }
@@ -490,24 +501,22 @@
 .mgame-hand-end .mseat-tag { font-size: 10.5px; }
 .mgame-hand-delta { text-align: right; font-weight: 600; white-space: nowrap; }
 
-.mgame-detail { grid-column: 3 / 9; display: grid; grid-template-rows: 22px minmax(0, 1fr); row-gap: 6px; min-width: 0; min-height: 0; padding: 8px 12px; }
+.mgame-detail { grid-column: 3 / 9; display: grid; grid-template-rows: var(--line) minmax(0, 1fr); min-width: 0; min-height: 0; padding: 7px 12px; }
 /* A switch of two, as the tabs are: a grey well, the chosen one a white pill. */
 .mseg { display: inline-flex; flex: none; gap: 2px; padding: 2px; border-radius: 7px; background: var(--m-well); }
 .mseg button { height: 18px; padding: 0 10px; border-radius: 5px; font-size: 12px; line-height: 18px; color: var(--m-ink2); white-space: nowrap; }
 .mseg button:hover:not(:disabled) { color: var(--m-ink); }
 .mseg button[aria-pressed='true'] { color: var(--m-ink); background: var(--m-panel); box-shadow: var(--m-shadow); }
-.mgame-result { display: grid; grid-template-rows: minmax(0, 1fr) 22px; row-gap: 5px; min-height: 0; }
-.mgame-result .mresult-hands { row-gap: 3px; }
-.mgame-result .mreveal { grid-template-columns: 104px minmax(0, 1fr) 96px; }
-.mgame-result .mreveal-who { font-size: 12.5px; line-height: 1.15; }
+.mgame-result { display: grid; grid-template-rows: minmax(0, 1fr) var(--line); min-height: 0; }
+.mgame-result .mreveal-who { font-size: 12.5px; }
 .mgame-result .mreveal-who > span:not(.mseat-tag) { font-size: 11px; }
 
 /* A hand's events, read top to bottom in the order things happened, the newest at the bottom. */
 .mevents {
   display: flex; flex-direction: column; min-height: 0; overflow: hidden auto;
-  scroll-snap-type: y proximity; scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent;
+  scroll-snap-type: y mandatory; scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent;
 }
-.mevent { --th: 20px; flex: none; display: grid; grid-template-columns: 56px 150px 124px 84px minmax(0, 1fr); align-items: center; column-gap: 8px; height: calc(148px / 6); padding: 0 6px; border-radius: 5px; font-size: 12.5px; scroll-snap-align: start; }
+.mevent { --th: 20px; flex: none; display: grid; grid-template-columns: 56px 150px 124px 84px minmax(0, 1fr); align-items: center; column-gap: 8px; height: var(--line); padding: 0 6px; border-radius: 5px; font-size: 12.5px; scroll-snap-align: start; }
 .mevent time { font-size: 11.5px; color: var(--m-dim); font-variant-numeric: tabular-nums; }
 .mevent-seat { display: flex; align-items: center; gap: 7px; min-width: 0; white-space: nowrap; }
 .mevent-seat small { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; color: var(--m-dim); }
@@ -534,7 +543,12 @@
  * bottom edge — away from the game, so that a press meant for the hand above
  * does not land on a tab or the autoplay switch. The bar comes first in the
  * page all the same: the tabs, then what they show. */
-.md { display: grid; grid-template: minmax(0, 1fr) 36px / minmax(0, 1fr); width: 1280px; height: 240px; border-top: 1px solid var(--m-line); }
+.md { --line: 25px; display: grid; grid-template: minmax(0, 1fr) 36px / minmax(0, 1fr); width: 1280px; height: 240px; border-top: 1px solid var(--m-line); }
+/* And one grid of lines down the panels, as the columns across: a panel is 191
+ * high — a hairline and 7 above and below seven lines of 25 — and what is in it
+ * stands on whole lines, a heading on one, a row of a list on one, anything
+ * larger on as many as it takes. Two panels one over the other leave 9 between
+ * them, so that their insides are a line apart. */
 /* One grid for the bar and the panels over it: twelve columns, 93 wide and 12
  * apart, 16 in from either edge. Every panel runs from one column's edge to
  * another's, so every edge stands over an edge of the bar. The bar is in three
@@ -562,7 +576,7 @@
 .md-body > :is(.mcands, .mfault) { grid-column: 5 / 8; }
 .md-body > :is(.md-side, .mslot-empty) { grid-column: 8 / 13; }
 .md-body > :is(.md-wide, .mresult) { grid-column: 5 / 13; }
-.md-side { display: grid; grid-template: 104px minmax(0, 1fr) / minmax(0, 1fr); row-gap: 8px; min-width: 0; min-height: 0; }
+.md-side { display: grid; grid-template: calc(4 * var(--line) + 16px) minmax(0, 1fr) / minmax(0, 1fr); row-gap: 9px; min-width: 0; min-height: 0; }
 /* A tab with panels of its own lays them on the dock's columns: 1 to 8 inside it are the dock's 5 to 12. */
 .md-page { grid-column: 5 / 13; display: grid; grid-template-columns: subgrid; min-height: 0; }
 
@@ -623,12 +637,14 @@
 /* Three panels that keep their places whatever is in them: rank points and
  * placement on columns 5 to 8, the usual figures on 9 and 10, yaku on 11 and
  * 12. The last two scroll. */
-.mstat { display: grid; grid-template-rows: 22px minmax(0, 1fr); row-gap: 6px; min-width: 0; min-height: 0; padding: 10px 14px; }
+.mstat { display: grid; grid-template-rows: var(--line) minmax(0, 1fr); min-width: 0; min-height: 0; padding: 7px 14px; }
 .mstats > .mstat-rank { grid-column: 1 / 5; }
-.mstats > .mstat-figures { grid-column: 5 / 7; padding: 10px 12px; }
-.mstats > .mstat-yakus { grid-column: 7 / 9; padding: 10px 12px; }
+.mstats > .mstat-figures { grid-column: 5 / 7; padding: 7px 12px; }
+.mstats > .mstat-yakus { grid-column: 7 / 9; padding: 7px 12px; }
 .mstat > .mslot-empty { align-self: center; }
-.mstat-rank { grid-template-rows: 22px 42px minmax(0, 1fr) 16px; }
+/* Where we stand on the heading's line, the points on two (the change and how
+ * many games it is over; the place on average and the games), then a line a place. */
+.mstat-rank { grid-template-rows: var(--line) calc(2 * var(--line)) calc(4 * var(--line)); }
 /* Where we stand: the rank, its points, a bar to the next star, each in a place of its own. */
 .msec-head > .mstat-ladder { flex: 1; }
 .mstat-ladder { display: grid; grid-template-columns: 64px 96px minmax(0, 1fr); align-items: center; column-gap: 10px; min-width: 0; height: 22px; white-space: nowrap; }
@@ -638,22 +654,23 @@
 .mstat-ladder i { height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--m-live) calc(var(--share) * 100%), var(--m-well) 0); }
 .mstat-ladder i[data-empty] { visibility: hidden; }
 .mselect { flex: none; width: 118px; height: 22px; padding: 0 4px; border: 1px solid var(--m-line); border-radius: 6px; background: var(--m-panel); font: inherit; font-size: 12px; color: var(--m-ink2); }
-.mstat-points { display: grid; grid-template: 26px 16px / minmax(0, 1fr) 120px; column-gap: 10px; align-items: center; min-width: 0; }
+.mstat-points { display: grid; grid-template: var(--line) var(--line) / minmax(0, 1fr) 120px; column-gap: 10px; align-items: center; min-width: 0; }
+.mstat-points > p { display: flex; align-items: center; align-self: stretch; gap: 10px; min-width: 0; white-space: nowrap; }
 .mstat-points strong { font: 500 22px/1 var(--m-display); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .mstat-points small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--m-dim); }
+.mstat-points > .mstat-sum { gap: 16px; font-size: 12px; color: var(--m-ink2); font-variant-numeric: tabular-nums; }
+.mstat-sum b { font-weight: 600; color: var(--m-ink); }
 .mstat-spark { grid-area: 1 / 2 / 3 / 3; width: 120px; height: 40px; overflow: visible; }
 .mstat-spark line { stroke: var(--m-line-strong); stroke-width: 1; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
 .mstat-spark polyline { fill: none; stroke: var(--m-live); stroke-width: 1.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.mstat-places { display: grid; grid-template-rows: repeat(4, minmax(0, 1fr)); min-height: 0; }
+.mstat-places { display: grid; grid-template-rows: repeat(4, var(--line)); min-height: 0; }
 .mstat-places li { display: grid; grid-template-columns: 32px minmax(0, 1fr) 30px 48px; align-items: center; column-gap: 8px; min-height: 0; font-size: 12px; color: var(--m-ink2); }
 .mstat-places i { height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--m-live) calc(var(--share) * 100%), var(--m-well) 0); }
 .mstat-places b, .mstat-places small { text-align: right; font-variant-numeric: tabular-nums; }
 .mstat-places b { font-weight: 600; color: var(--m-ink); }
 .mstat-places small { font-size: 11.5px; color: var(--m-dim); }
-.mstat-rank footer { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--m-ink2); font-variant-numeric: tabular-nums; }
-.mstat-rank footer b { font-weight: 600; color: var(--m-ink); }
-.mstat-scroll { min-height: 0; overflow: hidden auto; scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent; }
-.mstat-scroll > .mfact { height: 24px; }
+.mstat-scroll { min-height: 0; overflow: hidden auto; scroll-snap-type: y mandatory; scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent; }
+.mstat-scroll > .mfact { height: var(--line); scroll-snap-align: start; }
 .mstat-yaku { display: grid; grid-template-columns: minmax(0, 1fr) 26px 44px; column-gap: 6px; font-size: 12.5px; }
 .mstat-yaku span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mstat-yaku b, .mstat-yaku small { text-align: right; font-variant-numeric: tabular-nums; }
@@ -664,21 +681,22 @@
 
 /* The groups in a list on columns 5 and 6; the chosen one on 7 to 12, its
  * settings a line each, its links a line each, or its lines in two columns of
- * six. */
+ * seven. */
 .msets > .mset-groups { grid-column: 1 / 3; }
 .msets > section { grid-column: 3 / 9; grid-template-rows: minmax(0, 1fr); }
-.mset-groups { grid-template-rows: repeat(5, minmax(0, 1fr)); row-gap: 3px; padding: 6px; }
+.mset-groups { grid-template-rows: none; grid-auto-rows: var(--line); align-content: start; padding: 7px 6px; }
 .mset-groups button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13px; color: var(--m-ink2); white-space: nowrap; overflow: hidden; }
 .mset-groups button:hover { color: var(--m-ink); background: hsl(35 20% 14% / 0.05); }
 .mset-groups button[aria-pressed='true'] { color: var(--m-ink); font-weight: 500; background: var(--m-well); }
-/* Lines a sixth of the pane high, six in sight as the lines of the other groups;
- * more scroll. The scrollbar's room is kept whether or not there is one, so a
- * setting stands where it does in every group. */
+/* A line a setting, seven in sight; more scroll, a line at a time. The scrollbar's
+ * room is kept whether or not there is one, so a setting stands where it does in
+ * every group. */
 .mset-grid {
-  container-type: size; display: grid; grid-auto-rows: calc(100cqh / 6); align-content: start; min-height: 0;
-  overflow: hidden auto; scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent; scrollbar-gutter: stable;
+  display: grid; grid-auto-rows: var(--line); align-content: start; min-height: 0;
+  overflow: hidden auto; scroll-snap-type: y mandatory; scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent; scrollbar-gutter: stable;
 }
-.mset-facts { display: grid; grid-template: repeat(6, minmax(0, 1fr)) / repeat(2, minmax(0, 1fr)); column-gap: 28px; align-content: start; min-height: 0; overflow: hidden; }
+.mset-grid > * { scroll-snap-align: start; }
+.mset-facts { display: grid; grid-template: repeat(7, var(--line)) / repeat(2, minmax(0, 1fr)); column-gap: 28px; align-content: start; min-height: 0; overflow: hidden; }
 .mset-facts > .mfact:nth-child(-n + 2) { border-top: 0; }
 .mset-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; min-width: 0; min-height: 0; }
 .mset-row + .mset-row { border-top: 1px solid var(--m-line); }
@@ -699,16 +717,15 @@
 .mset-row--extra .mset-copy { grid-column: 2; }
 .mset-row--extra .mswitch { grid-column: 3; }
 .mset-copy[data-empty] { visibility: hidden; }
-/* The links, a line each: the light, the name, the state, and what it is doing or the error it gave. */
-.mset-links { display: grid; grid-template-rows: repeat(4, minmax(0, 1fr)); min-height: 0; }
+/* The links, a line each: the light, the name, the state, and what it is doing or the error it gave (whole on hover). */
+.mset-links { display: grid; grid-auto-rows: var(--line); align-content: start; min-height: 0; }
 .mset-link { display: grid; grid-template-columns: 7px 96px 88px minmax(0, 1fr); align-items: center; column-gap: 10px; min-width: 0; min-height: 0; }
 .mset-link + .mset-link { border-top: 1px solid var(--m-line); }
 .mset-link strong { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mset-link b { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: color-mix(in srgb, var(--tone) 85%, var(--m-ink)); }
 .mset-link[data-tone='ok'] b { color: var(--m-ink); }
 .mset-link p {
-  min-width: 0; font-size: 11.5px; line-height: 1.4; color: var(--m-dim); overflow-wrap: anywhere;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  min-width: 0; font-size: 11.5px; color: var(--m-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .mset-link .mset-link-error { color: var(--m-bad); user-select: text; cursor: text; }
 
