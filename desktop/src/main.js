@@ -39,7 +39,7 @@ import { MIN, RATIO, conform, framedRatio, gameBounds, handOnGame, onGame, onVie
 import { policyFor } from './policy.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { STREAM_FPS, StreamServer, newToken, streamUrl } from './stream.js'
-import { FrameMeter, GL_STATE, GlWatch, WATCH_MS, processLine, worthKeeping } from './watch.js'
+import { FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, processLine, worthKeeping } from './watch.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** The interface's address. A scheme of its own, so the page has an origin and absolute paths. */
@@ -431,17 +431,35 @@ function guardGame(page) {
  * console's warnings and errors and the changes of scene, its renderer not
  * answering, and every `WATCH_MS` whether its drawing context is still there
  * and, drawn offscreen, how many frames it painted (`meter`). Its context lost
- * notes the application's processes too. See `watch.js`.
+ * notes the application's processes too, and is acted on at once: a page
+ * without its context draws nothing and its game plays no more turns, so it is
+ * loaded again (the game rejoins the table it was at). A page that does not
+ * answer for `HUNG_MS` has its renderer ended, and is loaded again as any page
+ * whose renderer went is. No one need be watching for either. See `watch.js`.
  * @param {Electron.WebContents} page @param {FrameMeter | null} meter
  */
 function watchGame(page, meter) {
   const gl = new GlWatch()
   let late = false
+  let reloadedAt = 0
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let hung
   page.on('console-message', details => {
     if (worthKeeping(details.level, details.message)) note(`game console ${details.level}: ${details.message.slice(0, 600)}`)
   })
-  page.on('unresponsive', () => note('game: the page does not answer'))
-  page.on('responsive', () => note('game: the page answers again'))
+  page.on('unresponsive', () => {
+    note('game: the page does not answer')
+    clearTimeout(hung)
+    hung = setTimeout(() => {
+      if (page.isDestroyed()) return
+      note(`game: no answer for ${HUNG_MS / 1000} s; ending its renderer to load it again`)
+      page.forcefullyCrashRenderer()
+    }, HUNG_MS)
+  })
+  page.on('responsive', () => {
+    clearTimeout(hung)
+    note('game: the page answers again')
+  })
   page.on('did-finish-load', () => {
     gl.reset()
     note('game: page loaded')
@@ -462,7 +480,15 @@ function watchGame(page, meter) {
     const line = gl.seen(state)
     if (!line) return
     note(frames ? `${line}; ${frames.frames} frames painted in ${WATCH_MS / 1000} s` : line)
-    if (state?.lost) note(`processes: ${processLine(app.getAppMetrics())}`)
+    if (!state?.lost) return
+    note(`processes: ${processLine(app.getAppMetrics())}`)
+    if (Date.now() - reloadedAt < RELOAD_QUIET_MS) {
+      note('game: lost again soon after loading it again; left as it is')
+      return
+    }
+    reloadedAt = Date.now()
+    note('game: loading the page again for its lost context')
+    page.reload()
   }
   const timer = setInterval(() => { if (!page.isDestroyed()) void look() }, WATCH_MS)
   page.once('destroyed', () => clearInterval(timer))

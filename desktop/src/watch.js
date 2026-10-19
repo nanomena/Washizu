@@ -2,9 +2,16 @@
 // page's own console, whether its drawing context is still there, and how many frames it paints.
 // The game once stopped dead at a change of scene, its WebGL context lost while the GPU process ran
 // on, and nothing was left to say why; these lines are kept for the next time (see `journal.js`).
+// A lost context, or a page that has stopped answering, is also acted on at once: the page is loaded
+// again (see `main.js`).
 
-/** How often the page's drawing context is looked at. */
-export const WATCH_MS = 10_000
+/** How often the page's drawing context is looked at: a lost one costs the game's turns until it is seen. */
+export const WATCH_MS = 3000
+/** After loading the page again for a lost context, how long before another lost context does so again. */
+export const RELOAD_QUIET_MS = 60_000
+/** How long the page may not answer before its renderer is ended and the page loaded again: a change of
+ *  scene holds the page for seconds, not for half a minute. */
+export const HUNG_MS = 30_000
 
 /**
  * The page's drawing context, read once the game has made its own: before
