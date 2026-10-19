@@ -44,14 +44,25 @@
 //!   (`humanize::AUTO_WIN_ON`): an early riichi, with longer to go, is the
 //!   likelier to have it on. The client switches it off again by itself for
 //!   every new hand.
+//! - **The toggles of a hand played dama.** A moment after each of our
+//!   discards the hand at rest is read (`autoplay::dama`). A hand played dama
+//!   may have the client's auto-win switched on, at any moment as likely as
+//!   the next (`humanize::DAMA_WIN_ON`), and the client's no-calls switched
+//!   on before the next discards (`humanize::CALLS_SWITCH`); no-calls goes off
+//!   again the same way once a read says the hand no longer wants it, and a
+//!   pending switch the hand no longer wants is dropped. Auto-win, once on,
+//!   stays on for the hand. No-calls left on at a hand's end is looked at in
+//!   the next hand and switched off if the client kept it.
 //!
 //! This is the plan alone; the manager makes the looks and the presses, and
 //! reads the toggle's colour to know where it stands (`autoplay::pixels`).
 
+use crate::autoplay::dama::Dama;
 use crate::autoplay::humanize::{
-    self, Hazard, ASK_SEEN, AUTO_WIN_ON, CONFIRM_SEEN, CONFIRM_SEEN_MOST_MS, END_LOOK_EVERY_MS,
-    END_LOOK_FIRST_MS, END_PAUSE, END_SEEN, OUR_BUTTON_LINGER, OUR_WIN_LINGER,
-    RESULT_LOOK_EVERY_MS, RESULT_LOOK_FIRST_MS, RESULT_PAUSE, RESULT_START, TAP_AFTER_MS,
+    self, Hazard, ASK_SEEN, AUTO_WIN_ON, CALLS_SWITCH, CONFIRM_SEEN, CONFIRM_SEEN_MOST_MS,
+    DAMA_WIN_ON, END_LOOK_EVERY_MS, END_LOOK_FIRST_MS, END_PAUSE, END_SEEN, OUR_BUTTON_LINGER,
+    OUR_WIN_LINGER, RESULT_LOOK_EVERY_MS, RESULT_LOOK_FIRST_MS, RESULT_PAUSE, RESULT_START,
+    TAP_AFTER_MS,
 };
 use crate::autoplay::pixels::Sight;
 use rand::Rng;
@@ -76,6 +87,12 @@ const END_TAPS: u32 = 20;
 /// How long after "play again" its question is waited for: it comes with a
 /// little animation, and a look may fall before it.
 const ASK_WAIT: Duration = Duration::from_secs(5);
+/// From our discard to the read of the hand it leaves: the game's state has
+/// taken the discard in well before.
+const DAMA_LOOK: Duration = Duration::from_millis(400);
+/// From a new hand to the look whether the client kept no-calls on from the
+/// last: the deal is laid out by then.
+const STALE_CALLS: Duration = Duration::from_secs(4);
 
 /// What to do now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +103,12 @@ pub enum Act {
     Burst(u32),
     /// Switch the client's auto-win on.
     AutoWinOn,
+    /// Read our hand at rest: whether it is played dama.
+    DamaLook,
+    /// Switch the client's auto-win on for a hand played dama.
+    DamaWinOn,
+    /// Switch the client's no-calls on, or off.
+    NoCalls(bool),
     /// Look at the game's own screens after its end.
     EndLook,
     /// Press the button of the game's own screen in sight, once: its yellow
@@ -170,6 +193,16 @@ pub struct Acts {
     result: Option<Shown>,
     win_on_at: Option<Instant>,
     end: Option<Ending>,
+    /// When our hand at rest is read.
+    dama_look_at: Option<Instant>,
+    /// When auto-win goes on for a hand played dama.
+    dama_win_at: Option<Instant>,
+    /// Auto-win has gone on for a hand played dama in this hand.
+    dama_win_on: bool,
+    /// When no-calls is switched, and to which.
+    calls_at: Option<(Instant, bool)>,
+    /// No-calls is on by our press, as far as the last look at it saw.
+    calls_on: bool,
 }
 
 fn after<R: Rng + ?Sized>(now: Instant, wait: Hazard, rng: &mut R) -> Instant {
@@ -234,18 +267,67 @@ impl Acts {
             }
             Some(_) => {}
         }
-        // A riichi that ended before its auto-win was switched on stays without it.
+        // A riichi that ended before its auto-win was switched on stays without it,
+        // and so does a hand played dama; its toggles are left as they are.
         self.win_on_at = None;
+        self.dama_look_at = None;
+        self.dama_win_at = None;
+        self.calls_at = None;
     }
 
-    /// Our riichi was accepted.
+    /// Our riichi was accepted. The toggles of a hand played dama are left as
+    /// they are: a hand in riichi is not offered calls.
     pub fn riichi_accepted<R: Rng + ?Sized>(&mut self, now: Instant, rng: &mut R) {
         self.win_on_at = Some(after(now, AUTO_WIN_ON, rng));
+        self.dama_look_at = None;
+        self.dama_win_at = None;
+        self.calls_at = None;
     }
 
-    /// A new hand is dealt, or a new game begins: nothing that was due is.
-    pub fn hand_over(&mut self) {
+    /// A new hand is dealt at `now`, or a new game begins: nothing that was
+    /// due is, but no-calls left on by our press is looked at a while after
+    /// the deal, and switched off if the client kept it.
+    pub fn hand_over(&mut self, now: Instant) {
+        let stale = self.calls_on;
         *self = Self::default();
+        if stale {
+            self.calls_at = Some((now + STALE_CALLS, false));
+        }
+    }
+
+    /// We discarded at `now`, not in riichi: the hand left is read a moment after.
+    pub fn discarded(&mut self, now: Instant) {
+        self.dama_look_at = Some(now + DAMA_LOOK);
+    }
+
+    /// The hand at rest, read at `now`, wants `dama`: auto-win switched on
+    /// some while after, no-calls switched to match it before the next
+    /// discards. A switch already pending that is still wanted keeps its time.
+    pub fn dama_read<R: Rng + ?Sized>(&mut self, dama: Dama, now: Instant, rng: &mut R) {
+        self.dama_win_at = match self.dama_win_at {
+            _ if !dama.win || self.dama_win_on => None,
+            Some(at) => Some(at),
+            None => Some(after(now, DAMA_WIN_ON, rng)),
+        };
+        self.calls_at = match self.calls_at {
+            _ if dama.no_calls == self.calls_on => None,
+            Some((at, to)) if to == dama.no_calls => Some((at, to)),
+            _ => Some((after(now, CALLS_SWITCH, rng), dama.no_calls)),
+        };
+    }
+
+    /// The client's auto-win, after our press for a hand played dama: on, or
+    /// not (`None` when it could not be seen).
+    pub fn dama_win_read(&mut self, lit: Option<bool>) {
+        self.dama_win_on = lit == Some(true);
+    }
+
+    /// The client's no-calls, after our press or our look: on, or not
+    /// (`None` when it could not be seen, and nothing is known).
+    pub fn calls_read(&mut self, lit: Option<bool>) {
+        if let Some(lit) = lit {
+            self.calls_on = lit;
+        }
     }
 
     /// The game is over at `now`. Its last result, if one is on screen, is
@@ -253,6 +335,9 @@ impl Acts {
     /// for after it.
     pub fn game_over(&mut self, now: Instant) {
         self.win_on_at = None;
+        self.dama_look_at = None;
+        self.dama_win_at = None;
+        self.calls_at = None;
         if let Some(shown) = &mut self.result {
             shown.last = true;
             shown.until = now + LAST_MOST;
@@ -288,6 +373,9 @@ impl Acts {
         [
             self.result.and_then(|r| r.next.map(|n| n.0)),
             self.win_on_at,
+            self.dama_look_at,
+            self.dama_win_at,
+            self.calls_at.map(|c| c.0),
             end,
         ]
         .into_iter()
@@ -318,6 +406,18 @@ impl Acts {
         if self.win_on_at.is_some_and(|at| now >= at) {
             self.win_on_at = None;
             return Some(Act::AutoWinOn);
+        }
+        if self.dama_look_at.is_some_and(|at| now >= at) {
+            self.dama_look_at = None;
+            return Some(Act::DamaLook);
+        }
+        if self.dama_win_at.is_some_and(|at| now >= at) {
+            self.dama_win_at = None;
+            return Some(Act::DamaWinOn);
+        }
+        if let Some((_, on)) = self.calls_at.filter(|c| now >= c.0) {
+            self.calls_at = None;
+            return Some(Act::NoCalls(on));
         }
         if !self.end_turn() {
             return None;
@@ -502,6 +602,9 @@ impl Acts {
                 }
             }
             Act::AutoWinOn => self.win_on_at = Some(at),
+            Act::DamaLook => self.dama_look_at = Some(at),
+            Act::DamaWinOn => self.dama_win_at = Some(at),
+            Act::NoCalls(on) => self.calls_at = Some((at, on)),
             Act::EndLook | Act::EndPress(_) | Act::EndTap => {
                 if let Some(end) = &mut self.end {
                     end.next = Some((at, EndStep::Look));
@@ -690,7 +793,13 @@ mod tests {
                     (bursts, last) = (bursts + 1, at);
                     acts.burst_done(at, 0, &mut rng);
                 }
-                Act::AutoWinOn | Act::EndLook | Act::EndPress(_) | Act::EndTap => unreachable!(),
+                Act::AutoWinOn
+                | Act::DamaLook
+                | Act::DamaWinOn
+                | Act::NoCalls(_)
+                | Act::EndLook
+                | Act::EndPress(_)
+                | Act::EndTap => unreachable!(),
             }
         }
         assert!(bursts >= 1);
@@ -785,7 +894,7 @@ mod tests {
         assert_eq!(acts.next(ms(t0, 60_000), 0, &mut rng), Some(Act::EndLook));
         acts.result_shown(0, false, t0, &mut rng);
         acts.game_over(t0);
-        acts.hand_over();
+        acts.hand_over(t0);
         assert_eq!(acts.due(), None);
         assert_eq!(acts.next(ms(t0, 5000), 0, &mut rng), None);
     }
@@ -1107,7 +1216,7 @@ mod tests {
         let mut acts = Acts::default();
         acts.riichi_accepted(t0, &mut rng);
         acts.result_shown(0, false, ms(t0, 100), &mut rng);
-        acts.hand_over();
+        acts.hand_over(t0);
         assert_eq!(acts.due(), None);
     }
 
@@ -1149,5 +1258,127 @@ mod tests {
         // 1 - e^(-(t - 2) / 25): about 0.27 by 10 s, 0.78 by 40 s.
         assert!((short - 0.274).abs() < 0.04, "{short}");
         assert!((long - 0.781).abs() < 0.04, "{long}");
+    }
+
+    const WANTS_BOTH: Dama = Dama {
+        win: true,
+        no_calls: true,
+    };
+
+    /// Our discard has the hand read a moment after it; a hand played dama
+    /// has no-calls switched on before the next discards and auto-win some
+    /// while after.
+    #[test]
+    fn a_hand_played_dama_has_both_toggles_switched_on() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.discarded(t0);
+        assert_eq!(acts.due(), Some(t0 + DAMA_LOOK));
+        assert_eq!(acts.next(t0 + DAMA_LOOK, 0, &mut rng), Some(Act::DamaLook));
+
+        let read = t0 + DAMA_LOOK;
+        acts.dama_read(WANTS_BOTH, read, &mut rng);
+        let mut at = read;
+        for _ in 0..2 {
+            let (when, act) = step(&mut acts, 0, &mut rng).unwrap();
+            match act {
+                Act::NoCalls(true) => {
+                    assert!(when >= read + Duration::from_millis(400));
+                    assert!(when <= read + Duration::from_secs(4));
+                    acts.calls_read(Some(true));
+                }
+                Act::DamaWinOn => {
+                    assert!(when >= read + Duration::from_millis(1500));
+                    acts.dama_win_read(Some(true));
+                }
+                other => panic!("{other:?}"),
+            }
+            at = at.max(when);
+        }
+
+        // The next read finds both already as wanted.
+        acts.discarded(at);
+        assert_eq!(acts.next(at + DAMA_LOOK, 0, &mut rng), Some(Act::DamaLook));
+        acts.dama_read(WANTS_BOTH, at + DAMA_LOOK, &mut rng);
+        assert_eq!(acts.due(), None);
+    }
+
+    const CALLS_ONLY: Dama = Dama {
+        win: false,
+        no_calls: true,
+    };
+
+    /// A hand that stops being played dama has the no-calls we switched on
+    /// switched off.
+    #[test]
+    fn a_hand_no_longer_played_dama_has_no_calls_switched_off() {
+        let mut rng = StdRng::seed_from_u64(12);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.dama_read(CALLS_ONLY, t0, &mut rng);
+        let (_, act) = step(&mut acts, 0, &mut rng).unwrap();
+        assert_eq!(act, Act::NoCalls(true));
+        acts.calls_read(Some(true));
+
+        acts.dama_read(Dama::default(), ms(t0, 10_000), &mut rng);
+        let (_, act) = step(&mut acts, 0, &mut rng).unwrap();
+        assert_eq!(act, Act::NoCalls(false), "off again");
+        acts.calls_read(Some(false));
+        assert_eq!(acts.due(), None);
+    }
+
+    /// A switch to no-calls not yet made is dropped when the hand no longer
+    /// wants it, and no-calls never switched on is not switched off.
+    #[test]
+    fn a_switch_no_longer_wanted_is_dropped() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.dama_read(WANTS_BOTH, t0, &mut rng);
+        assert!(acts.due().is_some());
+        acts.dama_read(Dama::default(), ms(t0, 10), &mut rng);
+        assert_eq!(acts.due(), None);
+    }
+
+    /// A hand that ends, or a riichi, drops what was pending; no-calls left
+    /// on is looked at in the next hand.
+    #[test]
+    fn no_calls_left_on_is_looked_at_in_the_next_hand() {
+        let mut rng = StdRng::seed_from_u64(14);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.dama_read(CALLS_ONLY, t0, &mut rng);
+        let (_, act) = step(&mut acts, 0, &mut rng).unwrap();
+        assert_eq!(act, Act::NoCalls(true));
+        acts.calls_read(Some(true));
+        acts.riichi_accepted(ms(t0, 2000), &mut rng);
+        assert_eq!(
+            step(&mut acts, 0, &mut rng).map(|s| s.1),
+            Some(Act::AutoWinOn),
+            "only the riichi's auto-win is left"
+        );
+
+        acts.result_shown(0, false, ms(t0, 60_000), &mut rng);
+        acts.hand_over(ms(t0, 70_000));
+        assert_eq!(
+            acts.next(ms(t0, 70_000) + STALE_CALLS, 0, &mut rng),
+            Some(Act::NoCalls(false))
+        );
+        acts.calls_read(Some(false));
+        acts.hand_over(ms(t0, 140_000));
+        assert_eq!(acts.due(), None);
+    }
+
+    /// Our toggle acts put off come again.
+    #[test]
+    fn dama_acts_put_off_come_again() {
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        for act in [Act::DamaLook, Act::DamaWinOn, Act::NoCalls(true)] {
+            acts.later(act, t0, Duration::from_millis(500));
+            let mut rng = StdRng::seed_from_u64(15);
+            assert_eq!(acts.next(ms(t0, 500), 0, &mut rng), Some(act));
+        }
     }
 }

@@ -5,7 +5,7 @@ import { setLang } from '@/lib/i18n'
 
 const fixture = vi.hoisted(() => ({
   snapshot: null as MonitorSnapshot | null,
-  options: { always_on_top: false } as { always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean; quick_confirm?: boolean; riichi_auto_win?: boolean; auto_continue?: boolean; stream_output?: boolean; stream_url?: string },
+  options: { always_on_top: false } as { always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean; quick_confirm?: boolean; riichi_auto_win?: boolean; dama_auto_win?: boolean; dama_no_calls?: boolean; auto_continue?: boolean; stream_output?: boolean; stream_url?: string },
   calls: [] as Array<[string, unknown]>,
   /** What the core answers when an earlier hand's events are asked for. */
   handEvents: [] as MonitorEvent[],
@@ -22,6 +22,8 @@ vi.mock('@/lib/host', () => ({
     if (cmd === 'set_monitor_lean') fixture.options = { ...fixture.options, pointer_lean: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_confirm') fixture.options = { ...fixture.options, quick_confirm: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_auto_win') fixture.options = { ...fixture.options, riichi_auto_win: (args as { enabled: boolean }).enabled }
+    if (cmd === 'set_monitor_dama_win') fixture.options = { ...fixture.options, dama_auto_win: (args as { enabled: boolean }).enabled }
+    if (cmd === 'set_monitor_no_calls') fixture.options = { ...fixture.options, dama_no_calls: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_continue') fixture.options = { ...fixture.options, auto_continue: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_stream') {
       const enabled = (args as { enabled: boolean }).enabled
@@ -29,7 +31,7 @@ vi.mock('@/lib/host', () => ({
     }
     if (cmd === 'get_hand_events') return fixture.handEvents
     if (cmd === 'get_history') return fixture.history
-    return ['get_monitor_options', 'set_monitor_pinned', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_monitor_stream'].includes(cmd) ? fixture.options : undefined
+    return ['get_monitor_options', 'set_monitor_pinned', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_dama_win', 'set_monitor_no_calls', 'set_monitor_continue', 'set_monitor_stream'].includes(cmd) ? fixture.options : undefined
   }),
 }))
 // No canvas under jsdom, so mahgen cannot draw. A tile is then an <img> whose
@@ -499,20 +501,13 @@ describe('the settings', () => {
     fireEvent.click(off())
     await waitFor(() => expect(fixture.calls).toContainEqual(['set_monitor_autoplay', { enabled: false }]))
 
-    // The pointer's trail is the shell's to draw: the switch asks it, and shows what it saved.
-    const trail = screen.getByRole('switch', { name: '光标轨迹' })
-    expect(trail.getAttribute('aria-checked')).toBe('false')
-    fireEvent.click(trail)
-    await waitFor(() => expect(screen.getByRole('switch', { name: '光标轨迹' }).getAttribute('aria-checked')).toBe('true'))
-    expect(fixture.calls).toContainEqual(['set_monitor_trail', { enabled: true }])
-
     const lean = screen.getByRole('switch', { name: '预推理' })
     fireEvent.click(lean)
     await waitFor(() => expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('true'))
     expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: true }])
 
     // What autoplay presses between decisions: each its own switch, saved by the core.
-    for (const [name, command] of [['快速确认', 'set_monitor_confirm'], ['立直自动和牌', 'set_monitor_auto_win']]) {
+    for (const [name, command] of [['快速确认', 'set_monitor_confirm'], ['立直自动和牌', 'set_monitor_auto_win'], ['默听自动和牌', 'set_monitor_dama_win'], ['默听不吃碰杠', 'set_monitor_no_calls']]) {
       const row = screen.getByRole('switch', { name })
       expect(row.getAttribute('aria-checked')).toBe('false')
       fireEvent.click(row)
@@ -522,6 +517,13 @@ describe('the settings', () => {
 
     // The same two switches the bar has: one setting, two places to change it.
     group('画面与窗口')
+    // The pointer's trail is the shell's to draw: the switch asks it, and shows what it saved.
+    const trail = screen.getByRole('switch', { name: '光标轨迹' })
+    expect(trail.getAttribute('aria-checked')).toBe('false')
+    fireEvent.click(trail)
+    await waitFor(() => expect(screen.getByRole('switch', { name: '光标轨迹' }).getAttribute('aria-checked')).toBe('true'))
+    expect(fixture.calls).toContainEqual(['set_monitor_trail', { enabled: true }])
+
     const pin = screen.getByRole('switch', { name: '窗口置顶' })
     expect(pin.getAttribute('aria-checked')).toBe('false')
     fireEvent.click(pin)

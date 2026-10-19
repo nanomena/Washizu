@@ -9,6 +9,8 @@ import type { AccountLevels } from '@/lib/ladder'
 export type MonitorConfig = {
   always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean
   quick_confirm?: boolean; riichi_auto_win?: boolean
+  /** With a hand played dama, switch the client's own auto-win, and its no-calls, on (see the core's `autoplay::dama`). */
+  dama_auto_win?: boolean; dama_no_calls?: boolean
   /** Play game after game: with autoplay on, the game's own screens after its end are pressed through to "play again". */
   auto_continue?: boolean
   stream_output?: boolean; stream_port?: number; stream_token?: string; stream_url?: string
@@ -19,7 +21,7 @@ export type MonitorConfig = {
   spout_output?: boolean; spout_available?: boolean; spout_state?: 'off' | 'starting' | 'sending' | 'failed' | 'stopped'; spout_name?: string
 }
 export type GameView = 'window' | 'offscreen'
-export const MONITOR_DEFAULTS: MonitorConfig = { always_on_top: false, pointer_trail: false, pointer_lean: false, quick_confirm: false, riichi_auto_win: false, auto_continue: false }
+export const MONITOR_DEFAULTS: MonitorConfig = { always_on_top: false, pointer_trail: false, pointer_lean: false, quick_confirm: false, riichi_auto_win: false, dama_auto_win: false, dama_no_calls: false, auto_continue: false }
 
 /** How far autoplay goes: not at all (suggestions only), the game in play, or
  *  game after game. Two settings make it: autoplay itself, which the core

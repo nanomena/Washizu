@@ -53,8 +53,11 @@
 //!   per-game state and drives the plan.
 //! - [`pointer`] — how the pointer moves: its way to a press, its looks
 //!   between turns ([`pointer::lean`]) and its rests.
-//! - [`acts`] — the presses between decisions: through a hand's result, and
-//!   on the client's auto-win around a riichi.
+//! - [`acts`] — the presses between decisions: through a hand's result, on
+//!   the client's auto-win around a riichi, and on its auto-win and no-calls
+//!   for a hand played dama.
+//! - [`dama`] — whether our hand is played dama, and which of the client's
+//!   toggles that asks for.
 //! - [`pixels`] — reading the few pixels of the game that say what its
 //!   script does not, such as whether one of its toggles is on.
 //! - [`riichi_city`] — Riichi City: protocol frames instead of presses.
@@ -72,6 +75,7 @@ pub mod budget;
 pub mod canvas;
 pub mod cdp_input;
 pub mod context;
+pub mod dama;
 pub mod delay;
 pub mod humanize;
 pub mod inject;

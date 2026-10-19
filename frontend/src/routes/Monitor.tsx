@@ -108,12 +108,14 @@ type DockProps = {
   onLean: ((enabled: boolean) => void) | null
   onConfirm: ((enabled: boolean) => void) | null
   onAutoWin: ((enabled: boolean) => void) | null
+  onDamaWin: ((enabled: boolean) => void) | null
+  onDamaCalls: ((enabled: boolean) => void) | null
   onStream: ((enabled: boolean) => void) | null
   onCopyStream: (() => Promise<void>) | null
   onGameView: ((view: GameView) => void) | null
   onSpout: ((enabled: boolean) => void) | null
 }
-function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail, onLean, onConfirm, onAutoWin, onStream, onCopyStream, onGameView, onSpout }: DockProps) {
+function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail, onLean, onConfirm, onAutoWin, onDamaWin, onDamaCalls, onStream, onCopyStream, onGameView, onSpout }: DockProps) {
   const { s, view } = m
   const game = s?.game ?? null
   const link = linkOf(m.health)
@@ -163,7 +165,7 @@ function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail,
       {/* The record changes when the platform says where we stand after a game, or else when a game starts or ends. */}
       {tab === 'stats' && <Statistics game={`${s?.context.game ?? 0}:${s?.game_ended ?? true}`} account={s?.account ?? null} />}
       {tab === 'settings' && <Settings group={group} onGroup={openGroup} snapshot={s} options={options} health={m.health} now={m.now} onPin={onPin} onLevel={onLevel} onTrail={onTrail} onLean={onLean}
-        onConfirm={onConfirm} onAutoWin={onAutoWin}
+        onConfirm={onConfirm} onAutoWin={onAutoWin} onDamaWin={onDamaWin} onDamaCalls={onDamaCalls}
         onStream={onStream} onCopyStream={onCopyStream} onGameView={onGameView} onSpout={onSpout} />}
     </div>
   </aside>
@@ -326,6 +328,8 @@ export function Monitor() {
           onLean={ready && !busy ? enabled => void choose('set_monitor_lean', enabled) : null}
           onConfirm={ready && !busy ? enabled => void choose('set_monitor_confirm', enabled) : null}
           onAutoWin={ready && !busy ? enabled => void choose('set_monitor_auto_win', enabled) : null}
+          onDamaWin={ready && !busy ? enabled => void choose('set_monitor_dama_win', enabled) : null}
+          onDamaCalls={ready && !busy ? enabled => void choose('set_monitor_no_calls', enabled) : null}
           onStream={ready && !busy ? enabled => void choose('set_monitor_stream', enabled) : null}
           onCopyStream={ready ? copyStream : null}
           onGameView={ready && !busy ? view => void chooseGameView(view) : null}

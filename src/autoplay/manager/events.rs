@@ -4,7 +4,7 @@
 //! canvas cache and the dead-click count, and forgets the rest — the tiles
 //! last seen, the riichi, and all the pointer knows ([`Hand::reset`]). The
 //! presses between decisions (`autoplay::acts`) learn of each result, riichi,
-//! deal and game end here.
+//! deal, game end and discard of ours here.
 //!
 //! [`Hand::reset`]: crate::autoplay::pointer::Hand::reset
 
@@ -24,7 +24,7 @@ impl AutoplayManager {
                 // than going through the tracker. This avoids the try_lock
                 // race entirely and makes cached_our_seat available from
                 // the very first event of the game.
-                self.acts.hand_over();
+                self.acts.hand_over(Instant::now());
                 self.new_game();
                 self.state.cached_our_seat = *id;
                 self.state.num_players = *num_players;
@@ -45,7 +45,7 @@ impl AutoplayManager {
             }
             MjaiEvent::StartKyoku { .. } | MjaiEvent::EndKyoku => {
                 if matches!(ev, MjaiEvent::StartKyoku { .. }) {
-                    self.acts.hand_over();
+                    self.acts.hand_over(Instant::now());
                 }
                 // Per-kyoku reset: keep last seen rect cache and cached seat,
                 // drop everything else. Keep last_kawa_tile as None so
@@ -74,6 +74,10 @@ impl AutoplayManager {
                 self.state.last_kawa_tile = Some(pai.clone());
                 if self.is_ours(*actor) {
                     self.state.last_self_tsumo = None;
+                    // The hand it leaves may be played dama; in riichi it is not ours to play.
+                    if !self.state.self_riichi_accepted {
+                        self.acts.discarded(Instant::now());
+                    }
                 }
             }
             MjaiEvent::ReachAccepted { actor } => {
