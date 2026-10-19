@@ -1,19 +1,20 @@
 //! The presses between decisions ([`crate::autoplay::acts`]): through a
 //! hand's result once its confirm button shows, on the client's auto-win
-//! toggle after a riichi, and through the game's own screens after its end
-//! to play again.
+//! toggle after a riichi or for a hand played dama, and through the game's
+//! own screens after its end to play again.
 //!
 //! Majsoul only, with autoplay on, each behind its own switch
-//! (`monitor.quick_confirm`, `monitor.riichi_auto_win`, and
-//! `monitor.auto_continue`, the level of autoplay that plays game after game).
-//! An act that is not wanted when it comes due is dropped, and what would
-//! have followed it with it: switching game after game off during a game
-//! leaves its end to the player.
+//! (`monitor.quick_confirm`, `monitor.auto_win`, and `monitor.auto_continue`,
+//! the level of autoplay that plays game after game). An act that is not
+//! wanted when it comes due is dropped, and what would have followed it with
+//! it: switching game after game off during a game leaves its end to the
+//! player.
 
 use super::AutoplayManager;
 use crate::autoplay::acts::Act;
 use crate::autoplay::cdp_input::user_active;
 use crate::autoplay::context::CanvasRect;
+use crate::autoplay::dama;
 use crate::autoplay::humanize;
 use crate::autoplay::majsoul::{coords, reach_of};
 use crate::autoplay::pixels::{self, Glyph, Image, Sight};
@@ -34,13 +35,18 @@ impl AutoplayManager {
             let on = cfg.autoplay.enabled && cfg.platform.kind == Platform::Majsoul;
             let wanted = match act {
                 Act::Look | Act::Burst(_) => on && cfg.monitor.quick_confirm,
-                Act::AutoWinOn => on && cfg.monitor.riichi_auto_win,
+                Act::AutoWinOn | Act::DamaLook | Act::DamaWinOn => on && cfg.monitor.auto_win,
                 Act::EndLook | Act::EndPress(_) | Act::EndTap => on && cfg.monitor.auto_continue,
             };
             let majsoul = &cfg.autoplay.majsoul;
             (wanted, majsoul.hover_delay_ms, majsoul.click_hold_ms)
         };
         if !wanted {
+            return;
+        }
+        // A read of the hand presses nothing.
+        if act == Act::DamaLook {
+            self.read_dama().await;
             return;
         }
         // A look moves nothing: it goes ahead whatever the user's hand does.
@@ -60,10 +66,11 @@ impl AutoplayManager {
                 .end_looked(sight, Instant::now(), &mut rand::rng());
             return;
         }
-        // The user's hand is on the mouse; and switching auto-win on can wait
+        // The user's hand is on the mouse; and switching a toggle can wait
         // for our own decision to be made.
         let deciding = self.ctx.time_budget.read().ok().and_then(|g| *g).is_some();
-        if user_active() || (act == Act::AutoWinOn && deciding) {
+        let toggle = matches!(act, Act::AutoWinOn | Act::DamaWinOn);
+        if user_active() || (toggle && deciding) {
             self.acts.later(
                 act,
                 Instant::now(),
@@ -75,10 +82,30 @@ impl AutoplayManager {
         self.hand.give_way().await;
         match act {
             Act::Burst(presses) => self.press_through(presses, hover_ms, hold_ms).await,
-            Act::AutoWinOn => self.switch_auto_win_on(hover_ms, hold_ms).await,
+            Act::AutoWinOn => match self.riichi_small().await {
+                Some(true) => {
+                    self.switch_toggle(coords::AUTO_WIN, "auto-win", true, hover_ms, hold_ms)
+                        .await;
+                }
+                Some(false) => {
+                    info!("autoplay: our riichi is a mangan or more; auto-win stays off")
+                }
+                // Read again in a moment: the hand is in the middle of a draw.
+                None => self.acts.later(
+                    act,
+                    Instant::now(),
+                    Duration::from_millis(humanize::ACT_PUT_OFF_MS),
+                ),
+            },
+            Act::DamaWinOn => {
+                let lit = self
+                    .switch_toggle(coords::AUTO_WIN, "auto-win", true, hover_ms, hold_ms)
+                    .await;
+                self.acts.dama_win_read(lit);
+            }
             Act::EndPress(sight) => self.press_end(sight, hover_ms, hold_ms).await,
             Act::EndTap => self.tap_end(hover_ms, hold_ms).await,
-            Act::Look | Act::EndLook => {}
+            Act::Look | Act::EndLook | Act::DamaLook => {}
         }
     }
 
@@ -202,29 +229,63 @@ impl AutoplayManager {
             .burst_done(Instant::now(), watch.confirmed(), &mut rand::rng());
     }
 
-    /// Switch the client's auto-win on by its toggle, left of the table,
-    /// reading it first and after. One already on is left alone, and one that
-    /// cannot be seen (its strip folded away, or covered) is not pressed.
-    async fn switch_auto_win_on(&mut self, hover_ms: u32, hold_ms: u32) {
-        let Some(rect) = self.canvas.resolve(&self.ctx).await else {
+    /// Read our hand at rest: whether it is played dama and wants auto-win
+    /// ([`dama::dama_win`]).
+    async fn read_dama(&mut self) {
+        let Some(seat) = self.state.cached_our_seat else {
             return;
         };
-        match self.read_toggle(rect, coords::AUTO_WIN).await {
-            Glyph::Unlit => {}
-            Glyph::Lit => {
-                debug!("autoplay: the client's auto-win is on already");
-                return;
-            }
-            Glyph::Absent => {
-                debug!("autoplay: the auto-win toggle is not in sight");
-                return;
-            }
+        let read = {
+            let tracker = self.tracker.lock().await;
+            tracker.snapshot().and_then(|s| dama::dama_win(&s, seat))
+        };
+        let Some(win) = read else {
+            debug!("autoplay: our hand was not at rest to be read");
+            return;
+        };
+        if win {
+            info!("autoplay: our hand is played dama, below a mangan");
         }
-        let at = aim::again(
-            coords::AUTO_WIN,
-            reach_of(coords::AUTO_WIN),
-            &mut rand::rng(),
-        );
+        self.acts.dama_read(win, Instant::now(), &mut rand::rng());
+    }
+
+    /// Whether our hand in riichi is below a mangan ([`dama::riichi_small`]);
+    /// `None` while it cannot be read.
+    async fn riichi_small(&self) -> Option<bool> {
+        let seat = self.state.cached_our_seat?;
+        let tracker = self.tracker.lock().await;
+        tracker
+            .snapshot()
+            .and_then(|s| dama::riichi_small(&s, seat))
+    }
+
+    /// Switch the client's toggle at `at` (`name` in the log), left of the
+    /// table, on or off, reading it first and after. One that already shows
+    /// as wanted is left alone, and one that cannot be seen (its strip folded
+    /// away, or covered) is not pressed. Returns whether it is lit at the
+    /// end, `None` when it could not be seen.
+    async fn switch_toggle(
+        &mut self,
+        at: (f64, f64),
+        name: &str,
+        on: bool,
+        hover_ms: u32,
+        hold_ms: u32,
+    ) -> Option<bool> {
+        let state = if on { "on" } else { "off" };
+        let rect = self.canvas.resolve(&self.ctx).await?;
+        match self.read_toggle(rect, at).await {
+            Glyph::Absent => {
+                debug!("autoplay: the {name} toggle is not in sight");
+                return None;
+            }
+            glyph if (glyph == Glyph::Lit) == on => {
+                debug!("autoplay: the client's {name} is {state} already");
+                return Some(on);
+            }
+            _ => {}
+        }
+        let aim_at = aim::again(at, reach_of(at), &mut rand::rng());
         let touch = Touch {
             hover_ms,
             hold_ms,
@@ -232,16 +293,22 @@ impl AutoplayManager {
         };
         let pressed = self
             .hand
-            .press("auto-win", rect.pixel(at.0, at.1), rect, touch)
+            .press(name, rect.pixel(aim_at.0, aim_at.1), rect, touch)
             .await;
         tokio::time::sleep(Duration::from_millis(humanize::TOGGLE_REDRAW_MS)).await;
-        match self.read_toggle(rect, coords::AUTO_WIN).await {
-            Glyph::Lit if pressed => info!("autoplay: switched the client's auto-win on"),
-            glyph => warn!(
-                "autoplay: switching the client's auto-win on did not take; it reads {glyph:?}"
-            ),
+        let glyph = self.read_toggle(rect, at).await;
+        if pressed && (glyph == Glyph::Lit) == on && glyph != Glyph::Absent {
+            info!("autoplay: switched the client's {name} {state}");
+        } else {
+            warn!(
+                "autoplay: switching the client's {name} {state} did not take; it reads {glyph:?}"
+            );
         }
         self.hand.rest(rect);
+        match glyph {
+            Glyph::Absent => None,
+            glyph => Some(glyph == Glyph::Lit),
+        }
     }
 
     /// One tap where "play again" comes, through what shows between the

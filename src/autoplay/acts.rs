@@ -42,15 +42,22 @@
 //! - **Auto-win after a riichi.** Once our riichi is accepted, the hand may
 //!   switch the client's own auto-win on, at any moment as likely as the next
 //!   (`humanize::AUTO_WIN_ON`): an early riichi, with longer to go, is the
-//!   likelier to have it on. The client switches it off again by itself for
-//!   every new hand.
+//!   likelier to have it on — if, when the moment comes, the hand is below a
+//!   mangan whichever way it wins (`autoplay::dama::riichi_small`). The
+//!   client switches it off again by itself for every new hand.
+//! - **Auto-win for a hand played dama.** A moment after each of our discards
+//!   the hand at rest is read (`autoplay::dama`). Once a hand played dama
+//!   wants auto-win, a moment is drawn, any moment as likely as the next
+//!   (`humanize::DAMA_WIN_ON`), and at it the hand switches the client's
+//!   auto-win on. A moment no longer wanted when a later read comes is
+//!   dropped; auto-win, once on, stays on for the hand.
 //!
 //! This is the plan alone; the manager makes the looks and the presses, and
 //! reads the toggle's colour to know where it stands (`autoplay::pixels`).
 
 use crate::autoplay::humanize::{
-    self, Hazard, ASK_SEEN, AUTO_WIN_ON, CONFIRM_SEEN, CONFIRM_SEEN_MOST_MS, END_LOOK_EVERY_MS,
-    END_LOOK_FIRST_MS, END_PAUSE, END_SEEN, OUR_BUTTON_LINGER, OUR_WIN_LINGER,
+    self, Hazard, ASK_SEEN, AUTO_WIN_ON, CONFIRM_SEEN, CONFIRM_SEEN_MOST_MS, DAMA_WIN_ON,
+    END_LOOK_EVERY_MS, END_LOOK_FIRST_MS, END_PAUSE, END_SEEN, OUR_BUTTON_LINGER, OUR_WIN_LINGER,
     RESULT_LOOK_EVERY_MS, RESULT_LOOK_FIRST_MS, RESULT_PAUSE, RESULT_START, TAP_AFTER_MS,
 };
 use crate::autoplay::pixels::Sight;
@@ -76,6 +83,9 @@ const END_TAPS: u32 = 20;
 /// How long after "play again" its question is waited for: it comes with a
 /// little animation, and a look may fall before it.
 const ASK_WAIT: Duration = Duration::from_secs(5);
+/// From our discard to the read of the hand it leaves: the game's state has
+/// taken the discard in well before.
+const DAMA_LOOK: Duration = Duration::from_millis(400);
 
 /// What to do now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +96,10 @@ pub enum Act {
     Burst(u32),
     /// Switch the client's auto-win on.
     AutoWinOn,
+    /// Read our hand at rest: whether it is played dama.
+    DamaLook,
+    /// Switch the client's auto-win on for a hand played dama.
+    DamaWinOn,
     /// Look at the game's own screens after its end.
     EndLook,
     /// Press the button of the game's own screen in sight, once: its yellow
@@ -170,6 +184,12 @@ pub struct Acts {
     result: Option<Shown>,
     win_on_at: Option<Instant>,
     end: Option<Ending>,
+    /// When our hand at rest is read.
+    dama_look_at: Option<Instant>,
+    /// When auto-win goes on for a hand played dama.
+    dama_win_at: Option<Instant>,
+    /// Auto-win has gone on for a hand played dama in this hand.
+    dama_win_on: bool,
 }
 
 fn after<R: Rng + ?Sized>(now: Instant, wait: Hazard, rng: &mut R) -> Instant {
@@ -234,13 +254,18 @@ impl Acts {
             }
             Some(_) => {}
         }
-        // A riichi that ended before its auto-win was switched on stays without it.
+        // A riichi that ended before its auto-win was switched on stays without it,
+        // and so does a hand played dama.
         self.win_on_at = None;
+        self.dama_look_at = None;
+        self.dama_win_at = None;
     }
 
     /// Our riichi was accepted.
     pub fn riichi_accepted<R: Rng + ?Sized>(&mut self, now: Instant, rng: &mut R) {
         self.win_on_at = Some(after(now, AUTO_WIN_ON, rng));
+        self.dama_look_at = None;
+        self.dama_win_at = None;
     }
 
     /// A new hand is dealt, or a new game begins: nothing that was due is.
@@ -248,11 +273,35 @@ impl Acts {
         *self = Self::default();
     }
 
+    /// We discarded at `now`, not in riichi: the hand left is read a moment after.
+    pub fn discarded(&mut self, now: Instant) {
+        self.dama_look_at = Some(now + DAMA_LOOK);
+    }
+
+    /// The hand at rest, read at `now`, is played dama and wants auto-win, or
+    /// not: a moment is drawn for it unless one is pending already or it is on;
+    /// a moment no longer wanted is dropped.
+    pub fn dama_read<R: Rng + ?Sized>(&mut self, win: bool, now: Instant, rng: &mut R) {
+        self.dama_win_at = match self.dama_win_at {
+            _ if !win || self.dama_win_on => None,
+            Some(at) => Some(at),
+            None => Some(after(now, DAMA_WIN_ON, rng)),
+        };
+    }
+
+    /// The client's auto-win, after our press for a hand played dama: on, or
+    /// not (`None` when it could not be seen).
+    pub fn dama_win_read(&mut self, lit: Option<bool>) {
+        self.dama_win_on = lit == Some(true);
+    }
+
     /// The game is over at `now`. Its last result, if one is on screen, is
     /// still pressed through, up to the game's own screens; those are looked
     /// for after it.
     pub fn game_over(&mut self, now: Instant) {
         self.win_on_at = None;
+        self.dama_look_at = None;
+        self.dama_win_at = None;
         if let Some(shown) = &mut self.result {
             shown.last = true;
             shown.until = now + LAST_MOST;
@@ -288,6 +337,8 @@ impl Acts {
         [
             self.result.and_then(|r| r.next.map(|n| n.0)),
             self.win_on_at,
+            self.dama_look_at,
+            self.dama_win_at,
             end,
         ]
         .into_iter()
@@ -318,6 +369,14 @@ impl Acts {
         if self.win_on_at.is_some_and(|at| now >= at) {
             self.win_on_at = None;
             return Some(Act::AutoWinOn);
+        }
+        if self.dama_look_at.is_some_and(|at| now >= at) {
+            self.dama_look_at = None;
+            return Some(Act::DamaLook);
+        }
+        if self.dama_win_at.is_some_and(|at| now >= at) {
+            self.dama_win_at = None;
+            return Some(Act::DamaWinOn);
         }
         if !self.end_turn() {
             return None;
@@ -502,6 +561,8 @@ impl Acts {
                 }
             }
             Act::AutoWinOn => self.win_on_at = Some(at),
+            Act::DamaLook => self.dama_look_at = Some(at),
+            Act::DamaWinOn => self.dama_win_at = Some(at),
             Act::EndLook | Act::EndPress(_) | Act::EndTap => {
                 if let Some(end) = &mut self.end {
                     end.next = Some((at, EndStep::Look));
@@ -690,7 +751,12 @@ mod tests {
                     (bursts, last) = (bursts + 1, at);
                     acts.burst_done(at, 0, &mut rng);
                 }
-                Act::AutoWinOn | Act::EndLook | Act::EndPress(_) | Act::EndTap => unreachable!(),
+                Act::AutoWinOn
+                | Act::DamaLook
+                | Act::DamaWinOn
+                | Act::EndLook
+                | Act::EndPress(_)
+                | Act::EndTap => unreachable!(),
             }
         }
         assert!(bursts >= 1);
@@ -1149,5 +1215,77 @@ mod tests {
         // 1 - e^(-(t - 2) / 25): about 0.27 by 10 s, 0.78 by 40 s.
         assert!((short - 0.274).abs() < 0.04, "{short}");
         assert!((long - 0.781).abs() < 0.04, "{long}");
+    }
+
+    /// Our discard has the hand read a moment after it; a hand played dama
+    /// has auto-win switched on some while after, and once on, not again.
+    #[test]
+    fn a_hand_played_dama_has_auto_win_switched_on_some_while_after() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.discarded(t0);
+        assert_eq!(acts.due(), Some(t0 + DAMA_LOOK));
+        let read = t0 + DAMA_LOOK;
+        assert_eq!(acts.next(read, 0, &mut rng), Some(Act::DamaLook));
+
+        acts.dama_read(true, read, &mut rng);
+        let (at, act) = step(&mut acts, 0, &mut rng).unwrap();
+        assert_eq!(act, Act::DamaWinOn);
+        assert!(at >= read + Duration::from_millis(1500));
+        acts.dama_win_read(Some(true));
+        assert_eq!(acts.due(), None);
+
+        // The next read finds it on.
+        acts.discarded(at);
+        assert_eq!(acts.next(at + DAMA_LOOK, 0, &mut rng), Some(Act::DamaLook));
+        acts.dama_read(true, at + DAMA_LOOK, &mut rng);
+        assert_eq!(acts.due(), None);
+    }
+
+    /// A read before the moment keeps its time; one that no longer wants it
+    /// drops it.
+    #[test]
+    fn the_moment_keeps_its_time_until_it_is_no_longer_wanted() {
+        let mut rng = StdRng::seed_from_u64(12);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.dama_read(true, t0, &mut rng);
+        let at = acts.due().unwrap();
+        acts.dama_read(true, ms(t0, 500), &mut rng);
+        assert_eq!(acts.due(), Some(at));
+        acts.dama_read(false, ms(t0, 600), &mut rng);
+        assert_eq!(acts.due(), None);
+    }
+
+    /// A riichi, or the hand's end, drops a pending moment.
+    #[test]
+    fn a_riichi_or_the_hand_s_end_drops_the_moment() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        acts.dama_read(true, t0, &mut rng);
+        acts.riichi_accepted(ms(t0, 1000), &mut rng);
+        assert_eq!(
+            step(&mut acts, 0, &mut rng).map(|s| s.1),
+            Some(Act::AutoWinOn),
+            "only the riichi's auto-win is left"
+        );
+        acts.dama_read(true, ms(t0, 2000), &mut rng);
+        acts.result_shown(0, false, ms(t0, 3000), &mut rng);
+        assert_eq!(acts.due().map(|_| ()), Some(()), "the result is looked at");
+        assert!(acts.dama_win_at.is_none());
+    }
+
+    /// Our toggle acts put off come again.
+    #[test]
+    fn dama_acts_put_off_come_again() {
+        let t0 = Instant::now();
+        let mut acts = Acts::default();
+        for act in [Act::DamaLook, Act::DamaWinOn] {
+            acts.later(act, t0, Duration::from_millis(500));
+            let mut rng = StdRng::seed_from_u64(16);
+            assert_eq!(acts.next(ms(t0, 500), 0, &mut rng), Some(act));
+        }
     }
 }

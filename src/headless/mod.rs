@@ -385,9 +385,7 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
         }
         "set_monitor_auto_win" => {
             let Enabled { enabled } = parse(params)?;
-            let config = state
-                .save_config(|c| c.monitor.riichi_auto_win = enabled)
-                .await?;
+            let config = state.save_config(|c| c.monitor.auto_win = enabled).await?;
             reply(config.monitor)
         }
         "set_monitor_continue" => {
@@ -667,7 +665,7 @@ mod tests {
                 "brand": "Akagi",
                 "monitor": {
                     "always_on_top": true, "pointer_trail": false, "pointer_lean": false,
-                    "quick_confirm": true, "riichi_auto_win": false, "auto_continue": false,
+                    "quick_confirm": true, "auto_win": false, "auto_continue": false,
                     "stream_output": false, "stream_port": 0, "stream_token": "",
                 },
                 "version": "1.2.3",

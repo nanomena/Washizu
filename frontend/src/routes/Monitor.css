@@ -663,28 +663,38 @@
 /* ------------------------------------------------------------ settings ---- */
 
 /* The groups in a list on columns 5 and 6; the chosen one on 7 to 12, its
- * settings in two columns of three rows (what autoplay does | what the pointer
- * does; how the game is shown and streamed | the window), its links a line
- * each, or its lines in two columns of six. */
+ * settings a line each, its links a line each, or its lines in two columns of
+ * six. */
 .msets > .mset-groups { grid-column: 1 / 3; }
-.msets > section { grid-column: 3 / 9; }
+.msets > section { grid-column: 3 / 9; grid-template-rows: minmax(0, 1fr); }
 .mset-groups { grid-template-rows: repeat(5, minmax(0, 1fr)); row-gap: 3px; padding: 6px; }
 .mset-groups button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13px; color: var(--m-ink2); white-space: nowrap; overflow: hidden; }
 .mset-groups button:hover { color: var(--m-ink); background: hsl(35 20% 14% / 0.05); }
 .mset-groups button[aria-pressed='true'] { color: var(--m-ink); font-weight: 500; background: var(--m-well); }
-.mset-grid { display: grid; grid-template: repeat(3, minmax(0, 1fr)) / repeat(2, minmax(0, 1fr)); grid-auto-flow: column; column-gap: 28px; min-height: 0; }
-.mset-grid > .mset-row:nth-child(3n + 1) { border-top: 0; }
+/* Lines a sixth of the pane high, six in sight as the lines of the other groups;
+ * more scroll. The scrollbar's room is kept whether or not there is one, so a
+ * setting stands where it does in every group. */
+.mset-grid {
+  container-type: size; display: grid; grid-auto-rows: calc(100cqh / 6); align-content: start; min-height: 0;
+  overflow: hidden auto; scrollbar-width: thin; scrollbar-color: var(--m-line-strong) transparent; scrollbar-gutter: stable;
+}
 .mset-facts { display: grid; grid-template: repeat(6, minmax(0, 1fr)) / repeat(2, minmax(0, 1fr)); column-gap: 28px; align-content: start; min-height: 0; overflow: hidden; }
 .mset-facts > .mfact:nth-child(-n + 2) { border-top: 0; }
 .mset-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; min-width: 0; min-height: 0; }
 .mset-row + .mset-row { border-top: 1px solid var(--m-line); }
-.mset-row > div { display: grid; row-gap: 3px; min-width: 0; }
-.mset-row strong { font-size: 13px; font-weight: 500; }
+/* A setting is one line: its name in a column of names, the line about it as far as it goes (whole on hover), its control. */
+.mset-row > div { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: baseline; column-gap: 12px; min-width: 0; }
+.mset-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .mset-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--m-dim); }
 .mset-row small[data-value] { color: var(--m-ink2); font-variant-numeric: tabular-nums; user-select: text; }
 .mset-row :is(.mswitch, .mselect, .mlevel) { justify-self: end; }
+.mset-row .mswitch { height: 21px; }
+.mset-row .mselect { height: 20px; }
+.mset-row .mlevel { padding: 1px; }
+.mset-row .mlevel button { height: 18px; line-height: 18px; }
+.mset-row .mset-copy { width: 22px; height: 21px; }
 /* The stream's row has a cell for its copy button, kept while there is nothing to copy. */
-.mset-row--extra { grid-template-columns: minmax(0, 1fr) 28px auto; }
+.mset-row--extra { grid-template-columns: minmax(0, 1fr) 22px auto; }
 .mset-row--extra > div { grid-column: 1; }
 .mset-row--extra .mset-copy { grid-column: 2; }
 .mset-row--extra .mswitch { grid-column: 3; }

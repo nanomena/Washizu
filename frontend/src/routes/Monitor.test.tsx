@@ -5,7 +5,7 @@ import { setLang } from '@/lib/i18n'
 
 const fixture = vi.hoisted(() => ({
   snapshot: null as MonitorSnapshot | null,
-  options: { always_on_top: false } as { always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean; quick_confirm?: boolean; riichi_auto_win?: boolean; auto_continue?: boolean; stream_output?: boolean; stream_url?: string },
+  options: { always_on_top: false } as { always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean; quick_confirm?: boolean; auto_win?: boolean; auto_continue?: boolean; stream_output?: boolean; stream_url?: string },
   calls: [] as Array<[string, unknown]>,
   /** What the core answers when an earlier hand's events are asked for. */
   handEvents: [] as MonitorEvent[],
@@ -21,7 +21,7 @@ vi.mock('@/lib/host', () => ({
     if (cmd === 'set_monitor_trail') fixture.options = { ...fixture.options, pointer_trail: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_lean') fixture.options = { ...fixture.options, pointer_lean: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_confirm') fixture.options = { ...fixture.options, quick_confirm: (args as { enabled: boolean }).enabled }
-    if (cmd === 'set_monitor_auto_win') fixture.options = { ...fixture.options, riichi_auto_win: (args as { enabled: boolean }).enabled }
+    if (cmd === 'set_monitor_auto_win') fixture.options = { ...fixture.options, auto_win: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_continue') fixture.options = { ...fixture.options, auto_continue: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_stream') {
       const enabled = (args as { enabled: boolean }).enabled
@@ -512,7 +512,7 @@ describe('the settings', () => {
     expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: true }])
 
     // What autoplay presses between decisions: each its own switch, saved by the core.
-    for (const [name, command] of [['快速确认', 'set_monitor_confirm'], ['立直自动和牌', 'set_monitor_auto_win']]) {
+    for (const [name, command] of [['快速确认', 'set_monitor_confirm'], ['自动和牌', 'set_monitor_auto_win']]) {
       const row = screen.getByRole('switch', { name })
       expect(row.getAttribute('aria-checked')).toBe('false')
       fireEvent.click(row)

@@ -4,7 +4,7 @@
 //! canvas cache and the dead-click count, and forgets the rest — the tiles
 //! last seen, the riichi, and all the pointer knows ([`Hand::reset`]). The
 //! presses between decisions (`autoplay::acts`) learn of each result, riichi,
-//! deal and game end here.
+//! deal, game end and discard of ours here.
 //!
 //! [`Hand::reset`]: crate::autoplay::pointer::Hand::reset
 
@@ -74,6 +74,10 @@ impl AutoplayManager {
                 self.state.last_kawa_tile = Some(pai.clone());
                 if self.is_ours(*actor) {
                     self.state.last_self_tsumo = None;
+                    // The hand it leaves may be played dama; in riichi it is not ours to play.
+                    if !self.state.self_riichi_accepted {
+                        self.acts.discarded(Instant::now());
+                    }
                 }
             }
             MjaiEvent::ReachAccepted { actor } => {
