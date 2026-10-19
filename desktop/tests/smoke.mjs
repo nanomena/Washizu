@@ -35,7 +35,9 @@ const port = await new Promise(done => {
 // On a screen of scale 1.5, as many are: CSS and screen pixels differ, which is
 // where a page drawn for the stream could be laid out apart from its view.
 const SCREEN_SCALE = 1.5
-const shell = spawn(electron, [DESKTOP, '--no-sandbox', `--force-device-scale-factor=${SCREEN_SCALE}`, `--data=${path.join(work, 'data')}`, `--core=${core}`, `--dock=${dock}`, `--cdp-port=${port}`], { stdio: ['ignore', 'pipe', 'pipe'] })
+// `--run` marks the start as one that has its logging switches already (see `src/journal.js`): without
+// it the shell starts itself again with them, and the process watched here would be gone.
+const shell = spawn(electron, [DESKTOP, '--no-sandbox', `--force-device-scale-factor=${SCREEN_SCALE}`, `--data=${path.join(work, 'data')}`, `--core=${core}`, `--dock=${dock}`, `--cdp-port=${port}`, '--run=smoke'], { stdio: ['ignore', 'pipe', 'pipe'] })
 let said = ''
 shell.stdout.on('data', text => { said += text })
 shell.stderr.on('data', text => { said += text })
