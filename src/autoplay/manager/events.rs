@@ -24,7 +24,7 @@ impl AutoplayManager {
                 // than going through the tracker. This avoids the try_lock
                 // race entirely and makes cached_our_seat available from
                 // the very first event of the game.
-                self.acts.hand_over(Instant::now());
+                self.acts.hand_over();
                 self.new_game();
                 self.state.cached_our_seat = *id;
                 self.state.num_players = *num_players;
@@ -45,7 +45,7 @@ impl AutoplayManager {
             }
             MjaiEvent::StartKyoku { .. } | MjaiEvent::EndKyoku => {
                 if matches!(ev, MjaiEvent::StartKyoku { .. }) {
-                    self.acts.hand_over(Instant::now());
+                    self.acts.hand_over();
                 }
                 // Per-kyoku reset: keep last seen rect cache and cached seat,
                 // drop everything else. Keep last_kawa_tile as None so

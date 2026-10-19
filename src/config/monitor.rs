@@ -19,18 +19,12 @@ pub struct MonitorConfig {
     /// Press through a hand's result, in bursts at its confirm button, as a
     /// person in a hurry does (see `autoplay::acts`).
     pub quick_confirm: bool,
-    /// Some while after our riichi, switch the client's own auto-win on; the
-    /// client switches it off for every new hand (see `autoplay::acts`).
-    pub riichi_auto_win: bool,
-    /// With a hand played dama — closed, not in riichi, ready, a yaku on
-    /// every wait — some while after our discard, switch the client's own
-    /// auto-win on, below a mangan and not in a hand that may be the game's
-    /// last (see `autoplay::dama`).
-    pub dama_auto_win: bool,
-    /// With a hand played dama, switch the client's own no-calls on, unless
-    /// the hand holds a pair a call would pay for, and off again once the hand
-    /// no longer asks for it (see `autoplay::dama`).
-    pub dama_no_calls: bool,
+    /// Some while after our riichi, or after our hand comes to be played
+    /// dama — closed, not in riichi, ready, a yaku on every wait — switch the
+    /// client's own auto-win on, below a mangan, and for a hand played dama
+    /// not in a hand that may be the game's last; the client switches it off
+    /// for every new hand (see `autoplay::acts`, `autoplay::dama`).
+    pub auto_win: bool,
     /// Play game after game: with autoplay on, press through the game's own
     /// screens after its end — the standings, the rank, the room's rewards —
     /// and "play again" (see `autoplay::acts`). The level of autoplay above

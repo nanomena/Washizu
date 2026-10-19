@@ -401,14 +401,6 @@ pub const DAMA_WIN_ON: Hazard = Hazard {
     mean: 12_000.0,
     most: 120_000.0,
 };
-/// From a hand played dama being read to the hand switching the client's
-/// no-calls to match it: before the next discards, as a person does on the
-/// turn they settle the hand.
-pub const CALLS_SWITCH: Hazard = Hazard {
-    floor: 400.0,
-    mean: 600.0,
-    most: 4000.0,
-};
 
 /// From a game's end to the first look for its own screens, in ms, when its
 /// last result is not being looked at: the last result plays first.

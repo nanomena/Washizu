@@ -28,8 +28,6 @@
 //! | `set_monitor_lean`     | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_confirm`  | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_auto_win` | `{enabled}`              | `MonitorConfig`   |
-//! | `set_monitor_dama_win` | `{enabled}`              | `MonitorConfig`   |
-//! | `set_monitor_no_calls` | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_continue` | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_stream`   | `{enabled, port, token}` | `MonitorConfig`   |
 //! | `set_user_pointer`     | `{active, x?, y?}`       | `null`            |
@@ -387,23 +385,7 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
         }
         "set_monitor_auto_win" => {
             let Enabled { enabled } = parse(params)?;
-            let config = state
-                .save_config(|c| c.monitor.riichi_auto_win = enabled)
-                .await?;
-            reply(config.monitor)
-        }
-        "set_monitor_dama_win" => {
-            let Enabled { enabled } = parse(params)?;
-            let config = state
-                .save_config(|c| c.monitor.dama_auto_win = enabled)
-                .await?;
-            reply(config.monitor)
-        }
-        "set_monitor_no_calls" => {
-            let Enabled { enabled } = parse(params)?;
-            let config = state
-                .save_config(|c| c.monitor.dama_no_calls = enabled)
-                .await?;
+            let config = state.save_config(|c| c.monitor.auto_win = enabled).await?;
             reply(config.monitor)
         }
         "set_monitor_continue" => {
@@ -683,8 +665,7 @@ mod tests {
                 "brand": "Akagi",
                 "monitor": {
                     "always_on_top": true, "pointer_trail": false, "pointer_lean": false,
-                    "quick_confirm": true, "riichi_auto_win": false, "dama_auto_win": false,
-                    "dama_no_calls": false, "auto_continue": false,
+                    "quick_confirm": true, "auto_win": false, "auto_continue": false,
                     "stream_output": false, "stream_port": 0, "stream_token": "",
                 },
                 "version": "1.2.3",
