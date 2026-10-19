@@ -77,9 +77,9 @@ export function ResultCard({ result, snapshot: s, previous = false }: ResultProp
   </section>
 }
 
-/** The hands a round's end revealed, one to a line: who and how, the hand, the
+/** The hands a round's end revealed, a line each: who and how, the hand, the
  *  ura markers — three columns the same in every line. Room for four. */
-export function RevealedHands({ result, snapshot: s, previous = false, max = 28 }: ResultProps & { max?: number }) {
+export function RevealedHands({ result, snapshot: s, previous = false, max = 22 }: ResultProps & { max?: number }) {
   const game = s.game
   const table = tableOf(game)
   return <div className="mresult-hands">

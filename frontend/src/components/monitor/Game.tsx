@@ -70,9 +70,11 @@ export function GamePages({ snapshot: s }: { snapshot: MonitorSnapshot }) {
   const onTable = at === last && !!s.result
 
   return <div className="md-page mgame">
-    <ol className="mgame-hands" ref={list} aria-label={tr('各局')}>
-      {hands.map((h, i) => <HandLine key={h.round} hand={h} table={table} live={i === last && !s.game_ended} picked={i === at} onPick={() => pick(h, i)} />)}
-    </ol>
+    <div className="mgame-hands">
+      <ol className="mgame-hand-list" ref={list} aria-label={tr('各局')}>
+        {hands.map((h, i) => <HandLine key={h.round} hand={h} table={table} live={i === last && !s.game_ended} picked={i === at} onPick={() => pick(h, i)} />)}
+      </ol>
+    </div>
     <section className="mgame-detail">
       <header className="msec-head">
         <h3>{handLabel(hand)}{hand.result ? <span className="mtag" data-tone={hand.result.kind === 'hora' ? 'win' : 'idle'}>{resultTitle(hand.result)}</span>
@@ -84,7 +86,7 @@ export function GamePages({ snapshot: s }: { snapshot: MonitorSnapshot }) {
       </header>
       {shown === 'result' && hand.result
         ? <div className="mgame-result">
-          <RevealedHands result={hand.result} snapshot={s} previous={!onTable} max={26} />
+          <RevealedHands result={hand.result} snapshot={s} previous={!onTable} />
           <ResultScores result={hand.result} snapshot={s} row />
         </div>
         : <HandEvents key={hand.round} snapshot={s} events={at === last ? s.events : fetched[hand.round] ?? null} live={at === last} />}
