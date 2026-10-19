@@ -65,7 +65,7 @@ function AutoplayRows({ snapshot: s, options, onLevel, onConfirm, onAutoWin, onL
   return <>
     <Row name={tr('自动操作')} about={levelAbout(level ?? 'off')} control={<AutoplayLevels level={level} onLevel={onLevel} />} />
     <Row name={tr('快速确认')} about={tr('和了或流局时，等确认按钮出现再点掉结算')} control={sw(tr('快速确认'), !!options.quick_confirm, onConfirm)} />
-    <Row name={tr('自动和牌')} about={tr('立直或默听、不到满贯时，某个时刻打开雀魂的自动和牌；默听在各场第 4 局和西入后不开')} control={sw(tr('自动和牌'), !!options.auto_win, onAutoWin)} />
+    <Row name={tr('自动和牌')} about={tr('立直或听牌、不到满贯时，某个时刻打开雀魂的自动和牌；没立直时各场第 4 局和西入后不开')} control={sw(tr('自动和牌'), !!options.auto_win, onAutoWin)} />
     <Row name={tr('预推理')} about={tr('别家行动时，光标停在下一手可能要打的牌上')} control={sw(tr('预推理'), !!options.pointer_lean, onLean)} />
     <Row name={tr('光标轨迹')} about={tr('在游戏画面上画出自动操作的光标和点击')} control={sw(tr('光标轨迹'), !!options.pointer_trail, onTrail)} />
   </>
