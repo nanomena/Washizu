@@ -445,7 +445,7 @@ function watchGame(page, meter) {
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let hung
   page.on('console-message', details => {
-    if (worthKeeping(details.level, details.message)) note(`game console ${details.level}: ${details.message.slice(0, 600)}`)
+    if (worthKeeping(details.level, details.message)) note(`game console ${details.level}: ${details.message.trim().slice(0, 600)}`)
   })
   page.on('unresponsive', () => {
     note('game: the page does not answer')
