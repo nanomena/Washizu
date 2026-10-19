@@ -74,7 +74,7 @@ impl AutoplayManager {
                 self.state.last_kawa_tile = Some(pai.clone());
                 if self.is_ours(*actor) {
                     self.state.last_self_tsumo = None;
-                    // The hand it leaves may be played dama; in riichi it is not ours to play.
+                    // The hand it leaves may be ready; in riichi it is not ours to play.
                     if !self.state.self_riichi_accepted {
                         self.acts.discarded(Instant::now());
                     }

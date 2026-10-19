@@ -393,10 +393,10 @@ pub const AUTO_WIN_ON: Hazard = Hazard {
     mean: 25_000.0,
     most: 600_000.0,
 };
-/// From a hand played dama being read to the hand switching the client's
+/// From a ready hand being read to the hand switching the client's
 /// auto-win on: any moment as likely as the next, as after a riichi, but
 /// sooner — the hand was settled on the turn it was read.
-pub const DAMA_WIN_ON: Hazard = Hazard {
+pub const TENPAI_WIN_ON: Hazard = Hazard {
     floor: 1500.0,
     mean: 12_000.0,
     most: 120_000.0,

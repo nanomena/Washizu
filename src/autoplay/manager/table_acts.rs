@@ -1,6 +1,6 @@
 //! The presses between decisions ([`crate::autoplay::acts`]): through a
 //! hand's result once its confirm button shows, on the client's auto-win
-//! toggle after a riichi or for a hand played dama, and through the game's
+//! toggle after a riichi or for a ready hand, and through the game's
 //! own screens after its end to play again.
 //!
 //! Majsoul only, with autoplay on, each behind its own switch
@@ -14,11 +14,11 @@ use super::AutoplayManager;
 use crate::autoplay::acts::Act;
 use crate::autoplay::cdp_input::user_active;
 use crate::autoplay::context::CanvasRect;
-use crate::autoplay::dama;
 use crate::autoplay::humanize;
 use crate::autoplay::majsoul::{coords, reach_of};
 use crate::autoplay::pixels::{self, Glyph, Image, Sight};
 use crate::autoplay::pointer::{aim, spots, Touch};
+use crate::autoplay::tenpai;
 use crate::config::Platform;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -35,7 +35,7 @@ impl AutoplayManager {
             let on = cfg.autoplay.enabled && cfg.platform.kind == Platform::Majsoul;
             let wanted = match act {
                 Act::Look | Act::Burst(_) => on && cfg.monitor.quick_confirm,
-                Act::AutoWinOn | Act::DamaLook | Act::DamaWinOn => on && cfg.monitor.auto_win,
+                Act::AutoWinOn | Act::TenpaiLook | Act::TenpaiWinOn => on && cfg.monitor.auto_win,
                 Act::EndLook | Act::EndPress(_) | Act::EndTap => on && cfg.monitor.auto_continue,
             };
             let majsoul = &cfg.autoplay.majsoul;
@@ -45,8 +45,8 @@ impl AutoplayManager {
             return;
         }
         // A read of the hand presses nothing.
-        if act == Act::DamaLook {
-            self.read_dama().await;
+        if act == Act::TenpaiLook {
+            self.read_tenpai().await;
             return;
         }
         // A look moves nothing: it goes ahead whatever the user's hand does.
@@ -69,7 +69,7 @@ impl AutoplayManager {
         // The user's hand is on the mouse; and switching a toggle can wait
         // for our own decision to be made.
         let deciding = self.ctx.time_budget.read().ok().and_then(|g| *g).is_some();
-        let toggle = matches!(act, Act::AutoWinOn | Act::DamaWinOn);
+        let toggle = matches!(act, Act::AutoWinOn | Act::TenpaiWinOn);
         if user_active() || (toggle && deciding) {
             self.acts.later(
                 act,
@@ -97,15 +97,15 @@ impl AutoplayManager {
                     Duration::from_millis(humanize::ACT_PUT_OFF_MS),
                 ),
             },
-            Act::DamaWinOn => {
+            Act::TenpaiWinOn => {
                 let lit = self
                     .switch_toggle(coords::AUTO_WIN, "auto-win", true, hover_ms, hold_ms)
                     .await;
-                self.acts.dama_win_read(lit);
+                self.acts.tenpai_win_read(lit);
             }
             Act::EndPress(sight) => self.press_end(sight, hover_ms, hold_ms).await,
             Act::EndTap => self.tap_end(hover_ms, hold_ms).await,
-            Act::Look | Act::EndLook | Act::DamaLook => {}
+            Act::Look | Act::EndLook | Act::TenpaiLook => {}
         }
     }
 
@@ -229,34 +229,36 @@ impl AutoplayManager {
             .burst_done(Instant::now(), watch.confirmed(), &mut rand::rng());
     }
 
-    /// Read our hand at rest: whether it is played dama and wants auto-win
-    /// ([`dama::dama_win`]).
-    async fn read_dama(&mut self) {
+    /// Read our hand at rest: whether it is ready and wants auto-win
+    /// ([`tenpai::tenpai_win`]).
+    async fn read_tenpai(&mut self) {
         let Some(seat) = self.state.cached_our_seat else {
             return;
         };
         let read = {
             let tracker = self.tracker.lock().await;
-            tracker.snapshot().and_then(|s| dama::dama_win(&s, seat))
+            tracker
+                .snapshot()
+                .and_then(|s| tenpai::tenpai_win(&s, seat))
         };
         let Some(win) = read else {
             debug!("autoplay: our hand was not at rest to be read");
             return;
         };
         if win {
-            info!("autoplay: our hand is played dama, below a mangan");
+            info!("autoplay: our hand is ready, below a mangan");
         }
-        self.acts.dama_read(win, Instant::now(), &mut rand::rng());
+        self.acts.tenpai_read(win, Instant::now(), &mut rand::rng());
     }
 
-    /// Whether our hand in riichi is below a mangan ([`dama::riichi_small`]);
+    /// Whether our hand in riichi is below a mangan ([`tenpai::riichi_small`]);
     /// `None` while it cannot be read.
     async fn riichi_small(&self) -> Option<bool> {
         let seat = self.state.cached_our_seat?;
         let tracker = self.tracker.lock().await;
         tracker
             .snapshot()
-            .and_then(|s| dama::riichi_small(&s, seat))
+            .and_then(|s| tenpai::riichi_small(&s, seat))
     }
 
     /// Switch the client's toggle at `at` (`name` in the log), left of the

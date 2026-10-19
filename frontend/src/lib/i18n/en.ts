@@ -58,7 +58,7 @@ export const en: Record<string, string> = {
   '快速确认': 'Quick confirm',
   '和了或流局时，等确认按钮出现再点掉结算': 'Confirms a hand\'s result once its confirm button shows',
   '自动和牌': 'Auto-win',
-  '立直或默听、不到满贯时，某个时刻打开雀魂的自动和牌；默听在各场第 4 局和西入后不开': 'Turns on Mahjong Soul\'s auto-win some time after riichi or in a dama hand, below mangan; never for dama in a 4th hand or an extra round',
+  '立直或听牌、不到满贯时，某个时刻打开雀魂的自动和牌；没立直时各场第 4 局和西入后不开': 'Turns on Mahjong Soul\'s auto-win some time after riichi or once ready, below mangan; without riichi, never in a 4th hand or an extra round',
   '直播输出': 'Stream output',
   '只把游戏画面交给 OBS': 'The game alone, for OBS',
   '复制直播地址': 'Copy the stream address',

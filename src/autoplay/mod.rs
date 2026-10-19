@@ -55,9 +55,9 @@
 //!   between turns ([`pointer::lean`]) and its rests.
 //! - [`acts`] — the presses between decisions: through a hand's result, on
 //!   the client's auto-win around a riichi, and on its auto-win and no-calls
-//!   for a hand played dama.
-//! - [`dama`] — whether our hand is played dama, and which of the client's
-//!   toggles that asks for.
+//!   for a ready hand.
+//! - [`tenpai`] — whether our ready hand, or our riichi, wants the client's
+//!   auto-win.
 //! - [`pixels`] — reading the few pixels of the game that say what its
 //!   script does not, such as whether one of its toggles is on.
 //! - [`riichi_city`] — Riichi City: protocol frames instead of presses.
@@ -75,7 +75,6 @@ pub mod budget;
 pub mod canvas;
 pub mod cdp_input;
 pub mod context;
-pub mod dama;
 pub mod delay;
 pub mod humanize;
 pub mod inject;
@@ -88,6 +87,7 @@ pub mod riichi_city;
 pub mod table;
 pub mod tenhou;
 pub mod tenhou_state;
+pub mod tenpai;
 pub mod verify;
 
 pub use budget::{BudgetSource, SharedTimeBudget, TimeBudget};

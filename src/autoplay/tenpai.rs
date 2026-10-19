@@ -1,20 +1,20 @@
-//! Whether a person would have the client's own auto-win on for a settled
-//! hand: one played dama, or one in riichi.
+//! Whether a person would have the client's own auto-win on for a hand that
+//! is ready: one not in riichi, closed or open, or one in riichi.
 //!
-//! A hand is played dama when it is closed (concealed kans aside), not in
-//! riichi, ready, and wins by ron on every one of its waits: it has a yaku
-//! without the riichi. Such a hand is settled, and a person sitting on one
-//! often lets the client take its win — while it is below a mangan whichever
-//! way it wins, and not in the hand that may be the game's last. A big hand is
-//! watched, and in the last hand where the game ends decides whether a win is
-//! wanted. The game's length is not known here, so every fourth hand counts
-//! as one that may be the last, and so does every hand of an extra round.
+//! A ready hand not in riichi that wins on some wait is settled, and a person
+//! sitting on one often lets the client take its win — while it is below a
+//! mangan whichever way it wins, and not in the hand that may be the game's
+//! last. A big hand is watched, and in the last hand where the game ends
+//! decides whether a win is wanted. The game's length is not known here, so
+//! every fourth hand counts as one that may be the last, and so does every
+//! hand of an extra round. A wait without a yaku is no matter: the client's
+//! auto-win takes only a win the rules allow.
 //!
 //! A hand in riichi has auto-win likewise only below a mangan, its riichi
 //! counted (ura dora and ippatsu cannot be known ahead).
 //!
-//! The client's no-calls is not switched: a hand played dama may still fold,
-//! and call at the end to be ready when the wall runs out.
+//! The client's no-calls is not switched: a ready hand may still fold, and
+//! call at the end to be ready when the wall runs out.
 //!
 //! Read on the hand at rest: after our discard, or with the tile just drawn
 //! set aside. Four players only.
@@ -85,7 +85,7 @@ fn at_rest(me: &PlayerSnapshot) -> Option<Vec<&str>> {
     }
 }
 
-/// A closed hand that is ready, and how each of its waits would score.
+/// A hand that is ready, and how each of its waits would score.
 struct Ready {
     evaluator: HandEvaluator,
     waits: Vec<u8>,
@@ -94,25 +94,37 @@ struct Ready {
 }
 
 impl Ready {
-    /// `seat`'s hand at rest: `None` when it cannot be read, `Some(None)`
-    /// when it is open (concealed kans aside) or not ready.
+    /// `seat`'s hand at rest, its melds with it: `None` when it cannot be
+    /// read, `Some(None)` when it is not ready.
     fn read(s: &GameStateSnapshot, seat: u8) -> Option<Option<Ready>> {
         let me = s.players.get(usize::from(seat))?;
-        if me.melds.iter().any(|m| m.kind != MeldKind::Ankan) {
-            return Some(None);
-        }
         let hand = at_rest(me)?;
-        let kans: Vec<&str> = me
+        let called: Vec<&str> = me
             .melds
             .iter()
             .flat_map(|m| m.tiles.iter().map(String::as_str))
             .collect();
-        let all = ids(&[hand.as_slice(), kans.as_slice()].concat())?;
-        let (hand_ids, kan_ids) = all.split_at(hand.len());
-        let melds = kan_ids
-            .chunks(4)
-            .map(|kan| Meld::new(MeldType::Ankan, kan.to_vec(), false, -1, None))
-            .collect();
+        let all = ids(&[hand.as_slice(), called.as_slice()].concat())?;
+        let (hand_ids, mut meld_ids) = all.split_at(hand.len());
+        let mut melds = Vec::with_capacity(me.melds.len());
+        for meld in &me.melds {
+            let (tiles, rest) = meld_ids.split_at(meld.tiles.len());
+            meld_ids = rest;
+            let kind = match meld.kind {
+                MeldKind::Chi => MeldType::Chi,
+                MeldKind::Pon => MeldType::Pon,
+                MeldKind::Daiminkan => MeldType::Daiminkan,
+                MeldKind::Ankan => MeldType::Ankan,
+                MeldKind::Kakan => MeldType::Kakan,
+            };
+            melds.push(Meld::new(
+                kind,
+                tiles.to_vec(),
+                meld.kind != MeldKind::Ankan,
+                -1,
+                None,
+            ));
+        }
         let evaluator = HandEvaluator::new(hand_ids.to_vec(), melds);
         if !evaluator.is_tenpai() {
             return Some(None);
@@ -165,9 +177,10 @@ impl Ready {
     }
 }
 
-/// Whether `seat`'s hand, not in riichi, is played dama and wants auto-win;
-/// `None` when it is not at rest or cannot be read.
-pub fn dama_win(s: &GameStateSnapshot, seat: u8) -> Option<bool> {
+/// Whether `seat`'s hand, not in riichi, is ready and wants auto-win: it wins
+/// on some wait, below a mangan whichever way, and not in a hand that may be
+/// the game's last; `None` when it is not at rest or cannot be read.
+pub fn tenpai_win(s: &GameStateSnapshot, seat: u8) -> Option<bool> {
     let me = s.players.get(usize::from(seat))?;
     if s.num_players != 4 || me.riichi_declared {
         return Some(false);
@@ -175,9 +188,12 @@ pub fn dama_win(s: &GameStateSnapshot, seat: u8) -> Option<bool> {
     let Some(ready) = Ready::read(s, seat)? else {
         return Some(false);
     };
-    let dama = !ready.waits.is_empty() && ready.waits.iter().all(|&w| ready.win(w, false).is_win);
+    let wins = ready
+        .waits
+        .iter()
+        .any(|&w| ready.win(w, false).is_win || ready.win(w, true).is_win);
     let last = s.kyoku >= 4 || matches!(s.bakaze.as_str(), "W" | "N");
-    Some(dama && !last && !ready.big())
+    Some(wins && !last && !ready.big())
 }
 
 /// Whether `seat`'s hand in riichi is below a mangan whichever way it wins,
@@ -238,43 +254,73 @@ mod tests {
     const TANYAO: &str = "2m 3m 4m 4p 5p 6p 6s 7s 8s 3s 4s 6m 6m";
 
     #[test]
-    fn a_small_closed_hand_with_a_yaku_on_every_wait_wants_auto_win() {
-        assert_eq!(dama_win(&table(TANYAO), 0), Some(true));
+    fn a_small_closed_hand_wants_auto_win() {
+        assert_eq!(tenpai_win(&table(TANYAO), 0), Some(true));
     }
 
     #[test]
     fn a_tile_just_drawn_is_set_aside_and_any_other_fourteenth_is_not_read() {
         let mut drawn = table(&format!("{TANYAO} 9m"));
-        assert_eq!(dama_win(&drawn, 0), None);
+        assert_eq!(tenpai_win(&drawn, 0), None);
         drawn.players[0].drawn_tile = Some("9m".into());
-        assert_eq!(dama_win(&drawn, 0), Some(true));
+        assert_eq!(tenpai_win(&drawn, 0), Some(true));
     }
 
     #[test]
-    fn riichi_an_open_hand_or_one_not_ready_is_not_played_dama() {
+    fn riichi_or_a_hand_not_ready_is_not_this_read_s() {
         let mut riichi = table(TANYAO);
         riichi.players[0].riichi_declared = true;
-        assert_eq!(dama_win(&riichi, 0), Some(false));
+        assert_eq!(tenpai_win(&riichi, 0), Some(false));
 
-        let mut open = table("2m 3m 4m 4p 5p 6p 3s 4s 6m 6m");
+        let apart = table("2m 3m 4m 4p 5p 6p 6s 7s 8s 3s 9s 6m 1p");
+        assert_eq!(tenpai_win(&apart, 0), Some(false));
+    }
+
+    /// The pon of 7p, then 2m3m4m 4p5p6p 6m6m and 7s8s: waiting on 6s and 9s.
+    fn open_hand() -> GameStateSnapshot {
+        let mut open = table("2m 3m 4m 4p 5p 6p 7s 8s 6m 6m");
+        open.players[0].melds.push(MeldSnapshot {
+            kind: MeldKind::Pon,
+            tiles: vec!["7p".into(); 3],
+            from_who: 2,
+            called_tile: Some("7p".into()),
+        });
+        open
+    }
+
+    #[test]
+    fn an_open_hand_that_wins_on_some_wait_wants_auto_win() {
+        // 6s is open tanyao; 9s has no yaku, and the client would not take it.
+        assert_eq!(tenpai_win(&open_hand(), 0), Some(true));
+    }
+
+    #[test]
+    fn an_open_mangan_keeps_auto_win_off() {
+        // Tanyao and four dora on 6s: 6m twice, 4p and 2m.
+        let mut big = open_hand();
+        big.dora_markers = vec!["5m".into(), "3p".into(), "1m".into()];
+        assert_eq!(tenpai_win(&big, 0), Some(false));
+    }
+
+    #[test]
+    fn an_open_hand_without_a_yaku_on_any_wait_does_not() {
+        // The pon of 7s, then 1s or 4s: no simples, the pair is the round's wind.
+        let mut open = table("1m 2m 3m 4p 5p 6p 2s 3s E E");
         open.players[0].melds.push(MeldSnapshot {
             kind: MeldKind::Pon,
             tiles: vec!["7s".into(); 3],
             from_who: 2,
             called_tile: Some("7s".into()),
         });
-        assert_eq!(dama_win(&open, 0), Some(false));
-
-        let apart = table("2m 3m 4m 4p 5p 6p 6s 7s 8s 3s 9s 6m 1p");
-        assert_eq!(dama_win(&apart, 0), Some(false));
+        assert_eq!(tenpai_win(&open, 0), Some(false));
     }
 
     #[test]
-    fn a_wait_without_a_yaku_is_not_played_dama() {
-        // 1s and 4s: no simples, the pair is the round's wind, no pinfu.
+    fn a_closed_hand_without_a_yaku_to_ron_wants_auto_win_for_its_tsumo() {
+        // 1s and 4s: no ron, but a closed hand's tsumo is a yaku of its own.
         assert_eq!(
-            dama_win(&table("1m 2m 3m 4p 5p 6p 7s 8s 9s 2s 3s E E"), 0),
-            Some(false)
+            tenpai_win(&table("1m 2m 3m 4p 5p 6p 7s 8s 9s 2s 3s E E"), 0),
+            Some(true)
         );
     }
 
@@ -287,7 +333,7 @@ mod tests {
             from_who: -1,
             called_tile: None,
         });
-        assert_eq!(dama_win(&kan, 0), Some(true));
+        assert_eq!(tenpai_win(&kan, 0), Some(true));
     }
 
     #[test]
@@ -295,10 +341,10 @@ mod tests {
         // Tanyao, pinfu and four dora: 6m twice, 4s and 2m.
         let mut big = table(TANYAO);
         big.dora_markers = vec!["5m".into(), "3s".into(), "1m".into()];
-        assert_eq!(dama_win(&big, 0), Some(false));
+        assert_eq!(tenpai_win(&big, 0), Some(false));
         // Two dora are a mangan by tsumo: tanyao, pinfu, tsumo and the two.
         big.dora_markers = vec!["5m".into()];
-        assert_eq!(dama_win(&big, 0), Some(false));
+        assert_eq!(tenpai_win(&big, 0), Some(false));
     }
 
     #[test]
@@ -307,7 +353,7 @@ mod tests {
             let mut late = table(TANYAO);
             late.bakaze = wind.into();
             late.kyoku = kyoku;
-            assert_eq!(dama_win(&late, 0), Some(false), "{wind}{kyoku}");
+            assert_eq!(tenpai_win(&late, 0), Some(false), "{wind}{kyoku}");
         }
     }
 
