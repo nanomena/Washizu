@@ -11,7 +11,10 @@ import { tr } from '@/lib/i18n'
 type View = 'result' | 'events'
 
 /** A hand in the game's list, in three places of its own: which hand, how it
- *  ended (who won, or that nobody did), and what it did to our score. */
+ *  ended (who won, or that nobody did), and what it did to our score. The dot
+ *  of the hand in play holds still: a breathing one is a compositor layer of
+ *  its own, which put the list's rows on another, and that one was drawn
+ *  outside the list's rounded box. */
 function HandLine({ hand, table, live, picked, onPick }: { hand: HandSummary; table: Table; live: boolean; picked: boolean; onPick: () => void }) {
   const r = hand.result
   const delta = table.self != null ? r?.deltas?.[table.self] : undefined
@@ -19,7 +22,7 @@ function HandLine({ hand, table, live, picked, onPick }: { hand: HandSummary; ta
     <button aria-pressed={picked} onClick={onPick} title={handLabel(hand)}>
       <span className="mgame-hand-name"><strong>{tr('{0}{1}局', WIND[hand.bakaze] ?? hand.bakaze, hand.kyoku)}</strong>{hand.honba > 0 && <small>{tr('{0} 本场', hand.honba)}</small>}</span>
       <span className="mgame-hand-end" data-live={!r || undefined}>
-        {!r ? <><i className="mdot" data-tone={live ? 'busy' : 'idle'} />{tr('进行中')}</>
+        {!r ? <><i className="mdot" data-tone={live ? 'wait' : 'idle'} />{tr('进行中')}</>
           : r.kind !== 'hora' ? <span className="mgame-hand-draw">{tr('流局')}</span>
           : r.hands.length > 0 ? r.hands.map(h => <span key={h.seat} title={`${seatLabel(h.seat, table)} · ${handOutcome(h, table)}`}><SeatTag seat={h.seat} table={table} /></span>)
           : resultTitle(r)}
