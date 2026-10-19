@@ -34,10 +34,12 @@ import { Core } from './core.js'
 import { Feed } from './feed.js'
 import { FrameSource } from './frames.js'
 import { TEXT_MAX, toGame } from './input.js'
+import { Journal, chromiumSwitches, hasChromiumLog, prune, runName } from './journal.js'
 import { MIN, RATIO, conform, framedRatio, gameBounds, handOnGame, onGame, onView, openingSize, restoredBounds, settle, trailBounds } from './layout.js'
 import { policyFor } from './policy.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { STREAM_FPS, StreamServer, newToken, streamUrl } from './stream.js'
+import { FrameMeter, GL_STATE, GlWatch, WATCH_MS, processLine, worthKeeping } from './watch.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** The interface's address. A scheme of its own, so the page has an origin and absolute paths. */
@@ -73,6 +75,12 @@ const OFFSCREEN = Object.freeze({ width: 1280, height: 720, scale: 2, fps: 60 })
 /** The page offscreen comes back after the GPU process is lost this many times in `GPU_LOSS_WINDOW_MS`; after that, the window view is used from the next start. */
 const GPU_LOSSES = 2
 const GPU_LOSS_WINDOW_MS = 10 * 60 * 1000
+/** Where the shell's record and Chromium's go, beside the core's run folders; and this start's name for its files. */
+const LOGS = path.join(DATA, 'logs')
+const RUN = option('run') || runName()
+const journal = new Journal(path.join(LOGS, `shell-${RUN}.log`))
+/** @param {string} message */
+const note = message => journal.note(message)
 
 /** @returns {Promise<number>} a local port nothing is listening on */
 const freePort = () => new Promise((done, fail) => {
@@ -138,7 +146,7 @@ const SPOUT_AVAILABLE = process.platform === 'win32' && fs.existsSync(SPOUT)
 /** @type {StreamServer | null} */
 let stream = null
 /** What the table is doing, kept from the core's snapshots for the stream's `/feed`; nothing about the bot. */
-const feed = new Feed({ readResults: () => running().call('get_history'), log: message => console.warn(message) })
+const feed = new Feed({ readResults: () => running().call('get_history'), log: note })
 /** What the pages beside the stream share; kept while the application runs, through the stream going off and on. */
 const board = new Board()
 /** @type {FrameSource | null} */
@@ -197,7 +205,7 @@ function readView() {
 }
 
 function saveView() {
-  try { fs.writeFileSync(VIEW_STATE, JSON.stringify(viewChoice)) } catch (error) { console.warn(`view: not saved: ${error instanceof Error ? error.message : error}`) }
+  try { fs.writeFileSync(VIEW_STATE, JSON.stringify(viewChoice)) } catch (error) { note(`view: not saved: ${error instanceof Error ? error.message : error}`) }
 }
 
 /** The options about the game's view, as the interface is told them. */
@@ -264,7 +272,7 @@ function openWindow(ready) {
   if (options.stream_output) {
     // Served from the start, at the address the streaming program already has.
     streamStarting = startStream().catch(error => {
-      console.warn(`stream: not served: ${error instanceof Error ? error.message : error}`)
+      note(`stream: not served: ${error instanceof Error ? error.message : error}`)
       options = { ...options, stream_output: false }
     })
   }
@@ -344,6 +352,7 @@ function createGame() {
   const view = new WebContentsView({ webPreferences: { partition: GAME_PARTITION, sandbox: true, contextIsolation: true, backgroundThrottling: false } })
   view.setBackgroundColor('#000000')
   guardGame(view.webContents)
+  watchGame(view.webContents, null)
   return view
 }
 
@@ -364,10 +373,15 @@ function createOffscreenGame() {
   const page = win.webContents
   page.setFrameRate(OFFSCREEN.fps)
   guardGame(page)
+  const meter = new FrameMeter(OFFSCREEN.fps, WATCH_MS)
+  watchGame(page, meter)
   const resize = () => win.setBounds({ x: 0, y: 0, width: OFFSCREEN.width, height: OFFSCREEN.height })
-  const fanout = relay = new Relay({ expected: { width: OFFSCREEN.width * OFFSCREEN.scale, height: OFFSCREEN.height * OFFSCREEN.scale }, onSize: resize, log: message => console.warn(message) })
-  fanout.add(pageTaker({ sharedTexture, frame: () => dock?.webContents.mainFrame ?? null, log: message => console.warn(message) }))
-  page.on('paint', event => { if (event.texture) fanout.paint(event.texture) })
+  const fanout = relay = new Relay({ expected: { width: OFFSCREEN.width * OFFSCREEN.scale, height: OFFSCREEN.height * OFFSCREEN.scale }, onSize: resize, log: note })
+  fanout.add(pageTaker({ sharedTexture, frame: () => dock?.webContents.mainFrame ?? null, log: note }))
+  page.on('paint', event => {
+    meter.paint()
+    if (event.texture) fanout.paint(event.texture)
+  })
   // The page draws its own cursor no more: the dock's stage shows the one it asks for.
   page.on('cursor-changed', (_event, type) => dock?.webContents.send('akagi:event', 'game-cursor', type))
   screen.on('display-metrics-changed', resize)
@@ -383,7 +397,7 @@ function startSpout() {
     return
   }
   if (spout) return
-  spout = new SpoutTaker({ exe: SPOUT, pid: process.pid, sender: SPOUT_NAME, spawn, log: message => console.warn(message), onState: () => tellOptions() })
+  spout = new SpoutTaker({ exe: SPOUT, pid: process.pid, sender: SPOUT_NAME, spawn, log: note, onState: () => tellOptions() })
   relay.add(spout)
 }
 
@@ -404,9 +418,54 @@ function guardGame(page) {
   page.setWindowOpenHandler(({ url }) => web(url)
     ? { action: 'allow', overrideBrowserWindowOptions: { width: 960, height: 720, autoHideMenuBar: true, show: true, webPreferences: { sandbox: true, contextIsolation: true, offscreen: false } } }
     : { action: 'deny' })
-  page.on('render-process-gone', () => page.reload())
+  page.on('render-process-gone', (_event, details) => {
+    note(`game: its renderer went (${details.reason}, exit ${details.exitCode}); loading it again`)
+    page.reload()
+  })
   page.session.setPermissionRequestHandler((_contents, permission, allow) => allow(GAME_PERMISSIONS.has(permission)))
   page.session.setPermissionCheckHandler((_contents, permission) => GAME_PERMISSIONS.has(permission))
+}
+
+/**
+ * Note what the game's page shows of itself without touching the game: its
+ * console's warnings and errors and the changes of scene, its renderer not
+ * answering, and every `WATCH_MS` whether its drawing context is still there
+ * and, drawn offscreen, how many frames it painted (`meter`). Its context lost
+ * notes the application's processes too. See `watch.js`.
+ * @param {Electron.WebContents} page @param {FrameMeter | null} meter
+ */
+function watchGame(page, meter) {
+  const gl = new GlWatch()
+  let late = false
+  page.on('console-message', details => {
+    if (worthKeeping(details.level, details.message)) note(`game console ${details.level}: ${details.message.slice(0, 600)}`)
+  })
+  page.on('unresponsive', () => note('game: the page does not answer'))
+  page.on('responsive', () => note('game: the page answers again'))
+  page.on('did-finish-load', () => {
+    gl.reset()
+    note('game: page loaded')
+  })
+  const look = async () => {
+    /** @type {Promise<'late'>} */
+    const timeout = new Promise(done => setTimeout(() => done('late'), 5000))
+    const state = await Promise.race([page.executeJavaScript(GL_STATE, false), timeout]).catch(() => null)
+    if (state === 'late') {
+      if (!late) note(`game: the page did not answer a look in 5 s`)
+      late = true
+      return
+    }
+    if (late) note('game: the page answers a look again')
+    late = false
+    const frames = meter?.take()
+    if (frames?.line) note(frames.line)
+    const line = gl.seen(state)
+    if (!line) return
+    note(frames ? `${line}; ${frames.frames} frames painted in ${WATCH_MS / 1000} s` : line)
+    if (state?.lost) note(`processes: ${processLine(app.getAppMetrics())}`)
+  }
+  const timer = setInterval(() => { if (!page.isDestroyed()) void look() }, WATCH_MS)
+  page.once('destroyed', () => clearInterval(timer))
 }
 
 /**
@@ -420,9 +479,9 @@ function gpuGone(details) {
   if (!('type' in details) || details.type !== 'GPU' || !offscreenGame) return
   const now = Date.now()
   gpuLosses = [...gpuLosses.filter(at => now - at < GPU_LOSS_WINDOW_MS), now]
-  console.warn(`game: the GPU process went (${details.reason}); loading the game again`)
+  note(`game: the GPU process went (${details.reason}); loading the game again`)
   if (gpuLosses.length >= GPU_LOSSES && viewChoice.game_view === 'offscreen') {
-    console.warn('game: the window view is used from the next start')
+    note('game: the window view is used from the next start')
     viewChoice.game_view = 'window'
     saveView()
     tellOptions()
@@ -470,11 +529,16 @@ function watchStream() {
   clearTimeout(framesIdle)
   const page = gamePage()
   if (stream && stream.watchers > 0 && page && gameOpen && gameAt) {
-    frames ??= new FrameSource(page.debugger, { onFrame: jpeg => stream?.push(jpeg), fps: STREAM_FPS, log: message => console.warn(message) })
+    frames ??= new FrameSource(page.debugger, { onFrame: jpeg => stream?.push(jpeg), fps: STREAM_FPS, log: note })
+    if (!frames.running) note(`stream: taking frames for ${stream.watchers} watching`)
     frames.start()
   } else if (frames?.running) {
-    if (stream?.watchers === 0 && gameAt) framesIdle = setTimeout(() => frames?.stop(), 3000)
-    else frames.stop()
+    const stop = () => {
+      note('stream: no more frames taken')
+      frames?.stop()
+    }
+    if (stream?.watchers === 0 && gameAt) framesIdle = setTimeout(stop, 3000)
+    else stop()
   }
 }
 
@@ -746,7 +810,10 @@ async function prepare() {
       void clipboard.readText().then(text => { if (text && !page.isDestroyed()) void page.insertText(text.slice(0, TEXT_MAX)) })
     }
   })
-  app.on('child-process-gone', (_event, details) => gpuGone(details))
+  app.on('child-process-gone', (_event, details) => {
+    note(`process gone: ${details.type}${details.name ? ` (${details.name})` : ''}, ${details.reason}, exit ${details.exitCode}`)
+    gpuGone(details)
+  })
 
   ipcMain.handle('akagi:invoke', async (event, command, args) => {
     try {
@@ -787,7 +854,14 @@ async function start() {
 
 fs.mkdirSync(DATA, { recursive: true })
 app.setPath('userData', path.join(DATA, 'browser'))
-if (app.requestSingleInstanceLock()) {
+if (!hasChromiumLog(process.argv)) {
+  // Chromium reads its logging switches before this code runs: start again with them, a file for this start.
+  fs.mkdirSync(LOGS, { recursive: true })
+  app.relaunch({ args: [...process.argv.slice(1), ...chromiumSwitches(LOGS, RUN), `--run=${RUN}`] })
+  app.exit(0)
+} else if (app.requestSingleInstanceLock()) {
+  prune(LOGS)
+  note(`shell ${app.getVersion()} started: Electron ${process.versions.electron}, Chromium ${process.versions.chrome}`)
   await prepare()
   // Not awaited: Electron is not ready until this module has run to its end.
   void app.whenReady().then(start)
