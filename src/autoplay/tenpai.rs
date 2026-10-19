@@ -303,11 +303,24 @@ mod tests {
     }
 
     #[test]
-    fn a_hand_without_a_yaku_on_any_wait_does_not() {
-        // 1s and 4s: no simples, the pair is the round's wind, no pinfu.
+    fn an_open_hand_without_a_yaku_on_any_wait_does_not() {
+        // The pon of 7s, then 1s or 4s: no simples, the pair is the round's wind.
+        let mut open = table("1m 2m 3m 4p 5p 6p 2s 3s E E");
+        open.players[0].melds.push(MeldSnapshot {
+            kind: MeldKind::Pon,
+            tiles: vec!["7s".into(); 3],
+            from_who: 2,
+            called_tile: Some("7s".into()),
+        });
+        assert_eq!(tenpai_win(&open, 0), Some(false));
+    }
+
+    #[test]
+    fn a_closed_hand_without_a_yaku_to_ron_wants_auto_win_for_its_tsumo() {
+        // 1s and 4s: no ron, but a closed hand's tsumo is a yaku of its own.
         assert_eq!(
             tenpai_win(&table("1m 2m 3m 4p 5p 6p 7s 8s 9s 2s 3s E E"), 0),
-            Some(false)
+            Some(true)
         );
     }
 
