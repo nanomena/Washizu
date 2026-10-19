@@ -417,9 +417,12 @@ pub const ASK_SEEN: Hazard = Hazard {
     most: 3_000.0,
 };
 /// From a confirm pressed at a game's end to tapping through what shows
-/// next without a button, in ms: a moment for it to be drawn, and for a
-/// button it may still bring.
-pub const TAP_AFTER_MS: u64 = 1200;
+/// next without a button, in ms. The next screen's button comes within
+/// about three seconds of the confirm (the rank's 1.4–3 s, "play again"'s
+/// about 2 s, read off the logs of 2026-10-17/18), so only a screen that
+/// stays without one for longer — the rewards of a filled chest — is
+/// tapped; anything sooner tapped where "play again" comes before its page.
+pub const TAP_AFTER_MS: u64 = 5000;
 /// From a press on one of those screens to the look for the next: the next
 /// is drawn first.
 pub const END_PAUSE: Hazard = Hazard {

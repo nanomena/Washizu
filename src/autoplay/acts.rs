@@ -26,11 +26,13 @@
 //!   with "play again" beside the yellow confirm. Each is read for a while
 //!   (`humanize::END_SEEN`) and pressed once, its yellow confirm, until
 //!   "play again" shows; that is pressed instead. Whatever shows between
-//!   the confirms and "play again" without a button the hand knows — the
-//!   rewards of a room's chest whose bar has filled, which a press anywhere
-//!   puts away, or a screen still being drawn — is tapped through where
-//!   "play again" comes, a tap at a time after a look, from a moment after
-//!   a confirm until "play again" shows (a tap may press it as it comes).
+//!   the confirms and "play again" without a button the hand knows for
+//!   longer than the next screen's button takes to come
+//!   (`humanize::TAP_AFTER_MS`) — the rewards of a room's chest whose bar has
+//!   filled, which a press anywhere puts away — is tapped through where
+//!   "play again" comes, a tap at a time after a look, until "play again"
+//!   shows (a tap may press it as it comes). A screen still being drawn is
+//!   only waited for.
 //!   "Play again" asks whether
 //!   to match another game, a moment after; that question is answered
 //!   (`humanize::ASK_SEEN`), its confirm, and the room matches the next game.
@@ -154,8 +156,9 @@ struct Ending {
     again: Option<Instant>,
     /// The question has been answered.
     asked: bool,
-    /// When a yellow confirm was last pressed: from a moment after it, until
-    /// "play again", what shows without a button is tapped through.
+    /// When a yellow confirm was last pressed: from a while after it
+    /// (`humanize::TAP_AFTER_MS`), until "play again", what shows without a
+    /// button is tapped through.
     confirmed_at: Option<Instant>,
     /// Taps made so far.
     taps: u32,
@@ -416,7 +419,7 @@ impl Acts {
             end.press_at = button.map(|_| after(now, read, rng));
         }
         // Nothing the hand knows, past a confirm and before "play again":
-        // tapped through, once the next screen has had a moment to be drawn.
+        // tapped through once the next screen's button is overdue.
         let tap = sight == Sight::Nothing
             && end.again.is_none()
             && !end.asked
