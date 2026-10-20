@@ -9,6 +9,15 @@
 export const WATCH_MS = 3000
 /** After loading the page again for a lost context, how long before another lost context does so again. */
 export const RELOAD_QUIET_MS = 60_000
+/**
+ * How long after a game ends its page's garbage is collected (`HeapProfiler.collectGarbage`): the end
+ * screens have begun, and the next game is a while off. The client makes a WebGL context on a canvas
+ * of its own each time it asks which WebGL it has (`_Get_WebGL_Version` in its Unity build), takes the
+ * canvas out again and never lets the context go; only the canvas being collected does. Its heap is
+ * large and seldom collected whole, so in a few hours of play these pile up to Chromium's limit of
+ * sixteen, and the oldest — the game's own — is lost. Collected after every game, they never come near.
+ */
+export const COLLECT_AFTER_MS = 3000
 /** How long the page may not answer before its renderer is ended and the page loaded again: a change of
  *  scene holds the page for seconds, not for half a minute. */
 export const HUNG_MS = 30_000
