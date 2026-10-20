@@ -14,10 +14,17 @@ export const RELOAD_QUIET_MS = 60_000
  * screens have begun, and the next game is a while off. The client makes a WebGL context on a canvas
  * of its own each time it asks which WebGL it has (`_Get_WebGL_Version` in its Unity build), takes the
  * canvas out again and never lets the context go; only the canvas being collected does. Its heap is
- * large and seldom collected whole, so in a few hours of play these pile up to Chromium's limit of
- * sixteen, and the oldest — the game's own — is lost. Collected after every game, they never come near.
+ * large and seldom collected whole, so in a few hours of play these pile up to the limit on live
+ * contexts (`WEBGL_CONTEXTS`), and the oldest — the game's own — is lost.
  */
 export const COLLECT_AFTER_MS = 3000
+/**
+ * How many WebGL contexts the game's page may have alive before Chromium loses the oldest
+ * (`--max-active-webgl-contexts`; Chromium's own limit is sixteen). Collecting after every game was
+ * not enough on its own: on 2026-10-20 the game's context was still lost, at the end of the seventh
+ * game. Four times the room keeps what the client leaves behind further from the game's own.
+ */
+export const WEBGL_CONTEXTS = 64
 /** How long the page may not answer before its renderer is ended and the page loaded again: a change of
  *  scene holds the page for seconds, not for half a minute. */
 export const HUNG_MS = 30_000
