@@ -39,7 +39,7 @@ import { MIN, RATIO, conform, framedRatio, gameBounds, handOnGame, onGame, onVie
 import { policyFor } from './policy.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { STREAM_FPS, StreamServer, newToken, streamUrl } from './stream.js'
-import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, processLine, worthKeeping } from './watch.js'
+import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, WEBGL_CONTEXTS, processLine, worthKeeping } from './watch.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** The interface's address. A scheme of its own, so the page has an origin and absolute paths. */
@@ -831,6 +831,8 @@ async function prepare() {
   cdpPort = Number(option('cdp-port')) || await freePort()
   app.commandLine.appendSwitch('remote-debugging-port', String(cdpPort))
   app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1')
+  // Room for the WebGL contexts the game's client leaves behind (see `WEBGL_CONTEXTS`).
+  app.commandLine.appendSwitch('max-active-webgl-contexts', String(WEBGL_CONTEXTS))
   protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
   app.on('second-instance', () => {
