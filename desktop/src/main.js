@@ -39,7 +39,7 @@ import { MIN, RATIO, conform, framedRatio, gameBounds, handOnGame, onGame, onVie
 import { policyFor } from './policy.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { STREAM_FPS, StreamServer, newToken, streamUrl } from './stream.js'
-import { FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, processLine, worthKeeping } from './watch.js'
+import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, processLine, worthKeeping } from './watch.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** The interface's address. A scheme of its own, so the page has an origin and absolute paths. */
@@ -495,6 +495,28 @@ function watchGame(page, meter) {
 }
 
 /**
+ * Collect the game page's garbage once a game has ended (see `COLLECT_AFTER_MS`): the WebGL contexts
+ * its client leaks are let go with the canvases they were made on. Uses the page's DevTools session,
+ * taken only if no one has it, and given back if it was taken here.
+ */
+async function collectGameGarbage() {
+  const page = gamePage()
+  if (!page || page.isDestroyed()) return
+  const tools = page.debugger
+  const taken = !tools.isAttached()
+  try {
+    if (taken) tools.attach('1.3')
+    const started = Date.now()
+    await tools.sendCommand('HeapProfiler.collectGarbage')
+    note(`game: garbage collected after the game in ${Date.now() - started} ms`)
+  } catch (error) {
+    note(`game: garbage not collected: ${error instanceof Error ? error.message : error}`)
+  } finally {
+    if (taken && tools.isAttached()) tools.detach()
+  }
+}
+
+/**
  * A page drawn offscreen draws nothing more once the GPU process has gone,
  * though it runs on; only loading it again brings its frames back (the game
  * then reconnects to a table it was at). If that keeps happening, the window
@@ -862,13 +884,20 @@ async function start() {
   serveDock()
 
   const child = core = new Core(CORE, ['--home', DATA], { cwd: DATA })
+  let gameEnded = true
   child.on('event', (name, payload) => {
     // The pointer's marks are the trail's alone, and come many a second. They
     // are in the game page's pixels; offscreen, the trail lies over the dock's
     // picture of the page, which is another size.
     if (name === 'pointer') trail?.webContents.send('trail:mark', offscreenGame && gameAt ? onView(/** @type {{ x: number, y: number }} */ (payload), gameAt, OFFSCREEN) : payload)
     else dock?.webContents.send('akagi:event', name, payload)
-    if (name === 'monitor-updated') feed.update(payload)
+    if (name === 'monitor-updated') {
+      feed.update(payload)
+      // A game just ended: its page's garbage is collected a moment after.
+      const ended = /** @type {{ game_ended?: boolean }} */ (payload)?.game_ended === true
+      if (ended && !gameEnded) setTimeout(() => void collectGameGarbage(), COLLECT_AFTER_MS)
+      gameEnded = ended
+    }
   })
   child.on('exit', reason => fail('Akagi has stopped.', `${reason}\n\n${lastWords()}`))
   try {
