@@ -40,6 +40,7 @@ import { policyFor } from './policy.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { STREAM_FPS, StreamServer, newToken, streamUrl } from './stream.js'
 import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, WEBGL_CONTEXTS, processLine, worthKeeping } from './watch.js'
+import { keepWorkersRunning } from './workers.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** The interface's address. A scheme of its own, so the page has an origin and absolute paths. */
@@ -884,6 +885,8 @@ async function start() {
     ? Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }])
     : null)
   serveDock()
+  // Before the game's page opens: its service worker is let run from its first start (see `workers.js`).
+  void keepWorkersRunning(cdpPort, note)
 
   const child = core = new Core(CORE, ['--home', DATA], { cwd: DATA })
   let gameEnded = true
