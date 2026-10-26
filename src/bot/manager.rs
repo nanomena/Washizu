@@ -40,7 +40,9 @@ use crate::bot::sync_guard::SyncGuard;
 use crate::config::AppConfig;
 use crate::event_bus::{BotResponseBus, BotStatusBus, NotifyBus, TrackedEvent};
 use crate::inspector::InspectorWriter;
-use crate::schema::{BotReaction, BotStatus, InspectorEntry, LoadStage, MjaiEvent, Notification};
+use crate::schema::{
+    BotReaction, BotStatus, GameMeta, InspectorEntry, LoadStage, MatchInfo, MjaiEvent, Notification,
+};
 use anyhow::{bail, Context, Result};
 use chrono::Local;
 use std::collections::HashSet;
@@ -81,6 +83,9 @@ pub struct BotManager {
     pending: Vec<MjaiEvent>,
     /// Bot's seat in the current game; set on `start_game`.
     actor_id: Option<u8>,
+    /// What a subprocess bot is told of the current game in `AKAGI_GAME`
+    /// (see [`game_description`]); set on `start_game`.
+    game: Option<serde_json::Value>,
     /// One-shot: drop the next own-seat bridge `reach` echo before it is
     /// fed to the runner. Set after an autoplay reach follow-up (see
     /// [`Self::handle_tracked`]) has already fed this runner a synthetic
@@ -105,6 +110,28 @@ pub struct BotManager {
     syncs_in_flight: Arc<Mutex<HashSet<String>>>,
 }
 
+/// What a subprocess bot is told of the game it is started for, in
+/// `AKAGI_GAME`: the platform, the room as the platform numbers it and our
+/// rank on that room's ladder as the game began — what decides the terms the
+/// game is played for, so a bot can play to them. Nothing that identifies the
+/// game, its record or a player. `None` when the bridge said nothing of the
+/// game, or for a platform it describes no room for.
+fn game_description(num_players: u8, meta: Option<&GameMeta>) -> Option<serde_json::Value> {
+    let meta = meta?;
+    match meta.match_info.as_ref()? {
+        MatchInfo::Majsoul { mode_id, .. } => Some(serde_json::json!({
+            "platform": "majsoul",
+            "num_players": num_players,
+            "mode_id": mode_id,
+            "level": meta
+                .our_level
+                .as_ref()
+                .map(|level| serde_json::json!({ "id": level.id, "score": level.score })),
+        })),
+        _ => None,
+    }
+}
+
 impl BotManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -127,6 +154,7 @@ impl BotManager {
             runner: None,
             pending: Vec::new(),
             actor_id: None,
+            game: None,
             drop_next_own_reach: false,
             out_tx,
             status_tx,
@@ -223,11 +251,13 @@ impl BotManager {
         if let MjaiEvent::StartGame {
             id: Some(seat),
             num_players,
+            game_meta,
             ..
         } = &event
         {
             self.actor_id = Some(*seat);
             self.game_num_players = *num_players;
+            self.game = game_description(*num_players, game_meta.as_ref());
             // Pick the active bot for this game's player count, reading the
             // *current* config so a runtime model switch takes effect on the
             // next game (the manager outlives many games — a snapshot taken
@@ -662,6 +692,9 @@ impl BotManager {
 
         let mut cmd = runtime.command_for(&entry.dir, &["bot.py"]);
         cmd.arg(actor_id.to_string());
+        if let Some(game) = &self.game {
+            cmd.env("AKAGI_GAME", game.to_string());
+        }
 
         // If the bot ships a manifest, resolve user values + manifest
         // defaults and hand the path to the resolved JSON over to the
@@ -1420,6 +1453,86 @@ mod tests {
         let n = notify_rx.try_recv().unwrap();
         assert_eq!(n.level, crate::schema::NotifyLevel::Error);
         assert!(n.title.contains("Bot reaction failed"));
+    }
+
+    fn majsoul_meta(level: Option<crate::schema::Level>) -> GameMeta {
+        GameMeta {
+            game_id: Some(7),
+            match_mode: Some(2),
+            match_info: Some(MatchInfo::Majsoul {
+                game_uuid: Some("261026-uuid".into()),
+                mode_id: Some(12),
+                room_id: None,
+                contest_uid: None,
+            }),
+            our_level: level,
+        }
+    }
+
+    #[test]
+    fn a_bot_is_told_the_room_and_our_rank_and_nothing_that_identifies_the_game() {
+        let level = crate::schema::Level {
+            id: 10403,
+            score: 3576,
+        };
+        let described = game_description(4, Some(&majsoul_meta(Some(level)))).unwrap();
+        assert_eq!(
+            described,
+            serde_json::json!({
+                "platform": "majsoul",
+                "num_players": 4,
+                "mode_id": 12,
+                "level": { "id": 10403, "score": 3576 },
+            })
+        );
+        assert!(!described.to_string().contains("uuid"));
+        assert_eq!(
+            game_description(4, Some(&majsoul_meta(None))).unwrap()["level"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn a_game_the_bridge_said_nothing_of_is_not_described() {
+        assert_eq!(game_description(4, None), None);
+        assert_eq!(game_description(4, Some(&GameMeta::default())), None);
+        let tenhou = GameMeta {
+            match_info: Some(MatchInfo::Tenhou {
+                log_id: None,
+                go_type: Some(0x89),
+                lobby: Some(0),
+            }),
+            ..GameMeta::default()
+        };
+        assert_eq!(game_description(4, Some(&tenhou)), None);
+    }
+
+    #[tokio::test]
+    async fn start_game_keeps_the_games_description_for_the_bot_it_starts() {
+        let mut mgr = BotManager::new(
+            Some(dummy_runtime()),
+            empty_bot_dir(),
+            cfg_with("ghost"),
+            bot_response_bus(),
+            bot_status_bus(),
+            notify_bus(),
+            dummy_inspector(),
+            fresh_syncs(),
+        );
+        let start = |game_meta| MjaiEvent::StartGame {
+            names: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            kyoku_first: None,
+            aka_flag: None,
+            id: Some(0),
+            num_players: 4,
+            game_meta,
+        };
+        // No such bot: the spawn fails, after the description was kept.
+        let _ = mgr.handle(start(Some(majsoul_meta(None)))).await;
+        assert_eq!(mgr.game.as_ref().unwrap()["mode_id"], 12);
+        // The next game the bridge says nothing of leaves nothing of this one behind.
+        let _ = mgr.handle(start(None)).await;
+        assert_eq!(mgr.game, None);
     }
 
     #[tokio::test]
