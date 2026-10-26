@@ -171,6 +171,20 @@ The bot's seat is delivered three ways (pick whichever fits):
 - **env:** `AKAGI_PLAYER_ID=<player_id>`.
 - **`start_game.id`:** the field on the first `start_game` event.
 
+What the game is played for is in **`AKAGI_GAME`**, when the platform's
+bridge says: a JSON object with the `platform`, `num_players`, the room as
+the platform numbers it (`mode_id`) and our rank on that room's ladder as the
+game began (`level`: `id` and `score`, or `null`). A bot that plays to a
+room's terms, such as a ranked room's payout for our rank, reads it there.
+Only Mahjong Soul games are described so far:
+
+```json
+{"platform": "majsoul", "num_players": 4, "mode_id": 12, "level": {"id": 10403, "score": 3576}}
+```
+
+It names nothing that identifies the game, its record or a player, and it is
+not part of the mjai stream: logs and cloud inference never see it.
+
 ## Per-bot settings
 
 A bot can ship a `manifest.toml` declaring its configurable knobs (API
