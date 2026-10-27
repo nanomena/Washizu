@@ -1,5 +1,5 @@
 use super::*;
-use crate::autoplay::pointer::{hand::Hand, lean::Spot};
+use crate::autoplay::pointer::{lean::Spot, PointerController, PointerLayout, TileTarget};
 use serde_json::json;
 use std::path::Path;
 use tempfile::TempDir;
@@ -287,7 +287,7 @@ async fn a_received_forecast_loses_pointer_permission_on_context_change() {
     relay.entered().await;
     relay.release();
     let result = relay.result(&mut rx).await;
-    let mut hand = Hand::new(Arc::new(crate::autoplay::AutoplayContext::new()));
+    let mut hand = PointerController::new(Arc::new(crate::autoplay::AutoplayContext::new()));
     hand.take_lean(result.clone());
     assert!(hand.forecast_current(Some(context(1))));
     let rect = crate::autoplay::context::CanvasRect {
@@ -296,7 +296,14 @@ async fn a_received_forecast_loses_pointer_permission_on_context_change() {
         width: 1600.0,
         height: 900.0,
     };
-    hand.look_at(Spot::Hand("6s".into()), &["6s".into()], rect);
+    assert!(hand.set_layout(PointerLayout {
+        viewport: rect,
+        tiles: vec![TileTarget { tile: "6s".into(), drawn: false,
+            bounds: crate::autoplay::context::CanvasRect { x: 500.0, y: 800.0, width: 60.0, height: 80.0 } }],
+        next_draw: None,
+        rest: crate::autoplay::context::CanvasRect { x: 750.0, y: 700.0, width: 40.0, height: 20.0 },
+    }));
+    hand.look_at(Spot::Hand("6s".into()));
     assert!(
         hand.motion_due().is_some(),
         "the live forecast queued a look"
@@ -310,16 +317,7 @@ async fn a_received_forecast_loses_pointer_permission_on_context_change() {
     hand.retain_current_forecast(Some(context(2)));
     assert!(!result.is_live());
     assert!(!hand.forecast_current(Some(context(2))));
-    hand.look_at(
-        Spot::Hand("6s".into()),
-        &["6s".into()],
-        crate::autoplay::context::CanvasRect {
-            x: 0.0,
-            y: 0.0,
-            width: 1600.0,
-            height: 900.0,
-        },
-    );
+    hand.look_at(Spot::Hand("6s".into()));
     assert!(
         hand.motion_due().is_none(),
         "stale forecast cannot queue pointer movement"
