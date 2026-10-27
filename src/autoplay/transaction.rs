@@ -481,8 +481,13 @@ impl TurnController {
         }
         run.committed |= run.kind == TargetKind::Commit
             && run.plan.presses[run.index].confirmation == Confirmation::ClientCommand;
-        run.verify_at = (now + Duration::from_millis(u64::from(run.settings.verify_ms.max(1))))
-            .min(run.deadline);
+        // Zero disables automatic verification/retry. It does not turn a
+        // dispatched mouse sequence into a fabricated command receipt.
+        run.verify_at = if run.settings.verify_ms == 0 {
+            run.deadline
+        } else {
+            (now + Duration::from_millis(u64::from(run.settings.verify_ms))).min(run.deadline)
+        };
         if run.kind == TargetKind::Reveal {
             run.revealed = run
                 .target

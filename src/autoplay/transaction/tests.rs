@@ -561,3 +561,75 @@ fn retries_are_bounded_single_use_and_a_late_ack_cannot_be_transplanted_from_ano
         );
     }
 }
+
+#[test]
+fn disabling_automatic_verification_never_becomes_a_one_millisecond_retry_loop() {
+    let action = discard();
+    let mut h = Harness::new(
+        "either",
+        action.clone(),
+        vec![press(
+            PressRole::Discard,
+            &action,
+            Confirmation::ClientCommand,
+        )],
+    );
+    h.controller.run.as_mut().unwrap().settings.verify_ms = 0;
+    h.dispatch();
+    for _ in 0..5 {
+        h.now += Duration::from_millis(200);
+        assert!(matches!(h.next(), Effect::Observe));
+        assert_eq!(h.controller.run.as_ref().unwrap().retries, 0);
+    }
+    h.command(InputKind::Discard);
+    assert_eq!(h.outcome(), Outcome::ClientAccepted);
+}
+
+#[test]
+fn retry_exhaustion_and_cross_round_failure_evidence_have_one_owner() {
+    let action = discard();
+    let plan = TurnPlan {
+        presses: vec![press(
+            PressRole::Discard,
+            &action,
+            Confirmation::ClientCommand,
+        )],
+        dealt: false,
+    };
+    let mut h = Harness::new("either", action.clone(), plan.presses.clone());
+    for failure in 0..2 {
+        if failure > 0 {
+            h.binding.context.round += 1;
+            h.binding.context.event_seq += 1;
+            h.binding.owner.table += 1;
+            h.binding.window = "new-round-protocol-window".into();
+            h.facts.context = Some(h.binding.context);
+            h.facts.owner = h.binding.owner;
+            h.facts.window = Some(h.binding.window.clone());
+            h.observation.target.as_mut().unwrap().identity.window =
+                "new-round-native-window".into();
+            h.observation.clock.as_mut().unwrap().started_at = h.now;
+            assert!(h.controller.begin(
+                h.binding.clone(),
+                action.clone(),
+                plan.clone(),
+                Settings {
+                    retries: 2,
+                    verify_ms: 100,
+                    gap_ms: 0,
+                    ready_ms: 8_000,
+                    reload_after: 2
+                },
+                h.now
+            ));
+        }
+        for attempt in 0..3 {
+            h.dispatch();
+            assert_eq!(h.controller.run.as_ref().unwrap().retries, attempt);
+            h.now += Duration::from_millis(101);
+        }
+        assert!(
+            matches!(h.next(), Effect::Finished { outcome:Outcome::Cancelled(CancelReason::Unconfirmed), reload } if reload == (failure == 1))
+        );
+    }
+}
