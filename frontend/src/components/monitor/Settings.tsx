@@ -62,6 +62,7 @@ const Line = ({ name, value, note }: { name: string; value: string; note?: strin
 function AutoplayRows({ snapshot: s, options, onLevel, onConfirm, onAutoWin, onLean, onTrail }: Props) {
   const sw = (name: string, on: boolean, onChange: ((on: boolean) => void) | null) => <Switch name={name} on={on} onChange={onChange} />
   const level = levelOf(s, options)
+  if (options.platform === 'Tenhou') return <p>{tr('天凤档案支持独立登录、保存设置与记录。自动操作尚未完成验证，当前由你手动操作。')}</p>
   return <>
     <Row name={tr('自动操作')} about={levelAbout(level ?? 'off')} control={<AutoplayLevels level={level} onLevel={onLevel} />} />
     <Row name={tr('快速确认')} about={tr('和了或流局时，等确认按钮出现再点掉结算')} control={sw(tr('快速确认'), !!options.quick_confirm, onConfirm)} />
@@ -149,7 +150,9 @@ function ModelLines({ snapshot: s, now }: Props) {
 function AppLines({ snapshot: s, options }: Props) {
   return <>
     <Line name={tr('版本')} value={options.version ?? '—'} />
-    <Line name={tr('平台')} value={tr('雀魂')} />
+    <Line name={tr('应用')} value="Washizu" />
+    <Line name={tr('平台')} value={options.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')} />
+    {options.profile_name && <Line name={tr('账号档案')} value={options.profile_name} />}
     <Line name={tr('游戏视图')} value={s?.capture.state === 'running' ? s.capture.descriptor : s?.capture.state === 'error' ? tr('异常') : tr('未打开')} />
     <Line name={tr('游戏绘制')} value={options.game_view_now === 'offscreen' ? tr('离屏 2560×1440') : tr('窗口内')} />
   </>

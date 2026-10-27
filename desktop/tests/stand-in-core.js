@@ -8,6 +8,9 @@
 //            show: enough for the monitor page to draw itself, tiles included
 // Ends when its stdin closes, as the core does.
 import { createInterface } from 'node:readline'
+import { homePlatform } from '../src/profiles.js'
+import fs from 'node:fs'
+import path from 'node:path'
 
 const mode = process.argv[process.argv.indexOf('--mode') + 1] ?? 'ok'
 const say = (/** @type {unknown} */ message) => process.stdout.write(JSON.stringify(message) + '\n')
@@ -58,7 +61,9 @@ const answers = {
 }
 
 process.stderr.write('stand-in core: starting\n')
-if (mode !== 'silent') say({ event: 'ready', payload: { brand: 'Stand-in', monitor, version: '0.0.0' } })
+const homeAt = process.argv.indexOf('--home')
+const platform = homeAt >= 0 ? homePlatform(process.argv[homeAt + 1]) : 'Majsoul'
+if (mode !== 'silent') say({ event: 'ready', payload: { brand: 'Stand-in', platform, monitor, version: '0.0.0' } })
 
 createInterface({ input: process.stdin }).on('line', line => {
   // Not everything on the line is ours to understand; the core skips what is not a request.
@@ -73,4 +78,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   } else if (request.method === 'echo') say({ id: request.id, result: request.params })
   else if (request.method === 'nudge') { say({ event: 'monitor-updated', payload: { sequence: 7 } }); say({ id: request.id, result: null }) }
   else say({ id: request.id, error: `unknown method: ${request.method}` })
-}).on('close', () => process.exit(0))
+}).on('close', () => {
+  if (process.argv.includes('--delay-release') && homeAt >= 0) {
+    setTimeout(() => { fs.writeFileSync(path.join(process.argv[homeAt + 1], 'fake-core-released'), 'released'); process.exit(0) }, 250)
+  } else process.exit(0)
+})

@@ -57,7 +57,7 @@ export function GameStage() {
     onWheel={onWheel} onContextMenu={e => e.preventDefault()}>
     <video id={GAME_VIDEO_ID} className="mon-game-video" muted autoPlay playsInline disablePictureInPicture
       onPlaying={() => setShown(true)} onEmptied={() => setShown(false)} />
-    {!shown && <p className="mon-game-wait">{tr('雀魂视图在这里显示')}</p>}
+    {!shown && <p className="mon-game-wait">{tr('等待游戏画面')}</p>}
     <textarea ref={field} className="mon-game-keys" aria-label={tr('向游戏输入')} tabIndex={-1} spellCheck={false} autoComplete="off"
       onKeyDown={onKey} onKeyUp={onKey}
       onInput={e => { if (!(e.nativeEvent as InputEvent).isComposing) send(e.currentTarget.value) }}

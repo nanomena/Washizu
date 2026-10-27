@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { MonitorEvent, MonitorSnapshot } from '@/lib/monitor'
+import type { MonitorConfig, MonitorEvent, MonitorSnapshot } from '@/lib/monitor'
 import { setLang } from '@/lib/i18n'
 
 const fixture = vi.hoisted(() => ({
   snapshot: null as MonitorSnapshot | null,
-  options: { always_on_top: false } as { always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean; quick_confirm?: boolean; auto_win?: boolean; auto_continue?: boolean; stream_output?: boolean; stream_url?: string },
+  options: { always_on_top: false } as MonitorConfig,
   calls: [] as Array<[string, unknown]>,
   /** What the core answers when an earlier hand's events are asked for. */
   handEvents: [] as MonitorEvent[],
@@ -58,6 +58,27 @@ const candidates = () => screen.queryAllByRole('listitem').filter(li => li.class
 
 describe('monitor user states', () => {
   beforeEach(() => { fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = [] })
+
+  it('returns to account selection through the shell without navigating the game', async () => {
+    render(<Monitor />)
+    await waitFor(() => expect((screen.getByRole('button', { name: '返回账号档案' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: '返回账号档案' }))
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'return_to_profiles')).toBe(true))
+  })
+
+  it('names the Tenhou profile and keeps unqualified automatic input unavailable', async () => {
+    fixture.options = { always_on_top: false, platform: 'Tenhou', profile_name: '天凤主号' }
+    render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
+    expect(screen.getByText('天凤档案支持独立登录、保存设置与记录。自动操作尚未完成验证，当前由你手动操作。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '应用' }))
+    expect(screen.getByText('天凤主号')).toBeTruthy()
+    expect(screen.getByText('天凤')).toBeTruthy()
+    expect(screen.getByText('Washizu')).toBeTruthy()
+    expect(fixture.calls.some(([cmd]) => cmd === 'set_monitor_autoplay')).toBe(false)
+  })
 
   it('shows a suggestion the game has not answered yet as pending, never as done', () => {
     render(<Monitor />)

@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureConfig {
-    /// The address the game view is sent to. It has to be Mahjong Soul's own
-    /// site over HTTPS (`capture::embedded::game_url`): the view is signed in
-    /// to the player's account.
+    /// The address the game view is sent to. It has to belong to the selected
+    /// platform over HTTPS (`capture::embedded::game_url`): the view is signed
+    /// in to this account profile.
     pub url: String,
     pub http: HttpCaptureConfig,
 }
