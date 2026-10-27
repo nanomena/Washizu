@@ -273,6 +273,7 @@ async fn serve(
             runtime.clone(),
             syncs_in_flight.clone(),
             Some(state.monitor.clone()),
+            state.autoplay_context.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = manager.await {

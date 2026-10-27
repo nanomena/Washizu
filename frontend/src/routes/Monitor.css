@@ -265,6 +265,8 @@
 .mdec-mark { flex: none; width: 10ch; overflow: hidden; text-overflow: ellipsis; }
 .mdec-kicker i { overflow: hidden; text-overflow: ellipsis; }
 .mdec-kicker i::before { content: '·'; margin-right: 6px; opacity: 0.6; }
+.mdec-msg .mdec-source { flex: 0 1 auto; max-width: 60%; font-weight: 600; }
+.mdec-msg .mdec-source[data-source='native_standby'] { color: var(--m-wait); }
 
 .mdec-main { display: flex; align-items: center; min-width: 0; min-height: 0; }
 .mdec-empty { font-size: 14px; color: var(--m-dim); }

@@ -431,3 +431,14 @@ without the legacy field on the next persist.
   bot script loads them itself.
 - Anything drawn. `BotResponse`s land on the broadcast bus and in the
   monitor snapshot; the interface (`frontend/`) draws them.
+
+## Positioned primary recovery
+
+A bot declaring `[bot] protocol = "positioned_mjai"` uses the single recovery
+coordinator when the runtime monitor and bridge clock are available. It must
+supply `meta.delivery.through` on every stdout answer. The coordinator owns one
+confirmed journal, independent primary/local workers and one source selection
+per real input window. Plain `mjai` remains the default active protocol.
+See [recovery design](RECOVERY.md), [shared control contract](CONTROL.md), and
+[offline qualification](RECOVERY-TESTS.md). Matching relay/server and core changes
+must be installed together; source changes alone are not a deployment.

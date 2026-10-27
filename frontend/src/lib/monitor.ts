@@ -64,7 +64,18 @@ export type ServerStatus =
   | { state: 'starting'; bot: string; since_ms: number }
   | { state: 'ready'; bot: string; label: string | null; facts: Fact[]; since_ms: number; startup_ms: number }
   | { state: 'failed'; bot: string; error: string; retry_at_ms: number }
+export type RunnerHealth =
+  | { state: 'ready'; through: number }
+  | { state: 'recovering' | 'blocked'; through: number; reason: string }
+export type DecisionControl = {
+  context: DecisionContext
+  window: { platform: 'majsoul'; opened_ns: string } | { platform: 'tenhou'; opened_ns: string; ops: number } | null
+  source: 'primary' | 'native_standby' | 'unavailable'
+  primary: RunnerHealth
+  standby: RunnerHealth
+}
 export type MonitorSnapshot = {
+  control: DecisionControl | null
   revision: number; context: DecisionContext; names: string[]; red_fives: boolean | null
   game: GameStateSnapshot | null; view: MahgenView | null; round_ended: boolean; game_ended: boolean
   capture: CaptureStatus; bot: BotStatus; service: string; service_error: string | null; server: ServerStatus
@@ -78,6 +89,20 @@ export type MonitorSnapshot = {
   /** The hands of this game in the order dealt, the one in play last. */
   hands: HandSummary[]
   events: MonitorEvent[]; last_event_ms: number | null
+}
+
+export function decisionSound(s: MonitorSnapshot | null): boolean {
+  if (!s || s.round_ended || s.sync_error) return false
+  if (s.control) return s.control.source !== 'unavailable'
+  return s.service !== 'error'
+}
+
+export function controlLabel(control: DecisionControl): string {
+  const source = control.source === 'native_standby' ? tr('本地备用')
+    : control.source === 'primary' ? tr('主模型') : tr('暂无有效来源')
+  const primary = control.primary.state === 'ready' ? tr('主模型就绪')
+    : control.primary.state === 'recovering' ? tr('主模型恢复中') : tr('主模型不可用')
+  return `${source} · ${primary}`
 }
 
 export function newestSnapshot(current: MonitorSnapshot | null, incoming: MonitorSnapshot): MonitorSnapshot {
@@ -358,13 +383,13 @@ export function decisionView(s: MonitorSnapshot | null): DecisionView {
     case 'thinking':
       return { ...base, phase: 'thinking', tone: 'busy', status: tr('推理中'), message: tr('已向模型发出请求'), action: null, steps: ['active', 'todo', 'todo'] }
     case 'awaiting': {
-      const live = !s.round_ended && !s.sync_error && s.service !== 'error'
+      const live = decisionSound(s)
       return { ...base, phase: 'awaiting', tone: 'wait', status: tr('待确认'), message: tr('等待雀魂的实际动作'), live, steps: ['done', 'done', 'active'] }
     }
     case 'confirmed':
       return { ...base, phase: 'confirmed', tone: 'done', status: tr('已确认'), message: tr('雀魂动作与建议一致'), actual: describeAction(move?.event, t), steps: ['done', 'done', 'done'] }
     case 'declined': {
-      const live = !s.round_ended && !s.sync_error && s.service !== 'error'
+      const live = decisionSound(s)
       return { ...base, phase: 'declined', tone: 'idle', status: tr('不操作'), message: tr('建议过牌，无需确认'), live, steps: ['done', 'done', 'void'] }
     }
     case 'unavailable':
@@ -435,11 +460,12 @@ export function alertsOf(s: MonitorSnapshot | null, local: { ui: string | null; 
   if (local.bridge) out.push({ key: 'bridge', title: tr('监视数据通道异常'), message: local.bridge })
   if (local.ui) out.push({ key: 'ui', title: tr('窗口操作失败'), message: local.ui })
   if (!s) return out
+  const standby = s.control?.source === 'native_standby'
   if (s.capture.state === 'error') out.push({ key: 'capture', title: tr('采集异常'), message: s.capture.error })
   if (s.bot.state === 'error') out.push({ key: 'bot', title: tr('Bot 进程异常'), message: s.bot.error })
-  if (s.server.state === 'failed') out.push({ key: 'server', title: tr('模型服务未运行'), message: s.server.error, hint: tr('应用会自动重新启动它。') })
-  else if (s.service === 'error') out.push({ key: 'service', title: tr('模型服务断开'), message: s.service_error ?? tr('模型服务没有应答。') })
-  if (s.sync_fault || s.sync_error) out.push({ key: 'sync', title: tr('牌局同步异常'), message: s.sync_fault || s.sync_error!, hint: tr('自动操作等待模型恢复；确认有效建议后，此故障状态才会消失。') })
+  if (!standby && s.server.state === 'failed') out.push({ key: 'server', title: tr('模型服务未运行'), message: s.server.error, hint: tr('应用会自动重新启动它。') })
+  else if (!standby && s.service === 'error') out.push({ key: 'service', title: tr('模型服务断开'), message: s.service_error ?? tr('模型服务没有应答。') })
+  if (s.sync_error || (!standby && s.sync_fault)) out.push({ key: 'sync', title: tr('牌局同步异常'), message: s.sync_error || s.sync_fault!, hint: tr('自动操作等待模型恢复；确认有效建议后，此故障状态才会消失。') })
   return out
 }
 

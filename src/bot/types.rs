@@ -35,6 +35,19 @@ pub struct BotResponse {
 }
 
 impl BotResponse {
+    pub fn control(&self) -> Result<Option<super::control::DecisionControl>, serde_json::Error> {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.get("control"))
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+    }
+
+    pub fn set_control(&mut self, control: super::control::DecisionControl) {
+        let meta = self.meta.get_or_insert_with(|| serde_json::json!({}));
+        meta["control"] = serde_json::to_value(control).expect("control serializes");
+    }
     /// An unavailable model is not choosing PASS. This travels in the reply
     /// itself; an asynchronous stderr warning cannot gate its input reliably.
     pub fn unavailable_reason(&self) -> Option<&str> {

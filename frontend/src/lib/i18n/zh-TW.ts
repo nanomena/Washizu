@@ -1,5 +1,11 @@
 /** 繁體中文. Keys are the page's own Simplified Chinese text. */
 export const zhTW: Record<string, string> = {
+  '本地备用': '本機備用',
+  '主模型': '主模型',
+  '暂无有效来源': '暫無有效來源',
+  '主模型就绪': '主模型就绪',
+  '主模型恢复中': '主模型恢復中',
+  '主模型不可用': '主模型無法使用',
   '请求': '請求',
   '建议': '建議',
   '确认': '確認',

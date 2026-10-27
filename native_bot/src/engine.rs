@@ -16,7 +16,9 @@ use riichienv_core::action::{Action, ActionType};
 use riichienv_core::parser::tid_to_mjai;
 use riichienv_core::replay::MjaiEvent;
 use riichienv_core::rule::GameRule;
+use riichienv_core::state::legal_actions::GameStateLegalActions;
 use riichienv_core::state::GameState;
+use riichienv_core::state_3p::legal_actions::GameState3PLegalActions;
 use riichienv_core::state_3p::GameState3P;
 
 use crate::action_codec::{pick_by_logits, rank_by_logits};
@@ -43,6 +45,7 @@ pub enum BotAction {
     /// predicting a discard for each would run the model once per row.
     Reach {
         pai: String,
+        tsumogiri: Option<bool>,
     },
     Pon {
         target: u8,
@@ -158,6 +161,86 @@ impl Engine {
 
     pub fn num_players(&self) -> u8 {
         self.num_players
+    }
+
+    /// The complete real legal set, independent of policy inference and its
+    /// top-N display cut. Riichi includes every legal declaring discard;
+    /// clones are rules-only and never commit a proposed declaration.
+    pub fn legal_replies(&self) -> Vec<BotAction> {
+        let seat = self.seat;
+        let expand = |legal: Vec<Action>, discarder, drawn, reach: Vec<Action>| {
+            legal
+                .iter()
+                .flat_map(|a| {
+                    if a.action_type == ActionType::Riichi {
+                        reach
+                            .iter()
+                            .filter_map(|d| d.tile)
+                            .map(|tile| BotAction::Reach {
+                                pai: tid_to_mjai(tile),
+                                tsumogiri: Some(drawn == Some(tile)),
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![build_bot_action(a, seat, discarder, drawn, None)]
+                    }
+                })
+                .collect()
+        };
+        match &self.backend {
+            Backend::Four { state, .. } => {
+                let legal = state._get_legal_actions_internal(seat);
+                let reach = if legal.iter().any(|a| a.action_type == ActionType::Riichi) {
+                    let mut declared = state.as_ref().clone();
+                    declared.apply_mjai_event(MjaiEvent::Reach {
+                        actor: seat as usize,
+                    });
+                    declared._get_legal_actions_internal(seat)
+                } else {
+                    vec![]
+                };
+                expand(
+                    legal,
+                    state.last_discard.map(|d| d.0),
+                    state.drawn_tile,
+                    reach,
+                )
+            }
+            Backend::Three { state, .. } => {
+                let legal = state._get_legal_actions_internal(seat);
+                let reach = if legal.iter().any(|a| a.action_type == ActionType::Riichi) {
+                    let mut declared = state.as_ref().clone();
+                    declared.apply_mjai_event(MjaiEvent::Reach {
+                        actor: seat as usize,
+                    });
+                    declared._get_legal_actions_internal(seat)
+                } else {
+                    vec![]
+                };
+                expand(
+                    legal,
+                    state.last_discard.map(|d| d.0),
+                    state.drawn_tile,
+                    reach,
+                )
+            }
+        }
+    }
+
+    /// The winning tile is read only from the real draw/public claim source.
+    pub fn winning_tile(&self, target: u8) -> Option<String> {
+        let (drawn, discarded) = match &self.backend {
+            Backend::Four { state, .. } => (state.drawn_tile, state.last_discard),
+            Backend::Three { state, .. } => (state.drawn_tile, state.last_discard),
+        };
+        if target == self.seat {
+            drawn
+        } else {
+            discarded
+                .filter(|(actor, _)| *actor == target)
+                .map(|(_, tile)| tile)
+        }
+        .map(tid_to_mjai)
     }
 
     /// Drive one already-parsed mjai event through the engine.
@@ -380,6 +463,7 @@ fn build_bot_action(
         },
         ActionType::Riichi => BotAction::Reach {
             pai: reach_pai.map(tid_to_mjai).unwrap_or_default(),
+            tsumogiri: reach_pai.map(|t| drawn == Some(t)),
         },
         ActionType::Pon => BotAction::Pon {
             target,
@@ -567,7 +651,10 @@ mod tests {
         let a = act(ActionType::Riichi, None, vec![]);
         assert_eq!(
             build_bot_action(&a, 0, None, None, Some(36)),
-            BotAction::Reach { pai: "1p".into() }
+            BotAction::Reach {
+                pai: "1p".into(),
+                tsumogiri: Some(false)
+            }
         );
     }
 

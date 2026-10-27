@@ -39,6 +39,7 @@ pub async fn run_bot_manager(
     runtime: Option<PythonRuntime>,
     syncs_in_flight: Arc<Mutex<HashSet<String>>>,
     monitor: Option<crate::monitor::MonitorHandle>,
+    clock: Arc<crate::autoplay::AutoplayContext>,
 ) -> Result<()> {
     let bot_dir = {
         let cfg = config.read().await;
@@ -87,7 +88,8 @@ pub async fn run_bot_manager(
         inspector,
         syncs_in_flight,
     )
-    .with_monitor(monitor);
+    .with_monitor(monitor)
+    .with_recovery_clock(clock);
     let rx = events.subscribe();
     manager.run(rx).await
 }

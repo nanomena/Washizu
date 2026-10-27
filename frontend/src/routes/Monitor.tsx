@@ -13,7 +13,7 @@ import { useMonitor } from '@/hooks/useMonitor'
 import { pickShow } from '@/lib/botShow'
 import { rememberGroup, savedGroup, type Group } from '@/lib/settingsGroup'
 import {
-  MONITOR_DEFAULTS, alertsOf, candidatesOf, decisionView, healthOf, levelOf, linkOf, roundLabel, seatWind, tableOf,
+  MONITOR_DEFAULTS, alertsOf, candidatesOf, decisionSound, decisionView, healthOf, levelOf, linkOf, roundLabel, seatWind, tableOf,
   type Alert, type AutoplayLevel, type Candidate, type DecisionView, type GameView, type Health, type MonitorConfig, type MonitorSnapshot,
 } from '@/lib/monitor'
 import { invoke, listen } from '@/lib/host'
@@ -150,7 +150,7 @@ function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail,
 
     <div className="md-body" role="tabpanel" data-tab={tab}>
       {m.faults.length > 0 ? <div className="md-fault"><FaultCard alerts={m.faults} onDetails={() => { openGroup('link'); setTab('settings') }} /></div>
-        : <DecisionCard view={view} decision={s?.decision ?? null} elapsed={m.elapsed} past={!!s?.round_ended} />}
+        : <DecisionCard view={view} decision={s?.decision ?? null} elapsed={m.elapsed} past={!!s?.round_ended} control={s?.control ?? null} />}
       {/* At the end of a round its result stands where the candidates and the hand were. */}
       {tab === 'decision' && (s?.result ? <ResultCard result={s.result} snapshot={s} />
         : <>
@@ -282,7 +282,7 @@ export function Monitor() {
   // Candidates stand only while their decision does. Once the game has
   // answered with a different move they stay as a record of what was weighed,
   // marked void; a fault or the end of the round drops them altogether.
-  const sound = !!s && !s.round_ended && !s.sync_error && s.service !== 'error'
+  const sound = decisionSound(s)
   const listState = view.phase === 'mismatch' ? 'void' : view.phase === 'confirmed' ? 'done' : 'live'
   const rows = sound && (view.live || view.phase === 'confirmed' || view.phase === 'mismatch') ? candidatesOf(d, table, view.instead) : []
   const noRows = !s ? tr('正在连接监视数据')
