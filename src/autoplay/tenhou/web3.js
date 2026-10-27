@@ -1,6 +1,6 @@
-/* Web3 capability producer. The rewriter supplies only verified native closures.
- * Reads do not schedule work. Effects consume an identity in the same JS task.
- * `sent` means the native handler ran, not that the server acknowledged it. */
+/* Web3 facts and viewport CSS mouse targets. Playing capabilities are read-only.
+ * Only the shared CDP pointer sends playing input. The separate UI FSM retains
+ * its native popup/selected-lobby controls. No observation schedules an effect. */
 (function createWeb3Bridge(native) {
   'use strict';
 
@@ -78,6 +78,189 @@
     };
   }
 
+  const validRect = rect => rect && [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0;
+  const center = rect => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
+  const contains = (rect, point) => point && Number.isFinite(point.x) && Number.isFinite(point.y)
+    && point.x >= rect.x && point.y >= rect.y && point.x < rect.x + rect.width && point.y < rect.y + rect.height;
+  function intersection(a, b) {
+    const x = Math.max(a.x, b.x), y = Math.max(a.y, b.y);
+    const right = Math.min(a.x + a.width, b.x + b.width), bottom = Math.min(a.y + a.height, b.y + b.height);
+    return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+  }
+  function subtract(rect, obstacle) {
+    const overlap = intersection(rect, obstacle);
+    if (!overlap) return [rect];
+    return [
+      { x: rect.x, y: rect.y, width: rect.width, height: overlap.y - rect.y },
+      { x: rect.x, y: overlap.y + overlap.height, width: rect.width, height: rect.y + rect.height - overlap.y - overlap.height },
+      { x: rect.x, y: overlap.y, width: overlap.x - rect.x, height: overlap.height },
+      { x: overlap.x + overlap.width, y: overlap.y, width: rect.x + rect.width - overlap.x - overlap.width, height: overlap.height },
+    ].filter(validRect);
+  }
+  function viewport() {
+    const rect = { x: 0, y: 0, width: globalThis.innerWidth, height: globalThis.innerHeight };
+    if (!validRect(rect)) throw new Error('Tenhou Web3 viewport unavailable');
+    return rect;
+  }
+  function geometryContext(view) {
+    const g = native.geometry.read();
+    if (!g || g.pressed || ![g.ratio, g.left, g.top, g.width, g.height, globalThis.pageXOffset, globalThis.pageYOffset].every(Number.isFinite)
+      || g.ratio <= 0 || g.width <= 0 || g.height <= 0 || !visible(g.canvas) || !connected(g.menuRoot) || !connected(g.handPanel)
+      || globalThis.visualViewport && globalThis.visualViewport.scale !== 1) return null;
+    const canvas = g.canvas.getBoundingClientRect();
+    if (!validRect(canvas)) return null;
+    const cards = [];
+    for (let slot = 0; slot < 14; slot++) {
+      const card = native.input.slot(slot);
+      if (!card) break;
+      if (![card.x, card.y].every(Number.isFinite)) return null;
+      cards.push({ slot, card, rect: { x: card.x / g.ratio + g.left - globalThis.pageXOffset,
+        y: card.y / g.ratio + g.top - globalThis.pageYOffset, width: g.width / g.ratio, height: g.height / g.ratio } });
+    }
+    return { ...g, cards, viewport: view, canvas };
+  }
+  const blockedTags = new Set(['A', 'IMG', 'INPUT', 'SELECT', 'OPTION', 'LABEL', 'TEXTAREA']);
+  function handRoute(g, point) {
+    const node = document.elementFromPoint(point.x, point.y);
+    if (!connected(node) || node.tagName === 'BUTTON' || blockedTags.has(node.tagName) || blockedTags.has(node.parentNode?.tagName)
+      || node === g.statusCanvas || node === g.handPanel || node.parentNode === g.handPanel
+      || node === g.menuRoot || node.parentNode === g.menuRoot || node.parentNode?.className === 'fixed-select') return false;
+    return true;
+  }
+  function hitCard(g, point) {
+    // This is the normal mouse branch of the verified client hit-test. It
+    // intentionally includes earlier empty objects: the native loop does too.
+    return g.cards.find(entry => contains(entry.rect, point)) || null;
+  }
+  function tileBounds(g, entry) {
+    const clipped = intersection(entry.rect, g.viewport);
+    if (!clipped) return null;
+    let pieces = [clipped];
+    for (const earlier of g.cards) {
+      if (earlier.slot === entry.slot) break;
+      pieces = pieces.flatMap(piece => subtract(piece, earlier.rect));
+    }
+    pieces.sort((a, b) => b.width * b.height - a.width * a.height);
+    return pieces.find(bounds => handRoute(g, center(bounds)) && hitCard(g, center(bounds)) === entry) || null;
+  }
+  function controlBounds(g, control) {
+    if (!control || !connected(control) || control.parentNode?.parentNode !== g.menuRoot || control.parentNode.firstChild !== control) return null;
+    const outer = control.parentNode;
+    if (!visible(outer)) return null;
+    const rect = outer.getBoundingClientRect();
+    if (!validRect(rect)) return null;
+    const clipped = intersection(rect, g.viewport);
+    return clipped && document.elementFromPoint(center(clipped).x, center(clipped).y) === outer ? clipped : null;
+  }
+  function controlTarget(g, control, identity, kind) {
+    const bounds = controlBounds(g, control);
+    return bounds && { control, identity: identity + ':' + kind + ':' + nodeId(control) + ':' + canonical(bounds), kind, bounds, viewport: g.viewport };
+  }
+  function offeredTarget(g, entry, entries) {
+    // A single-choice alias is a real offered control for the exact same raw
+    // payload. No red/plain or candidate-family substitution occurs here.
+    for (const candidate of [entry, ...entries.filter(other => other !== entry && canonical(other.payload) === canonical(entry.payload))]) {
+      const control = native.menu.control(candidate.code);
+      if (control?.id !== 'm' + candidate.code) continue;
+      const target = controlTarget(g, control, entry.identity + ':alias:' + candidate.code, 'offer');
+      if (target) return target;
+    }
+    const reveal = native.menu.reveal(entry.code);
+    return reveal && controlTarget(g, reveal, entry.identity, 'reveal');
+  }
+  function restBounds(g) {
+    const clipped = intersection(g.canvas, g.viewport);
+    if (!clipped) return null;
+    let pieces = [clipped];
+    const obstacles = g.cards.map(entry => entry.rect);
+    for (const node of g.menuRoot.children) if (visible(node)) {
+      const rect = node.getBoundingClientRect(); if (validRect(rect)) obstacles.push(rect);
+    }
+    for (const obstacle of obstacles) {
+      pieces = pieces.flatMap(piece => subtract(piece, obstacle));
+      if (pieces.length > 128) return null;
+    }
+    pieces.sort((a, b) => b.width * b.height - a.width * a.height);
+    return pieces.find(rect => handRoute(g, center(rect)) && !hitCard(g, center(rect))) || null;
+  }
+  function geometrySnapshot() {
+    const current = inputSnapshot();
+    const view = viewport();
+    const dto = { ...current.dto, viewport: view, clock: null, tiles: [], offers: current.dto.offers.map(offer => ({ ...offer, bounds: null, reveal: null })), nextDraw: null, rest: null };
+    if (current.dto.ready) {
+      const facts = native.clock.facts();
+      if (facts && [facts.startedAt, facts.now, facts.fixedMs, facts.bankMs, facts.remainingMs].every(Number.isFinite)
+        && facts.fixedMs > 0 && facts.bankMs >= 0 && facts.now >= facts.startedAt && facts.remainingMs >= 0) {
+        const elapsedMs = Math.floor(facts.now - facts.startedAt), fixedMs = Math.floor(facts.fixedMs);
+        const grantedBankMs = Math.floor(facts.bankMs);
+        const remainingBaseMs = Math.floor(Math.max(0, facts.remainingMs - facts.bankMs));
+        const remainingBankMs = Math.floor(Math.min(facts.bankMs, facts.remainingMs));
+        if ([elapsedMs, fixedMs, grantedBankMs, remainingBaseMs, remainingBankMs].every(u32)) dto.clock = { elapsedMs, fixedMs, grantedBankMs, remainingBaseMs, remainingBankMs };
+      }
+    }
+    if (!live() || !current.dto.hand.length || native.modal() || popupBlocksInput()) return { ...current, dto, geometry: null, tileEntries: [] };
+    const g = geometryContext(view);
+    if (!g) return { ...current, dto, geometry: null, tileEntries: [] };
+    const originalHand = native.input.hand();
+    const drawn = native.input.drawn();
+    const tileEntries = [];
+    for (let slot = 0; slot < originalHand.length; slot++) {
+      const tile = originalHand[slot], entry = g.cards[slot];
+      if (!entry || !entry.card.present) continue;
+      const bounds = tileBounds(g, entry);
+      if (!bounds) continue;
+      const identity = documentId + ':tile:' + native.epoch() + ':' + canonical(current.dto.hand) + ':' + tile + ':' + slot + ':' + canonical(bounds);
+      const raw = { identity, tile, drawn: tile === drawn, legal: !!current.dto.ready && !!current.discardReady && entry.card.legal && !entry.card.blocked
+        && (!native.input.riichi() || tile === drawn), bounds };
+      dto.tiles.push(raw); tileEntries.push({ ...raw, entry });
+    }
+    dto.offers = current.entries.map(entry => {
+      const target = offeredTarget(g, entry, current.entries);
+      return { identity: entry.identity, payload: entry.payload, bounds: target?.kind === 'offer' ? target.bounds : null,
+        reveal: target?.kind === 'reveal' ? { identity: target.identity, bounds: target.bounds } : null };
+    });
+    dto.nextDraw = dto.tiles.find(entry => entry.drawn)?.bounds || null;
+    dto.rest = restBounds(g);
+    return { ...current, dto, geometry: g, tileEntries };
+  }
+
+  function probeTarget(request) {
+    const response = (status, target = null) => ({ client: 'web3', status, target });
+    if (!request || !['discard', 'offer', 'hover'].includes(request.kind)) return response('unavailable');
+    if (!live()) return response('unavailable');
+    const current = geometrySnapshot();
+    if (!current.geometry) return response('unavailable');
+    let target, cardEntry;
+    if (request.kind === 'offer') {
+      if (typeof request.window !== 'string' || typeof request.identity !== 'string') return response('unavailable');
+      if (!current.dto.ready || current.dto.window !== request.window) return response('changed');
+      const entry = current.entries.find(entry => entry.identity === request.identity);
+      if (!entry || native.menu.offers()[entry.code] !== entry.original) return response('changed');
+      target = offeredTarget(current.geometry, entry, current.entries);
+    } else {
+      if (!Array.isArray(request.hand) || !request.hand.every(tile) || !tile(request.tile)) return response('unavailable');
+      const expected = [...request.hand].sort((a, b) => a - b);
+      if (expected.length !== current.dto.hand.length || expected.some((value, index) => value !== current.dto.hand[index])) return response('changed');
+      cardEntry = current.tileEntries.find(entry => entry.tile === request.tile);
+      if (!cardEntry) return response('unavailable');
+      if (request.kind === 'discard') {
+        if (typeof request.window !== 'string' || typeof request.tsumogiri !== 'boolean') return response('unavailable');
+        if (!current.dto.ready || current.dto.window !== request.window || !current.discardReady || !cardEntry.legal
+          || request.tsumogiri !== cardEntry.drawn) return response('changed');
+      } else if (request.identity !== cardEntry.identity) return response('changed');
+      target = { identity: cardEntry.identity + ':' + request.kind + (request.kind === 'discard' ? ':' + Number(request.tsumogiri) : ''),
+        kind: request.kind, bounds: cardEntry.bounds, viewport: current.dto.viewport };
+    }
+    if (!target) return response('unavailable');
+    if ('point' in request || 'targetIdentity' in request) {
+      if (request.targetIdentity !== target.identity || !contains(target.bounds, request.point)) return response('changed');
+      if (cardEntry) {
+        if (!handRoute(current.geometry, request.point) || hitCard(current.geometry, request.point) !== cardEntry.entry) return response('changed');
+      } else if (document.elementFromPoint(request.point.x, request.point.y) !== target.control.parentNode) return response('changed');
+    }
+    return response('ready', { identity: target.identity, kind: target.kind, bounds: target.bounds, viewport: target.viewport });
+  }
+
   function uiSnapshot() {
     const dto = { client: 'web3', popup: null, lobby: null };
     if (!live()) return { dto };
@@ -136,29 +319,7 @@
       }
       return 'sent';
     },
-    readInput() { return inputSnapshot().dto; },
-    discard(request) {
-      if (!request || typeof request.window !== 'string' || !Array.isArray(request.hand) || !request.hand.every(tile) || !tile(request.tile)) return 'unavailable';
-      if (!live()) return 'unavailable';
-      const current = inputSnapshot();
-      if (!current.dto.ready || current.dto.window !== request.window || !current.discardReady) return 'changed';
-      const expected = [...request.hand].sort((a, b) => a - b);
-      if (expected.length !== current.dto.hand.length || expected.some((value, index) => value !== current.dto.hand[index])) return 'changed';
-      const slot = native.input.hand().indexOf(request.tile);
-      const card = native.input.slot(slot);
-      if (slot < 0 || !card || !card.present || !card.legal || card.blocked || native.epoch() !== current.epoch) return 'changed';
-      native.input.discard(request.tile);
-      return 'sent';
-    },
-    choose(request) {
-      if (!request || typeof request.window !== 'string' || typeof request.identity !== 'string') return 'unavailable';
-      if (!live()) return 'unavailable';
-      const current = inputSnapshot();
-      if (!current.dto.ready || current.dto.window !== request.window) return 'changed';
-      const entry = current.entries.find(entry => entry.identity === request.identity);
-      if (!entry || native.menu.offers()[entry.code] !== entry.original || native.epoch() !== current.epoch) return 'changed';
-      native.menu.choose(entry.code);
-      return 'sent';
-    },
+    readInput() { return geometrySnapshot().dto; },
+    probeTarget,
   });
 })

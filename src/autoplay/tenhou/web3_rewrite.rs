@@ -434,11 +434,20 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
     let input_object = s.return_object(input_scope, slot)?;
     s.unique("legal discard marks", r#"function __clear(__event){if(1==__state.__mode||4==__state.__mode)if(!__popup.__element||__popup.__element.style.display){var __marks=[0,0,0,0,0,0,0,0,0,0,0,0,0,0];if(__event)if("REACH"==__event.tag)for(var __waits=__rules.__waitMethod(),__markSlot=0;__markSlot<__hand[32].length;++__markSlot){var __wait=__waits[__hand[32][__markSlot]>>2];__marks[__markSlot]|=__wait&&__wait.length?__flags.__legal:__flags.__blocked}"#)?;
     s.unique("native card input guard", r#"else if(__focus instanceof __card)__bits=__cards[1024|__focus.__slotKey].__cardFlags,(__menu[2360326].parentNode.style.visibility||__menu[2360326].parentNode.style.display)&&__bits&__flags.__legal&&__focus.__present&&(__state.__slotMethod(__focus.__slotKey),__select());else if"#)?;
+    let mouse = s.unique("viewport mouse coordinates", r#"mousemove:function(__moveEvent){var __moveNode=__moveEvent.target;if(void 0!==__moveEvent.buttons?2!=__moveEvent.buttons:3!=__moveEvent.which){__pageX=__moveEvent.pageX;__pageY=__moveEvent.pageY;var __localX=__pageX-__stage.offsetLeft-__table.__canvasContext.canvas.offsetLeft,__localY=__pageY-__topOffset;__pointerBits&=-3;__hitTest(__moveNode,__localX,__localY,!1,void 0!==__moveEvent.buttons?1==__moveEvent.buttons:1==__moveEvent.which)}}"#)?;
+    let pointer_scope = s.enclosing_function(mouse)?;
+    s.unique("native mouse hit-test parameters", r#"function __hitTest(__hitNode,__hitX,__hitY,__touchFallback,__dragging,__nativeEvent){"BUTTON"==__hitNode.tagName||__hitNode.parentNode!=__handPanel.__panelRoot||__handPanel[20].style.display?"#)?;
+    s.unique("native mouse scale", r#"__hitX*=__ratio;__hitY*=__ratio;var __hitCard;if(__dragging&&__focus instanceof __card)"#)?;
+    s.unique("native card hit region", r#"else for(__hitNode=0;(__hitCard=__cards[1024|__hitNode])&&!(__hitCard.__cardX<=__hitX&&__hitX<__hitCard.__cardX+__layout.__cardWidths[4]&&__hitCard.__cardY<=__hitY&&__hitY<__hitCard.__cardY+__layout.__cardHeights[4]+__layout.__cardExtras[4]);++__hitNode);"#)?;
+    s.unique("native menu mouse route", r#"else if(__hitNode==__status.__statusContext.canvas)__select(__hitNode);else if(__hitNode.parentNode&&__hitNode.parentNode==__menu.__menuRoot)__select(("SELECT"==__hitNode.tagName?__hitNode.previousSibling:__hitNode).firstChild);else{"#)?;
+    s.unique("native menu DOM identity", r#"__menu[__createdCode]=__nodeBuilder("div",__menuOuter,"tbc"+(__createdCode&2097152?" bblink":""),{id:"m"+__createdCode,innerHTML:__menuText[__menuIndex+1]}"#)?;
+    s.unique("native menu reveal routes", r#"case 3670533:__menu.__switchMenu(8192);break;case 3671045:__menu.__switchMenu(16384);break;"#)?;
 
     let menu = s.unique("native offered action", r#"__chooseMethod:function(__code){if(4==__state.__mode)__clear(),__popup.__training(__offers[__code]);else if(__offers[__code]){var __wasReady=__clock.__mounted();__clear();if(!__wasReady)return;__wire.__send(__offers[__code])}__offers={}}"#)?;
     let menu_scope = s.enclosing_function(menu)?;
     let menu_object = s.return_object(menu_scope, menu)?;
-    let menu_owner = s.assigned_owner(menu_scope)?;
+    // Validate the module boundary even though playing handlers are never exported.
+    s.assigned_owner(menu_scope)?;
     s.unique("native claim and pass offers", r#"__claimMethod:function(__claimMask){if(1==__state.__mode||4==__state.__mode)__offers={2360326:{tag:"N"}},__claimMask&__operationBits.__operationEnum.__ronBit&&(__offers[2360328]={tag:"N",type:6})"#)?;
     let clock = s.unique(
         "native mounted clock",
@@ -450,6 +459,7 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
         return Err(contract("clock owner mismatch"));
     }
     let clock_open = s.unique("clock opening", r#"__openClock:function(__duration,__clockTarget,__clockMove){__clockElement.firstChild.innerHTML="";__clockTarget||(__clockTarget=__query("[name=ok]"));__clock.__positionClock(__clockTarget,__clockMove);1==__state.__mode&&"#)?;
+    let clock_started = s.unique("native clock counter initialization", r#"appendChild(__clockElement),0>__duration?__countdown=-__duration+1E3:__countdown=(__duration||__fixedMs)+__bankMs+1E3,__countdownLimit=__countdown-1E3,__clockRemaining=__countdown-1E3"#)?;
     let clock_close = s.unique(
         "clock withdrawal",
         r#"__target=void 0;__clockRemaining=-1;delete __ticks().count"#,
@@ -528,11 +538,22 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
     {
         return Err(contract("outer IIFE boundary changed"));
     }
-    edits.push((s.tokens[outer_open].end, format!("var {EPOCH}=0,{UI_EPOCH}=0,__washizuWeb3PhaseReady=false,__washizuWeb3Closing=false,__washizuWeb3Input,__washizuWeb3Menu,__washizuWeb3Popup,__washizuWeb3Lobby;")));
+    edits.push((s.tokens[outer_open].end, format!("var {EPOCH}=0,{UI_EPOCH}=0,__washizuWeb3PhaseReady=false,__washizuWeb3Closing=false,__washizuWeb3ClockStarted=null,__washizuWeb3ClockFixed=null,__washizuWeb3ClockBank=null,__washizuWeb3Clock,__washizuWeb3Input,__washizuWeb3Menu,__washizuWeb3Popup,__washizuWeb3Lobby,__washizuWeb3Geometry;")));
+    edits.push((s.tokens[clock_started + 5].start, s.expand("__washizuWeb3ClockStarted=performance.now(),__washizuWeb3ClockFixed=__duration||__fixedMs,__washizuWeb3ClockBank=__bankMs,")));
+    edits.push(s.assignment(clock_object, s.expand("__washizuWeb3Clock={facts:function(){return{startedAt:__washizuWeb3ClockStarted,now:performance.now(),fixedMs:__washizuWeb3ClockFixed,bankMs:__washizuWeb3ClockBank,remainingMs:Math.max(0,__countdown-1000)}}};")));
 
-    let native_input = s.expand(r#"__washizuWeb3Input={mode:function(){return __state.__mode},phaseReady:function(){return __washizuWeb3PhaseReady},hand:function(){return __hand[32]},actor:function(){return __actor},isCard:function(v){return v instanceof __card},targetSlot:function(v){return v.__slotKey},slot:function(i){var c=__cards[1024|i];return c&&{target:c,present:!!c.__present,legal:!!(c.__cardFlags&__flags.__legal),blocked:!!(c.__cardFlags&__flags.__blocked)}},discard:function(tile){__discard(tile)}};"#);
+    let native_input = s.expand(r#"__washizuWeb3Input={mode:function(){return __state.__mode},phaseReady:function(){return __washizuWeb3PhaseReady},hand:function(){return __hand[32]},actor:function(){return __actor},drawn:function(){return __lastTile},riichi:function(){return!!__hand[64]},isCard:function(v){return v instanceof __card},targetSlot:function(v){return v.__slotKey},slot:function(i){var c=__cards[1024|i];return c&&{target:c,present:!!c.__present,legal:!!(c.__cardFlags&__flags.__legal),blocked:!!(c.__cardFlags&__flags.__blocked),x:c.__cardX,y:c.__cardY}}};"#);
     edits.push(s.assignment(input_object, native_input));
-    edits.push(s.assignment(menu_object, s.expand(&format!("__washizuWeb3Menu={{offers:function(){{return __offers}},responseTarget:function(){{return __menu[2360326]}},choose:function(code){{{menu_owner}.__chooseMethod(code)}}}};"))));
+    edits.push(s.assignment(menu_object, s.expand("__washizuWeb3Menu={offers:function(){return __offers},responseTarget:function(){return __menu[2360326]},control:function(code){return __menu[code]},reveal:function(code){return code&8192?__menu[3670533]:code&16384?__menu[3671045]:null}};")));
+    let pointer_return = s.unique("pointer observer return", r#"return{__pointerRefresh:function(){if(!(__focus instanceof __card)){var __underPointer=__document.elementFromPoint(~~(__pageX-__browser.pageXOffset),~~(__pageY-__browser.pageYOffset));__underPointer&&__hitTest(__underPointer,__pageX-__stage.offsetLeft-__table.__canvasContext.canvas.offsetLeft,__pageY-__topOffset,!1)}}}"#)?;
+    let pointer_object = Scope {
+        open: pointer_return + 1,
+        close: s.pair(pointer_return + 1)?,
+    };
+    if pointer_object.open <= pointer_scope.open || pointer_object.close >= pointer_scope.close {
+        return Err(contract("pointer observer scope changed"));
+    }
+    edits.push(s.assignment(pointer_object, s.expand("__washizuWeb3Geometry={read:function(){return{ratio:__ratio,stage:__stage,canvas:__table.__canvasContext.canvas,statusCanvas:__status.__statusContext.canvas,left:__stage.offsetLeft+__table.__canvasContext.canvas.offsetLeft,top:__topOffset,width:__layout.__cardWidths[4],height:__layout.__cardHeights[4]+__layout.__cardExtras[4],handPanel:__handPanel.__panelRoot,menuRoot:__menu.__menuRoot,pressed:!!(__pointerBits&6)}}};")));
     edits.push(s.assignment(popup_object, s.expand("__washizuWeb3Popup={read:function(){return{element:__popup.__element,tag:__currentPopup&&__currentPopup.tag,queued:__popupQueue.length,closing:__washizuWeb3Closing}},ok:function(){__popup.ok()}};")));
     edits.push(s.assignment(lobby_object, s.expand("__washizuWeb3Lobby={read:function(){return{lobby:__lobby,selected:__selected(),reservationRequested:!!Object.keys(__reservations).length,loaded:__loaded(false)}},join:function(button){__popup.join(button)}};")));
 
@@ -595,7 +616,7 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
         };
         edits.push((s.tokens[method.body.open].end, bump));
     }
-    let native = s.expand(&format!("{{epoch:function(){{return {EPOCH}}},uiEpoch:function(){{return {UI_EPOCH}}},input:__washizuWeb3Input,menu:__washizuWeb3Menu,popup:__washizuWeb3Popup,lobby:__washizuWeb3Lobby,clock:{{mounted:function(){{return __clock.__mounted()}},target:function(){{return __clock.{target_getter}()}}}},modal:function(){{return {modal_owner}.__hasModal()}}}}"));
+    let native = s.expand(&format!("{{epoch:function(){{return {EPOCH}}},uiEpoch:function(){{return {UI_EPOCH}}},input:__washizuWeb3Input,menu:__washizuWeb3Menu,popup:__washizuWeb3Popup,lobby:__washizuWeb3Lobby,geometry:__washizuWeb3Geometry,clock:{{mounted:function(){{return __clock.__mounted()}},target:function(){{return __clock.{target_getter}()}},facts:function(){{return __washizuWeb3Clock.facts()}}}},modal:function(){{return {modal_owner}.__hasModal()}}}}"));
     edits.push((
         s.tokens[outer_close].start,
         format!(";{MARKER}window.__akagiTenhou=({PRODUCER})({native});\n"),
