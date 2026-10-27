@@ -1,213 +1,264 @@
-//! Tenhou Web3 autoplay drives verified native handlers with a single-use
-//! permit tied to the real bridge decision, full hand and native input window.
-use crate::autoplay::delay::{BudgetSnapshot, DecisionKind, DelayInput};
-use crate::autoplay::platform::{ActionContext, PlanResult, PlatformAutoplay, Step};
+//! Tenhou adapts selected semantic actions to observed Web3 mouse targets.
+//! Pacing, readiness polling, retries and input belong to the shared turn runtime.
+use crate::autoplay::context::AutoplayContext;
+use crate::autoplay::platform::{
+    window_identity, ActionContext, Confirmation, DeclarationFacts, InputTarget, PressIntent,
+    PressRole, SiteAdapter, SiteObservation, TargetIdentity, TargetKind, TurnClockFacts, TurnPlan,
+};
+use crate::autoplay::pointer::{PointerLayout, TileTarget};
+use crate::autoplay::tenhou_state::TenhouState;
 use crate::schema::MjaiEvent;
-use tracing::warn;
+use anyhow::{anyhow, Result};
+use chromiumoxide::page::Page;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub(crate) mod client;
 pub(crate) mod input;
 pub mod web3_rewrite;
 
-const LOG: &str = "akagi::autoplay::tenhou";
-const READY_TIMEOUT_MS: u32 = 8_000;
-#[derive(Default)]
-pub struct TenhouAutoplay;
+pub struct TenhouAutoplay {
+    context: Arc<AutoplayContext>,
+    clock: Mutex<Option<(String, TurnClockFacts)>>,
+}
 impl TenhouAutoplay {
-    pub fn new() -> Self {
-        Self
+    pub fn new(context: Arc<AutoplayContext>) -> Self {
+        Self {
+            context,
+            clock: Mutex::new(None),
+        }
+    }
+    fn state(&self) -> Option<TenhouState> {
+        self.context.tenhou_state.read().ok()?.clone()
+    }
+    fn clock(
+        &self,
+        key: &str,
+        raw: &client::ClockFacts,
+        observed_at: Instant,
+    ) -> Option<TurnClockFacts> {
+        let mut clock = self.clock.lock().ok()?;
+        if let Some((old, facts)) = &*clock {
+            if old == key {
+                return Some(*facts);
+            }
+        }
+        let facts = TurnClockFacts {
+            started_at: raw.started_at(observed_at)?,
+            fixed_ms: raw.fixed_ms,
+            remaining_bank_ms: Some(raw.granted_bank_ms),
+        };
+        *clock = Some((key.to_owned(), facts));
+        Some(facts)
     }
 }
 
-/// Map the bot's action onto the delay model's decision taxonomy. `None` for
-/// events that are not ours to perform.
-fn decision_kind(action: &MjaiEvent) -> Option<DecisionKind> {
-    Some(match action {
-        MjaiEvent::Dahai { .. } => DecisionKind::Dahai,
-        MjaiEvent::Reach { .. } => DecisionKind::Reach,
-        MjaiEvent::Chi { .. } => DecisionKind::Chi,
-        MjaiEvent::Pon { .. } => DecisionKind::Pon,
-        MjaiEvent::Daiminkan { .. } => DecisionKind::Daiminkan,
-        MjaiEvent::Ankan { .. } => DecisionKind::Ankan,
-        MjaiEvent::Kakan { .. } => DecisionKind::Kakan,
-        MjaiEvent::Hora { .. } => DecisionKind::Hora,
-        MjaiEvent::Ryukyoku { .. } => DecisionKind::Ryukyoku,
-        MjaiEvent::Kita { .. } => DecisionKind::Kita,
-        MjaiEvent::None => DecisionKind::Pass,
+fn discard_tile(action: &MjaiEvent, state: &TenhouState) -> Option<(u32, bool)> {
+    let (pai, tsumogiri) = match action {
+        MjaiEvent::Dahai { pai, tsumogiri, .. } => (pai, *tsumogiri),
+        MjaiEvent::Reach {
+            pai: Some(pai),
+            tsumogiri: Some(tsumogiri),
+            ..
+        } => (pai, *tsumogiri),
         _ => return None,
-    })
+    };
+    let index = crate::bridge::tenhou::encode::dahai_index(state.hand_view(), pai, tsumogiri)?;
+    if crate::bridge::tenhou::tile::tenhou_to_mjai_one(index) != *pai
+        || (tsumogiri && (!state.is_tsumo || state.hand.last() != Some(&index)))
+    {
+        return None;
+    }
+    Some((index, tsumogiri))
 }
 
-/// Push the pre-send "thinking" pause.
-///
-/// The model's target is a *total* for the window, and here the window starts
-/// when the client does — `Step::AwaitReady` has already waited out the
-/// animation — so the target is the sleep with nothing to deduct.
-fn push_pre_delay(steps: &mut Vec<Step>, ctx: &ActionContext, kind: DecisionKind) {
-    let (is_tsumogiri, tile_class) = match ctx.action {
-        MjaiEvent::Dahai { tsumogiri, pai, .. } => {
-            (*tsumogiri, crate::autoplay::delay::TileClass::of_mjai(pai))
-        }
-        _ => (false, None),
+fn semantic_plan(ctx: &ActionContext<'_>, state: &TenhouState) -> TurnPlan {
+    let mut plan = TurnPlan::default();
+    let Some(window) = state.window else {
+        return plan;
     };
-    // The only discard with no just-drawn tile is the one a call bought us.
-    let is_post_call =
-        matches!(ctx.action, MjaiEvent::Dahai { .. }) && ctx.tenhou.is_some_and(|t| !t.is_tsumo);
-    let opponent_riichi = ctx
-        .snapshot
-        .players
-        .iter()
-        .any(|p| p.seat != ctx.our_seat && p.riichi_declared);
-
-    let legacy = ctx.delay_cfg.mode == crate::config::DelayMode::Legacy;
-    let mut delay_cfg = ctx.delay_cfg.clone();
-    if legacy {
-        delay_cfg.distribution = crate::config::DelayDistribution::Uniform;
+    if ctx.num_players != 4 || window.clock.is_none() {
+        return plan;
     }
+    let actor = match ctx.action {
+        MjaiEvent::Dahai { actor, .. }
+        | MjaiEvent::Reach { actor, .. }
+        | MjaiEvent::Chi { actor, .. }
+        | MjaiEvent::Pon { actor, .. }
+        | MjaiEvent::Daiminkan { actor, .. }
+        | MjaiEvent::Ankan { actor, .. }
+        | MjaiEvent::Kakan { actor, .. }
+        | MjaiEvent::Hora { actor, .. }
+        | MjaiEvent::Kita { actor, .. } => Some(*actor),
+        MjaiEvent::None | MjaiEvent::Ryukyoku { .. } => None,
+        _ => return plan,
+    };
+    if actor.is_some_and(|actor| actor != ctx.our_seat) {
+        return plan;
+    }
+    let mut press = |role, confirmation| {
+        plan.presses.push(PressIntent {
+            role,
+            confirmation,
+            action: ctx.action.clone(),
+        })
+    };
+    match ctx.action {
+        MjaiEvent::Dahai { .. } => {
+            if ctx.self_riichi_accepted || discard_tile(ctx.action, state).is_none() {
+                return plan;
+            }
+            press(PressRole::Discard, Confirmation::ClientCommand);
+        }
+        MjaiEvent::Reach { .. } => {
+            if discard_tile(ctx.action, state).is_none()
+                || client::choice_payload(ctx.action, state).is_none()
+            {
+                return plan;
+            }
+            press(PressRole::Declaration, Confirmation::DeclarationEcho);
+            press(PressRole::Discard, Confirmation::ClientCommand);
+        }
+        MjaiEvent::None if !window.has_declinable_claim() => {}
+        _ => {
+            if client::choice_payload(ctx.action, state).is_some() {
+                press(PressRole::Action, Confirmation::ClientCommand);
+            }
+        }
+    }
+    plan
+}
 
-    let input = DelayInput {
-        kind,
-        is_tsumogiri,
-        is_post_call,
-        first_action_of_kyoku: ctx.last_kawa_tile.is_none(),
-        // Nothing is being pressed, so no animation has to finish first.
-        opening_animation: false,
-        can_riichi: ctx
-            .legal_actions
+fn layout(input: &client::InputSnapshot) -> Option<PointerLayout> {
+    let layout = PointerLayout {
+        viewport: input.viewport,
+        tiles: input
+            .tiles
             .iter()
-            .any(|a| a.action_type == riichienv_core::action::ActionType::Riichi),
-        in_riichi: ctx.self_riichi_accepted,
-        opponent_riichi,
-        tile_class,
-        junme: ctx
-            .snapshot
-            .players
-            .get(ctx.our_seat as usize)
-            .map(|p| p.river.len() as u32 + 1)
-            .unwrap_or(0),
-        legal_action_count: ctx.legal_actions.len(),
-        probs: ctx.probs,
-        reading: ctx.reading,
-        // Tenhou never states its allowance on the wire, but it very much
-        // has one: overrun it and the client auto-discards, which is how the
-        // first live run lost every turn. Feed the lobby's standard clock in
-        // so the model's budget caps apply as they do on Majsoul.
-        // Elapsed is zero on purpose: the plan does not run until the
-        // client's clock is actually up (`Step::AwaitReady`), and that clock
-        // starts then, not when the frame reached us. Deducting the time
-        // spent animating would spend a budget that had not started.
-        budget: ctx
-            .tenhou
-            .and_then(|t| t.window)
-            .and_then(|w| w.clock)
-            .map(|clock| BudgetSnapshot {
-                fixed_ms: clock.fixed_ms,
-                // The wire supplies the initial bank cap, not its current balance.
-                // Do not spend an unobserved remaining balance on artificial delay.
-                add_ms: 0,
-                elapsed_ms: 0,
-            }),
-        click_overhead_ms: 0,
-        cfg: ctx.cfg,
-        delay_cfg: &delay_cfg,
+            .map(|tile| TileTarget {
+                tile: crate::bridge::tenhou::tile::tenhou_to_mjai_one(tile.tile),
+                drawn: tile.drawn,
+                bounds: tile.bounds,
+            })
+            .collect(),
+        next_draw: input.next_draw,
+        rest: input.rest?,
     };
-
-    let decision = ctx
-        .delay_script
-        .filter(|_| !legacy)
-        .and_then(|s| s.try_decide(&input))
-        .unwrap_or_else(|| crate::autoplay::delay::decide(&input, &mut rand::rng()));
-    // The whole target is the sleep. It is measured from the moment the
-    // client became ready, which `Step::AwaitReady` has already waited for —
-    // nothing of the turn's own clock has been spent before that point.
-    let sleep = decision.total_target_ms;
-    if sleep > 0 {
-        steps.push(Step::Sleep { duration_ms: sleep });
-    }
+    layout.valid().then_some(layout)
 }
 
-impl PlatformAutoplay for TenhouAutoplay {
-    fn plan(&self, ctx: &ActionContext) -> PlanResult {
-        let mut result = PlanResult::default();
-        let Some(state) = ctx.tenhou else {
-            return result;
+/// A full physical hand match is required even for buttons and candidates.
+fn same_hand(input: &client::InputSnapshot, state: &TenhouState) -> bool {
+    let mut expected = state.hand.clone();
+    expected.sort_unstable();
+    let mut actual = input.hand.clone();
+    actual.sort_unstable();
+    actual == expected
+}
+
+#[async_trait::async_trait]
+impl SiteAdapter for TenhouAutoplay {
+    fn plan(&self, ctx: &ActionContext<'_>) -> TurnPlan {
+        self.state()
+            .map_or_else(TurnPlan::default, |state| semantic_plan(ctx, &state))
+    }
+
+    async fn pointer_layout(
+        &self,
+        page: &Page,
+        _ctx: &ActionContext<'_>,
+    ) -> Result<Option<PointerLayout>> {
+        Ok(layout(&client::read_input(page).await?))
+    }
+
+    async fn observe(
+        &self,
+        page: &Page,
+        ctx: &ActionContext<'_>,
+        intent: &PressIntent,
+    ) -> Result<SiteObservation> {
+        let state = self
+            .state()
+            .ok_or_else(|| anyhow!("Tenhou bridge state unavailable"))?;
+        let input = client::read_input(page).await?;
+        let observed_at = Instant::now();
+        let mut observation = SiteObservation {
+            ready: false,
+            target_kind: TargetKind::Commit,
+            target: None,
+            layout: layout(&input),
+            clock: None,
+            continuation: None,
         };
-        let Some(window) = state.window else {
-            return result;
-        };
-        if ctx.num_players != 4 || window.clock.is_none() {
-            return result;
+        if !input.ready || !same_hand(&input, &state) || intent.action != *ctx.action {
+            return Ok(observation);
         }
-        let Some(kind) = decision_kind(ctx.action) else {
-            return result;
+        let window = input
+            .window
+            .as_ref()
+            .ok_or_else(|| anyhow!("ready Tenhou input lacks a window"))?;
+        let Some(protocol_window) = state.window else {
+            return Ok(observation);
         };
-        if kind == DecisionKind::Dahai && ctx.self_riichi_accepted {
-            return result;
+        let proof =
+            window_identity(crate::bot::control::InputWindow::Tenhou(protocol_window).proof());
+        let clock_key = format!("{proof}:{window}");
+        observation.clock = input
+            .clock
+            .as_ref()
+            .and_then(|raw| self.clock(&clock_key, raw, observed_at));
+        if matches!(intent.action, MjaiEvent::Reach { .. })
+            && state.in_riichi
+            && state.is_tsumo
+            && protocol_window.ops == 0
+        {
+            observation.continuation = Some(DeclarationFacts {
+                window: proof.clone(),
+                hand: input.hand.iter().map(u32::to_string).collect(),
+            });
         }
-        if kind == DecisionKind::Pass && !window.has_declinable_claim() {
-            return result;
-        }
-        let resolve = |pai: &str, tsumogiri: bool| {
-            let index =
-                crate::bridge::tenhou::encode::dahai_index(state.hand_view(), pai, tsumogiri)?;
-            // An exact discard, including its red/plain meaning and drawn copy.
-            if crate::bridge::tenhou::tile::tenhou_to_mjai_one(index) != pai {
-                return None;
-            }
-            if tsumogiri && (!state.is_tsumo || state.hand.last() != Some(&index)) {
-                return None;
-            }
-            Some(index)
-        };
-        let reach_tile = match ctx.action {
-            MjaiEvent::Reach {
-                pai: Some(pai),
-                tsumogiri: Some(tsumogiri),
-                ..
-            } => {
-                let Some(tile) = resolve(pai, *tsumogiri) else {
-                    warn!(target: LOG, "Tenhou riichi discard does not match the full tracked hand");
-                    return result;
-                };
-                Some(tile)
-            }
-            MjaiEvent::Reach { .. } => {
-                warn!(target: LOG, "Tenhou riichi needs an exact tile and tsumogiri flag");
-                return result;
-            }
-            _ => None,
-        };
-        let step = if let MjaiEvent::Dahai { pai, tsumogiri, .. } = ctx.action {
-            let Some(tile_index) = resolve(pai, *tsumogiri) else {
-                return result;
+        let request = if intent.role == PressRole::Discard {
+            let Some((tile, tsumogiri)) = discard_tile(&intent.action, &state) else {
+                return Ok(observation);
             };
-            Step::Discard { tile_index }
+            client::TargetRequest::Discard {
+                window: window.clone(),
+                hand: input.hand.clone(),
+                tile,
+                tsumogiri,
+            }
         } else {
-            let Some(payload) = client::choice_payload(ctx.action, state) else {
-                return result;
+            let Some(wanted) = client::choice_payload(&intent.action, &state) else {
+                return Ok(observation);
             };
-            Step::ClientChoice {
-                payload,
-                label: format!("{kind:?}"),
+            let Some(offer) = input.matching_offer(&wanted) else {
+                return Ok(observation);
+            };
+            client::TargetRequest::Offer {
+                window: window.clone(),
+                identity: offer.identity.clone(),
             }
         };
-        result.steps.push(Step::AwaitReady {
-            timeout_ms: READY_TIMEOUT_MS,
+        let probe = client::probe_target(page, &request).await?;
+        let Some(target) = probe.target else {
+            return Ok(observation);
+        };
+        observation.target_kind = if target.kind == client::TargetKind::Reveal {
+            TargetKind::Reveal
+        } else {
+            TargetKind::Commit
+        };
+        observation.target = Some(InputTarget {
+            identity: TargetIdentity {
+                window: proof,
+                hand: input.hand.iter().map(u32::to_string).collect(),
+                control: format!("{window}:{}", target.identity),
+            },
+            bounds: target.bounds,
+            viewport: target.viewport,
         });
-        push_pre_delay(&mut result.steps, ctx, kind);
-        result.steps.push(step);
-        if let Some(tile_index) = reach_tile {
-            result.steps.push(Step::Sleep {
-                duration_ms: ctx.cfg.inter_click_delay_ms,
-            });
-            // Web3 raises a new legal native input window after the real own
-            // REACH echo. The original permit admits only that transition.
-            result.steps.push(Step::AwaitReady {
-                timeout_ms: READY_TIMEOUT_MS,
-            });
-            result.steps.push(Step::Discard { tile_index });
-        }
-        result
+        observation.ready = true;
+        Ok(observation)
     }
 }
 

@@ -4,9 +4,8 @@
 //! decision window — the interval the server observes between opening the
 //! window and receiving our action. That interval already contains network
 //! latency, proxy overhead, bot inference and the click sequence itself,
-//! so the caller converts the target into a sleep with
-//! `target - elapsed_since_window_opened - click_overhead` (see
-//! `majsoul::push_pre_delay`), not by sleeping the target verbatim.
+//! so [`PacingPolicy`] converts the target into an absolute start time with
+//! `target - click_overhead`, and a remaining wait after elapsed time.
 //!
 //! Layering:
 //! - [`decide`] — the pure built-in model. Base distribution (uniform by
@@ -27,13 +26,17 @@
 //!
 //! All quantities are milliseconds unless stated otherwise.
 
+pub mod policy;
 pub mod probs;
 pub mod script;
+pub mod source;
 
+pub use policy::{PacingContext, PacingError, PacingPlan, PacingPolicy};
 pub use probs::DecisionProbs;
 pub use script::{DelayScript, ScriptHost};
+pub use source::{resolve_policy_source, PolicySource};
 
-use crate::config::{DelayDistribution, DelayModelConfig, MajsoulAutoplayConfig};
+use crate::config::{DelayDistribution, DelayModelConfig, InputConfig};
 use rand::Rng;
 
 /// What kind of action the bot chose. Derived from the mjai event; used
@@ -182,11 +185,10 @@ pub struct DelayInput<'a> {
     pub reading: Reading,
     /// Server time budget for this window, if known.
     pub budget: Option<BudgetSnapshot>,
-    /// Time the click sequence itself will take *after* the pre-delay
-    /// (hover/hold, candidate clicks, inter-click gaps). Deducted from
-    /// the budget caps so multi-stage actions don't overrun.
+    /// Time the input sequence takes after the wait. Reserved once by
+    /// PacingPolicy when it converts total completion time to a start time.
     pub click_overhead_ms: u32,
-    pub cfg: &'a MajsoulAutoplayConfig,
+    pub cfg: &'a InputConfig,
     pub delay_cfg: &'a DelayModelConfig,
 }
 
@@ -256,7 +258,7 @@ pub fn decide<R: Rng + ?Sized>(input: &DelayInput, rng: &mut R) -> DelayDecision
 /// With a known server budget:
 ///
 /// ```text
-/// soft_cap = time_fixed - safety_margin - click_overhead
+/// soft_cap = time_fixed - safety_margin
 /// hard_cap = soft_cap + min(time_add * bank_use_fraction, bank_max_single)
 /// ```
 ///
@@ -271,10 +273,9 @@ pub fn budget_cap(input: &DelayInput, allow_bank: bool) -> u32 {
     let d = input.delay_cfg;
     match input.budget {
         Some(b) => {
-            let soft = b
-                .fixed_ms
-                .saturating_sub(d.safety_margin_ms)
-                .saturating_sub(input.click_overhead_ms);
+            // This cap is on total completion time. PacingPolicy reserves
+            // input overhead once when converting that total to a start time.
+            let soft = b.fixed_ms.saturating_sub(d.safety_margin_ms);
             if allow_bank {
                 let bank = (f64::from(b.add_ms) * d.bank_use_fraction.clamp(0.0, 1.0)) as u32;
                 soft.saturating_add(bank.min(d.bank_max_single_ms))
@@ -407,14 +408,11 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
-    fn cfg() -> MajsoulAutoplayConfig {
-        MajsoulAutoplayConfig::default()
+    fn cfg() -> InputConfig {
+        InputConfig::default()
     }
 
-    fn input<'a>(
-        cfg: &'a MajsoulAutoplayConfig,
-        delay_cfg: &'a DelayModelConfig,
-    ) -> DelayInput<'a> {
+    fn input<'a>(cfg: &'a InputConfig, delay_cfg: &'a DelayModelConfig) -> DelayInput<'a> {
         DelayInput {
             kind: DecisionKind::Dahai,
             is_tsumogiri: false,
@@ -626,7 +624,7 @@ mod tests {
     // Budget enforcement (soft/hard caps)
     // ------------------------------------------------------------------
 
-    fn tight_budget_cfg() -> MajsoulAutoplayConfig {
+    fn tight_budget_cfg() -> InputConfig {
         // Force the sampled target far above the caps so the cap is what
         // decides the outcome.
         let mut c = cfg();
@@ -636,7 +634,7 @@ mod tests {
     }
 
     /// With `time_add == 0` the target never exceeds the soft cap
-    /// (`fixed - safety_margin - click_overhead`).
+    /// (`fixed - safety_margin`) on total completion time.
     #[test]
     fn soft_cap_binds_without_bank() {
         let c = tight_budget_cfg();
@@ -652,11 +650,10 @@ mod tests {
         assert_eq!(dec.total_target_ms, 5000 - d.safety_margin_ms);
     }
 
-    /// Click-sequence overhead (hover/hold, candidate clicks, riichi
-    /// two-step) is reserved out of the window — multi-stage actions must
-    /// not systematically overrun.
+    /// The cap is on total completion, including input overhead. Reserving
+    /// overhead here and again in PacingPolicy would deduct it twice.
     #[test]
-    fn click_overhead_reserved_from_cap() {
+    fn total_cap_does_not_deduct_overhead_twice() {
         let c = tight_budget_cfg();
         let d = uniform();
         let mut i = input(&c, &d);
@@ -668,7 +665,7 @@ mod tests {
         i.click_overhead_ms = 700;
         let mut r = StdRng::seed_from_u64(AKAGI_SEED);
         let dec = decide(&i, &mut r);
-        assert_eq!(dec.total_target_ms, 5000 - d.safety_margin_ms - 700);
+        assert_eq!(dec.total_target_ms, 5000 - d.safety_margin_ms);
     }
 
     /// With the long-thought gate off, the built-in model never spends

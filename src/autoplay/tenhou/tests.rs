@@ -1,5 +1,7 @@
 use super::*;
-use crate::autoplay::tenhou_state::{DecisionWindow, TenhouState, TurnClock, OP_REACH};
+use crate::autoplay::tenhou_state::{DecisionWindow, TurnClock, OP_REACH};
+use crate::game_state::snapshot::{GameStateSnapshot, Phase};
+use std::time::Duration;
 
 fn state(hand: &[u32]) -> TenhouState {
     TenhouState {
@@ -7,17 +9,16 @@ fn state(hand: &[u32]) -> TenhouState {
         is_tsumo: true,
         window: Some(DecisionWindow {
             ops: OP_REACH,
-            opened_at: std::time::Instant::now(),
+            opened_at: Instant::now(),
             clock: Some(TurnClock::NORMAL),
         }),
         ..Default::default()
     }
 }
-
-fn plan(action: &MjaiEvent, state: &TenhouState, accepted: bool) -> PlanResult {
-    let snapshot = crate::game_state::snapshot::GameStateSnapshot {
+fn snapshot() -> GameStateSnapshot {
+    GameStateSnapshot {
         num_players: 4,
-        players: Vec::new(),
+        players: vec![],
         bakaze: "E".into(),
         kyoku: 1,
         honba: 0,
@@ -25,34 +26,30 @@ fn plan(action: &MjaiEvent, state: &TenhouState, accepted: bool) -> PlanResult {
         oya: 0,
         current_player: 0,
         turn_count: 0,
-        phase: crate::game_state::snapshot::Phase::WaitAct,
+        phase: Phase::WaitAct,
         is_done: false,
-        dora_markers: Vec::new(),
+        dora_markers: vec![],
         our_seat: Some(0),
-    };
-    let cfg = crate::config::MajsoulAutoplayConfig::default();
-    TenhouAutoplay.plan(&ActionContext {
-        action,
-        snapshot: &snapshot,
-        legal_actions: &[],
-        our_seat: 0,
-        last_kawa_tile: None,
-        last_self_tsumo: None,
-        self_riichi_accepted: accepted,
-        num_players: 4,
-        cfg: &cfg,
-        delay_cfg: crate::config::DelayModelConfig::default(),
-        budget: None,
-        probs: None,
-        reading: Default::default(),
-        delay_script: None,
-        tenhou: Some(state),
-        pointer: None,
-    })
+    }
 }
-
+fn plan(action: &MjaiEvent, state: &TenhouState, accepted: bool) -> TurnPlan {
+    semantic_plan(
+        &ActionContext {
+            action,
+            snapshot: &snapshot(),
+            legal_actions: &[],
+            our_seat: 0,
+            last_kawa_tile: None,
+            last_self_tsumo: None,
+            self_riichi_accepted: accepted,
+            num_players: 4,
+            pointer: None,
+        },
+        state,
+    )
+}
 #[test]
-fn riichi_uses_the_selected_physical_tedashi_then_waits_for_a_new_native_window() {
+fn riichi_plans_two_semantic_presses_and_requires_the_real_declaration_echo() {
     let st = state(&[17, 0, 19]);
     let action = MjaiEvent::Reach {
         actor: 0,
@@ -60,28 +57,23 @@ fn riichi_uses_the_selected_physical_tedashi_then_waits_for_a_new_native_window(
         tsumogiri: Some(false),
     };
     let plan = plan(&action, &st, false);
-    assert!(matches!(plan.steps.first(), Some(Step::AwaitReady { .. })));
-    let declaration=plan.steps.iter().position(|step|matches!(step,Step::ClientChoice{payload,..} if payload==&serde_json::json!({"tag":"REACH"}))).unwrap();
-    let ready = plan
-        .steps
-        .iter()
-        .rposition(|step| matches!(step, Step::AwaitReady { .. }))
-        .unwrap();
-    let discard = plan
-        .steps
-        .iter()
-        .position(|step| matches!(step, Step::Discard { tile_index: 17 }))
-        .unwrap();
-    assert!(declaration < ready && ready < discard);
     assert_eq!(
-        plan.steps
-            .iter()
-            .filter(|step| matches!(step, Step::Discard { .. }))
-            .count(),
-        1
+        plan.presses,
+        vec![
+            PressIntent {
+                role: PressRole::Declaration,
+                action: action.clone(),
+                confirmation: Confirmation::DeclarationEcho
+            },
+            PressIntent {
+                role: PressRole::Discard,
+                action: action.clone(),
+                confirmation: Confirmation::ClientCommand
+            },
+        ]
     );
+    assert_eq!(discard_tile(&action, &st), Some((17, false)));
 }
-
 #[test]
 fn incomplete_or_incorrect_riichi_does_not_issue_a_declaration() {
     let st = state(&[17, 0, 19]);
@@ -101,66 +93,97 @@ fn incomplete_or_incorrect_riichi_does_not_issue_a_declaration() {
             &st,
             false
         )
-        .steps
+        .presses
         .is_empty());
     }
 }
-
 #[test]
-fn accepted_riichi_unknown_clock_and_closed_window_issue_no_discard() {
+fn accepted_riichi_unknown_clock_closed_window_and_other_actor_issue_no_discard() {
     let action = MjaiEvent::Dahai {
         actor: 0,
         pai: "5m".into(),
         tsumogiri: true,
     };
     let mut st = state(&[17, 0, 19]);
-    assert!(plan(&action, &st, true).steps.is_empty());
-    st.window.as_mut().unwrap().clock = None;
-    assert!(plan(&action, &st, false).steps.is_empty());
-    st.window = None;
-    assert!(plan(&action, &st, false).steps.is_empty());
-}
-
-#[test]
-fn plain_and_drawn_copies_are_never_reinterpreted() {
-    let st = state(&[16, 0, 19]);
+    assert!(plan(&action, &st, true).presses.is_empty());
     assert!(plan(
         &MjaiEvent::Dahai {
-            actor: 0,
+            actor: 1,
             pai: "5m".into(),
-            tsumogiri: false
+            tsumogiri: true
         },
         &st,
         false
     )
-    .steps
+    .presses
     .is_empty());
-    assert!(matches!(
-        plan(
-            &MjaiEvent::Dahai {
-                actor: 0,
-                pai: "5m".into(),
-                tsumogiri: true
-            },
-            &st,
-            false
-        )
-        .steps
-        .last(),
-        Some(Step::Discard { tile_index: 19 })
-    ));
-    assert!(matches!(
-        plan(
-            &MjaiEvent::Dahai {
-                actor: 0,
-                pai: "5mr".into(),
-                tsumogiri: false
-            },
-            &st,
-            false
-        )
-        .steps
-        .last(),
-        Some(Step::Discard { tile_index: 16 })
-    ));
+    st.window.as_mut().unwrap().clock = None;
+    assert!(plan(&action, &st, false).presses.is_empty());
+    st.window = None;
+    assert!(plan(&action, &st, false).presses.is_empty());
+}
+#[test]
+fn plain_red_and_drawn_copies_are_never_reinterpreted() {
+    let st = state(&[16, 0, 19]);
+    let action = |pai: &str, tsumogiri| MjaiEvent::Dahai {
+        actor: 0,
+        pai: pai.into(),
+        tsumogiri,
+    };
+    assert!(plan(&action("5m", false), &st, false).presses.is_empty());
+    assert_eq!(discard_tile(&action("5m", true), &st), Some((19, true)));
+    assert_eq!(discard_tile(&action("5mr", false), &st), Some((16, false)));
+}
+#[test]
+fn raw_layout_retains_real_red_and_drawn_geometry_and_full_hand_identity() {
+    let input:client::InputSnapshot=serde_json::from_value(serde_json::json!({
+        "client":"web3","ready":true,"window":"native-7","clock":null,"hand":[16,19],
+        "viewport":{"x":0,"y":0,"width":900,"height":600},"offers":[],"nextDraw":null,
+        "rest":{"x":400,"y":400,"width":50,"height":20},
+        "tiles":[
+          {"identity":"red-copy","tile":16,"drawn":false,"legal":true,"bounds":{"x":100,"y":500,"width":40,"height":60}},
+          {"identity":"drawn-copy","tile":19,"drawn":true,"legal":true,"bounds":{"x":200,"y":500,"width":40,"height":60}}
+        ]
+    })).unwrap();
+    let layout = layout(&input).unwrap();
+    assert_eq!(layout.tiles[0].tile, "5mr");
+    assert!(!layout.tiles[0].drawn);
+    assert_eq!(layout.tiles[1].tile, "5m");
+    assert!(layout.tiles[1].drawn);
+    assert_eq!(layout.tiles[1].bounds.x, 200.0);
+    assert!(same_hand(&input, &state(&[19, 16])));
+    assert!(!same_hand(&input, &state(&[19, 17])));
+}
+#[test]
+fn native_clock_is_stable_and_bank_is_the_actual_grant_at_that_window_start() {
+    let adapter = TenhouAutoplay::new(Arc::new(AutoplayContext::new()));
+    let now = Instant::now();
+    let raw = client::ClockFacts {
+        elapsed_ms: 4000,
+        fixed_ms: 3000,
+        granted_bank_ms: 6000,
+        remaining_base_ms: 0,
+        remaining_bank_ms: 5000,
+    };
+    let facts = adapter.clock("protocol:native-7", &raw, now).unwrap();
+    assert_eq!(facts.started_at, now - Duration::from_millis(4000));
+    assert_eq!(facts.remaining_bank_ms, Some(6000));
+    assert_eq!(
+        facts.started_at
+            + Duration::from_millis(u64::from(facts.fixed_ms + facts.remaining_bank_ms.unwrap())),
+        now + Duration::from_millis(5000)
+    );
+    assert_eq!(
+        adapter
+            .clock("protocol:native-7", &raw, now + Duration::from_secs(1))
+            .unwrap(),
+        facts
+    );
+    assert_ne!(
+        adapter
+            .clock("protocol:native-8", &raw, now + Duration::from_secs(1))
+            .unwrap()
+            .started_at,
+        facts.started_at
+    );
 }

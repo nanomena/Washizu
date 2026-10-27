@@ -1,8 +1,7 @@
-//! Majsoul implementation of [`PlatformAutoplay`].
+//! Majsoul implementation of [`SiteAdapter`].
 //!
 //! Coordinate tables in `coords.rs` are the only Majsoul-specific data;
-//! the dispatch logic here translates a bot decision into a [`Step`]
-//! sequence using:
+//! target matching uses:
 //!
 //! - The current `legal_actions` from the riichi engine (which buttons
 //!   are visible, plus chi/pon/kan candidate enumeration).
@@ -12,10 +11,17 @@
 
 pub mod coords;
 
-use crate::autoplay::delay::{self, DecisionKind, DelayInput};
-use crate::autoplay::platform::{ActionContext, PlanResult, PlatformAutoplay, Step};
+use crate::autoplay::context::{AutoplayContext, CanvasRect};
+use crate::autoplay::platform::{window_identity, TargetKind};
+use crate::autoplay::platform::{
+    ActionContext, Confirmation, InputTarget, PressIntent, PressRole, SiteAdapter, SiteObservation,
+    TargetIdentity, TurnClockFacts, TurnPlan,
+};
+use crate::autoplay::pointer::{PointerLayout, TileTarget};
 use crate::bridge::majsoul::tile::compare_pai;
 use crate::schema::MjaiEvent;
+use anyhow::{anyhow, Result};
+use chromiumoxide::page::Page;
 #[cfg(test)]
 use coords::TSUMO_SPACE;
 use coords::{
@@ -25,383 +31,582 @@ use coords::{
 use rand::Rng;
 use riichienv_core::action::{Action, ActionType};
 use riichienv_core::parser::tid_to_mjai;
+use serde::Deserialize;
+use std::sync::Arc;
 
-#[derive(Default)]
-pub struct MajsoulAutoplay;
+pub struct MajsoulAutoplay {
+    context: Arc<AutoplayContext>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MappedClick {
+    x_norm: f64,
+    y_norm: f64,
+}
+
+#[derive(Debug, Default)]
+struct TargetMapping {
+    targets: Vec<MappedClick>,
+    dealt: bool,
+}
 
 impl MajsoulAutoplay {
-    pub fn new() -> Self {
-        Self
+    pub fn new(context: Arc<AutoplayContext>) -> Self {
+        Self { context }
     }
 }
 
-impl PlatformAutoplay for MajsoulAutoplay {
-    fn plan(&self, ctx: &ActionContext) -> PlanResult {
-        let mut result = PlanResult::default();
+#[derive(Deserialize)]
+struct VisibleControl {
+    name: String,
+    bounds: CanvasRect,
+}
+#[derive(Deserialize)]
+struct VisibleTile {
+    tile: String,
+    drawn: bool,
+}
+#[derive(Deserialize)]
+struct ClientView {
+    viewport: CanvasRect,
+    tiles: Vec<VisibleTile>,
+    can_discard: bool,
+    controls: Vec<VisibleControl>,
+    candidates: Vec<VisibleControl>,
+}
 
-        match ctx.action {
-            // ----- Dahai (打牌) ---------------------------------------------
-            MjaiEvent::Dahai {
-                actor,
-                pai,
-                tsumogiri,
-            } if *actor == ctx.our_seat => {
-                // While in riichi, Majsoul auto-discards, so ours would be a
-                // second one. (The riichi-declaring tile goes out inside the
-                // Reach plan below, before acceptance, so it is unaffected.)
-                if ctx.self_riichi_accepted {
-                    // …with one exception: the auto-discard is held back
-                    // while an own-draw operation prompt is open — kita on
-                    // a drawn North (sanma), a riichi-legal ankan, or a
-                    // tsumo agari. Majsoul waits for an answer, so a bot
-                    // decision to tsumogiri must decline the prompt via
-                    // the X button; the client then discards the draw on
-                    // its own. Returning with no click here left the game
-                    // hanging until the turn timer and the entire time
-                    // bank drained (the server eventually auto-declines).
-                    if riichi_prompt_pending(ctx, pai) {
-                        push_pre_delay(&mut result.steps, ctx, DecisionKind::Pass, 0);
-                        if let Some(button) = action_button_for(MajsoulOpType::None, ctx) {
-                            result.steps.push(Step::Click {
-                                x_norm: button.0,
-                                y_norm: button.1,
-                            });
-                        }
-                    }
-                    return result;
-                }
-                // The dealer-opening hand-sort animation wait (clicks
-                // issued during it are dropped) is folded into the delay
-                // model as the `opening_animation` functional floor.
-                let paced = push_pre_delay(&mut result.steps, ctx, DecisionKind::Dahai, 0);
-                result.hesitate = paced.hesitate;
-                result.look_ms = paced.look_ms;
-                let whence = if *tsumogiri {
-                    Whence::Drawn
+// Read actual Laya state and control bounds. No handler, timer, or selection
+// is invoked. The public pointer receives viewport CSS coordinates only.
+const READ_VIEW: &str = r#"(()=>{
+ const d=window.view?.DesktopMgr?.Inst, u=window.uiscript, c=document.querySelector('canvas');
+ if(!d?.gameing||!d.mainrole||!c||!window.Laya?.stage)return null;
+ const r=c.getBoundingClientRect(), stage=window.Laya.stage, me=d.mainrole;
+ if(!(r.width>0&&r.height>0&&stage.width>0&&stage.height>0)||!Array.isArray(me.hand))return null;
+ const visible=n=>{for(let p=n;p;p=p.parent){if(p.visible===false||p.destroyed||Number.isFinite(p.alpha)&&p.alpha<0.95)return false;}return n?.visible===true;};
+ const bounds=n=>{if(!visible(n)||typeof n.localToGlobal!=='function'||!(n.width>0&&n.height>0))return null;
+  const a=n.localToGlobal(new Laya.Point(0,0)),b=n.localToGlobal(new Laya.Point(n.width,n.height));
+  const x=r.x+Math.min(a.x,b.x)*r.width/stage.width,y=r.y+Math.min(a.y,b.y)*r.height/stage.height;
+  const width=Math.abs(b.x-a.x)*r.width/stage.width,height=Math.abs(b.y-a.y)*r.height/stage.height;
+  return [x,y,width,height].every(Number.isFinite)&&width>0&&height>0?{x,y,width,height}:null;};
+ const raw=[...me.hand];if(me.last_tile&&!raw.includes(me.last_tile))raw.push(me.last_tile);
+ const tiles=raw.map(t=>({tile:t.val?.toString(false),drawn:t===me.last_tile}));
+ if(tiles.some(t=>typeof t.tile!=='string'))return null;
+ const controls=[],candidates=[];
+ for(const panel of [u?.UI_ChiPengHu?.Inst,u?.UI_LiQiZiMo?.Inst]){
+  if(panel?.enable!==true)continue;
+  const row=panel.container_btns;
+  if(row&&visible(row))for(let i=0;i<row.numChildren;i++){const n=row.getChildAt(i),b=bounds(n);if(b)controls.push({name:n.name,bounds:b});}
+  const cancel=bounds(panel.btn_cancel);if(cancel)controls.push({name:'btn_cancel',bounds:cancel});
+  const detail=panel.container_Detail;
+  if(detail&&visible(detail)){const choices=detail.getChildByName('container_chooses');
+   if(choices)for(let i=0;i<choices.numChildren;i++){const n=choices.getChildAt(i),b=bounds(n);if(b&&/^c\d+$/.test(n.name))candidates.push({name:n.name,bounds:b});}}
+ }
+ return {viewport:{x:r.x,y:r.y,width:r.width,height:r.height},tiles,can_discard:me.can_discard===true,controls,candidates};
+})()"#;
+
+async fn read_view(page: &Page) -> Result<Option<ClientView>> {
+    let response = page.evaluate(READ_VIEW).await?;
+    let value = response
+        .value()
+        .ok_or_else(|| anyhow!("Majsoul input observation returned no value"))?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_value(value.clone())?))
+}
+
+fn normalize_tile(raw: &str) -> Option<String> {
+    match raw {
+        "1z" => Some("E".into()),
+        "2z" => Some("S".into()),
+        "3z" => Some("W".into()),
+        "4z" => Some("N".into()),
+        "5z" => Some("P".into()),
+        "6z" => Some("F".into()),
+        "7z" => Some("C".into()),
+        "0m" => Some("5mr".into()),
+        "0p" => Some("5pr".into()),
+        "0s" => Some("5sr".into()),
+        _ if raw.len() == 2
+            && matches!(raw.as_bytes()[0], b'1'..=b'9')
+            && matches!(raw.as_bytes()[1], b'm' | b'p' | b's') =>
+        {
+            Some(raw.into())
+        }
+        _ => None,
+    }
+}
+
+fn hand_matches(view: &ClientView, ctx: &ActionContext<'_>) -> bool {
+    let Some(player) = ctx
+        .snapshot
+        .players
+        .iter()
+        .find(|player| player.seat == ctx.our_seat)
+    else {
+        return false;
+    };
+    let Some(mut hand) = view
+        .tiles
+        .iter()
+        .map(|tile| normalize_tile(&tile.tile))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let mut expected = player.tehai.clone();
+    hand.sort();
+    expected.sort();
+    hand == expected
+}
+
+fn tile_bounds(rect: CanvasRect, point: (f64, f64)) -> CanvasRect {
+    let (x, y) = rect.pixel(point.0 - 0.24, point.1 - 0.35);
+    CanvasRect {
+        x,
+        y,
+        width: rect.width * 0.48 / 16.0,
+        height: rect.height * 0.7 / 9.0,
+    }
+}
+
+fn layout(view: &ClientView, ctx: &ActionContext<'_>) -> Option<PointerLayout> {
+    if !hand_matches(view, ctx) {
+        return None;
+    }
+    let opening = is_dealer_opening(ctx);
+    let closed = view
+        .tiles
+        .iter()
+        .filter(|tile| opening || !tile.drawn)
+        .count();
+    let mut index = 0;
+    let tiles = view
+        .tiles
+        .iter()
+        .map(|tile| {
+            let drawn = tile.drawn && !opening;
+            let point = if drawn {
+                get_pai_coord(13, closed)
+            } else {
+                let point = if opening {
+                    *TILES.get(index)?
                 } else {
-                    Whence::Hand
+                    get_pai_coord(index, closed)
                 };
-                if let Some(click) = plan_dahai_click(pai, whence, ctx) {
-                    result.steps.push(click);
-                }
-            }
+                index += 1;
+                point
+            };
+            Some(TileTarget {
+                tile: normalize_tile(&tile.tile)?,
+                drawn,
+                bounds: tile_bounds(view.viewport, point),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let (x, y) = view.viewport.pixel(7.5, 7.55);
+    let result = PointerLayout {
+        viewport: view.viewport,
+        tiles,
+        next_draw: None,
+        rest: CanvasRect {
+            x,
+            y,
+            width: view.viewport.width * 0.3 / 16.0,
+            height: view.viewport.height * 0.15 / 9.0,
+        },
+    };
+    result.valid().then_some(result)
+}
 
-            // ----- Reach (立直) — declaration + tile in one plan ----------
-            MjaiEvent::Reach {
-                actor,
-                pai,
-                tsumogiri,
-            } if *actor == ctx.our_seat => {
-                // Majsoul fuses declaring + discarding into one action, so the
-                // tile must be known up front. It normally is — the bot fills
-                // `Reach.pai` (natively or via the manager's autoplay reach
-                // follow-up, #257, which logs when it cannot). A bare reach
-                // here means that resolution failed; declare nothing rather
-                // than press the button and leave the client sitting on an
-                // owed discard until timeout.
-                let Some(tile) = pai else {
-                    return PlanResult::default();
-                };
-                // Clicks the riichi tile right after the button, so reserve
-                // one extra click of overhead.
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Reach, 1);
-                if let Some(button) = action_button_for(MajsoulOpType::Reach, ctx) {
-                    result.steps.push(Step::Click {
-                        x_norm: button.0,
-                        y_norm: button.1,
-                    });
+fn button_name(ctx: &ActionContext<'_>) -> Option<&'static str> {
+    Some(match ctx.action {
+        MjaiEvent::Dahai { .. } if ctx.self_riichi_accepted => "btn_cancel",
+        MjaiEvent::Reach { .. } => "btn_lizhi",
+        MjaiEvent::Chi { .. } => "btn_chi",
+        MjaiEvent::Pon { .. } => "btn_peng",
+        MjaiEvent::Daiminkan { .. } | MjaiEvent::Ankan { .. } | MjaiEvent::Kakan { .. } => {
+            "btn_gang"
+        }
+        MjaiEvent::Hora { .. } if hora_is_tsumo(ctx) => "btn_zimo",
+        MjaiEvent::Hora { .. } => "btn_hu",
+        MjaiEvent::Ryukyoku { .. } => "btn_liuju",
+        MjaiEvent::Kita { .. } => "btn_babei",
+        MjaiEvent::None => "btn_cancel",
+        _ => return None,
+    })
+}
+
+#[async_trait::async_trait]
+impl SiteAdapter for MajsoulAutoplay {
+    fn plan(&self, ctx: &ActionContext<'_>) -> TurnPlan {
+        let normalized = ActionContext {
+            pointer: None,
+            ..*ctx
+        };
+        let mapping = mapped_targets(&normalized);
+        let mut plan = TurnPlan {
+            presses: Vec::new(),
+            dealt: mapping.dealt,
+        };
+        let roles = match ctx.action {
+            MjaiEvent::Reach { .. } if mapping.targets.len() == 2 => {
+                vec![PressRole::Declaration, PressRole::Discard]
+            }
+            MjaiEvent::Reach { .. } => return TurnPlan::default(),
+            MjaiEvent::Dahai { .. } if !ctx.self_riichi_accepted => vec![PressRole::Discard],
+            _ if mapping.targets.len() == 2 => vec![PressRole::Action, PressRole::Candidate],
+            _ if mapping.targets.len() == 1 => vec![PressRole::Action],
+            _ => return TurnPlan::default(),
+        };
+        if mapping.targets.is_empty() {
+            return TurnPlan::default();
+        }
+        for (index, role) in roles.iter().enumerate() {
+            plan.presses.push(PressIntent {
+                role: *role,
+                action: ctx.action.clone(),
+                confirmation: if index + 1 == roles.len() {
+                    Confirmation::ClientCommand
                 } else {
-                    // Reach not in legal_actions — bridge desync; bail.
-                    return PlanResult::default();
-                }
-                result.steps.push(Step::Sleep {
-                    duration_ms: ctx.cfg.inter_click_delay_ms,
-                });
-                // The copy the bot named, as for a discard; a bot that names
-                // none leaves it to `Whence::Unsaid`.
-                let whence = match tsumogiri {
-                    Some(true) => Whence::Drawn,
-                    Some(false) => Whence::Hand,
-                    None => Whence::Unsaid,
-                };
-                if let Some(click) = plan_dahai_click(tile, whence, ctx) {
-                    result.steps.push(click);
-                }
-            }
+                    Confirmation::Dispatch
+                },
+            });
+        }
+        plan
+    }
 
-            // ----- Chi / Pon / Daiminkan / Ankan / Kakan -------------------
-            // (action button + optional candidate disambiguation)
-            MjaiEvent::Chi { actor, .. } if *actor == ctx.our_seat => {
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Chi, 1);
-                plan_meld(MajsoulOpType::Chi, ActionType::Chi, &mut result, ctx);
+    async fn pointer_layout(
+        &self,
+        page: &Page,
+        ctx: &ActionContext<'_>,
+    ) -> Result<Option<PointerLayout>> {
+        Ok(read_view(page).await?.and_then(|view| layout(&view, ctx)))
+    }
+
+    async fn observe(
+        &self,
+        page: &Page,
+        ctx: &ActionContext<'_>,
+        intent: &PressIntent,
+    ) -> Result<SiteObservation> {
+        let budget = *self
+            .context
+            .time_budget
+            .read()
+            .map_err(|_| anyhow!("Majsoul window lock poisoned"))?;
+        let mut observation = SiteObservation {
+            ready: false,
+            target_kind: TargetKind::Commit,
+            target: None,
+            layout: None,
+            clock: budget.map(|b| TurnClockFacts {
+                started_at: b.opened_at,
+                fixed_ms: b.fixed_ms,
+                remaining_bank_ms: Some(b.add_ms),
+            }),
+            continuation: None,
+        };
+        let Some(view) = read_view(page).await? else {
+            return Ok(observation);
+        };
+        observation.layout = layout(&view, ctx);
+        if !hand_matches(&view, ctx) || intent.action != *ctx.action {
+            return Ok(observation);
+        }
+        let Some(budget) = budget else {
+            return Ok(observation);
+        };
+        let normalized = ActionContext {
+            pointer: ctx.pointer.map(|p| view.viewport.norm(p.0, p.1)),
+            ..*ctx
+        };
+        let mapping = mapped_targets(&normalized);
+        let selected = match intent.role {
+            PressRole::Candidate => mapping.targets.get(1),
+            PressRole::Discard if matches!(ctx.action, MjaiEvent::Reach { .. }) => {
+                mapping.targets.get(1)
             }
-            MjaiEvent::Pon { actor, .. } if *actor == ctx.our_seat => {
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Pon, 1);
-                plan_meld(MajsoulOpType::Pon, ActionType::Pon, &mut result, ctx);
+            _ => mapping.targets.first(),
+        };
+        let Some(point) = selected else {
+            return Ok(observation);
+        };
+        let (control, bounds) = match intent.role {
+            PressRole::Discard => {
+                if !view.can_discard {
+                    return Ok(observation);
+                }
+                (
+                    format!("tile:{}:{}", point.x_norm, point.y_norm),
+                    tile_bounds(view.viewport, (point.x_norm, point.y_norm)),
+                )
             }
-            MjaiEvent::Daiminkan { actor, .. } if *actor == ctx.our_seat => {
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Daiminkan, 1);
-                plan_meld(
-                    MajsoulOpType::Daiminkan,
-                    ActionType::Daiminkan,
-                    &mut result,
-                    ctx,
+            PressRole::Candidate => {
+                let count = view.candidates.len();
+                let kan = matches!(
+                    ctx.action,
+                    MjaiEvent::Ankan { .. } | MjaiEvent::Kakan { .. }
                 );
-            }
-            MjaiEvent::Ankan { actor, .. } if *actor == ctx.our_seat => {
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Ankan, 1);
-                plan_kan(MajsoulOpType::Ankan, ActionType::Ankan, &mut result, ctx);
-            }
-            MjaiEvent::Kakan { actor, .. } if *actor == ctx.our_seat => {
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Kakan, 1);
-                plan_kan(MajsoulOpType::Kakan, ActionType::Kakan, &mut result, ctx);
-            }
-
-            // ----- Hora — zimo button on own draw, ron on opponent ---------
-            MjaiEvent::Hora { actor, .. } if *actor == ctx.our_seat => {
-                let op = if hora_is_tsumo(ctx) {
-                    MajsoulOpType::Zimo
-                } else {
-                    MajsoulOpType::Ron
+                let Some(index) = (0..count).find(|i| {
+                    (if kan {
+                        kan_candidate_pos(*i, count)
+                    } else {
+                        candidate_pos(*i, count)
+                    }) == Some((point.x_norm, point.y_norm))
+                }) else {
+                    return Ok(observation);
                 };
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Hora, 0);
-                if let Some(button) = action_button_for(op, ctx) {
-                    result.steps.push(Step::Click {
-                        x_norm: button.0,
-                        y_norm: button.1,
-                    });
+                let name = format!("c{index}");
+                let Some(control) = view.candidates.iter().find(|c| c.name == name) else {
+                    return Ok(observation);
+                };
+                (format!("candidate:{name}"), control.bounds)
+            }
+            _ => {
+                let Some(name) = button_name(ctx) else {
+                    return Ok(observation);
+                };
+                let controls: Vec<_> = view.controls.iter().filter(|c| c.name == name).collect();
+                let [control] = controls.as_slice() else {
+                    return Ok(observation);
+                };
+                (name.to_owned(), control.bounds)
+            }
+        };
+        let window = window_identity(crate::bot::control::InputWindow::Majsoul(budget).proof());
+        observation.target = Some(InputTarget {
+            identity: TargetIdentity {
+                window,
+                hand: view
+                    .tiles
+                    .iter()
+                    .map(|t| format!("{}:{}", t.tile, t.drawn))
+                    .collect(),
+                control,
+            },
+            bounds,
+            viewport: view.viewport,
+        });
+        observation.ready = true;
+        Ok(observation)
+    }
+}
+
+fn mapped_targets(ctx: &ActionContext) -> TargetMapping {
+    let mut result = TargetMapping::default();
+
+    match ctx.action {
+        // ----- Dahai (打牌) ---------------------------------------------
+        MjaiEvent::Dahai {
+            actor,
+            pai,
+            tsumogiri,
+        } if *actor == ctx.our_seat => {
+            // While in riichi, Majsoul auto-discards, so ours would be a
+            // second one. (The riichi-declaring tile goes out inside the
+            // Reach plan below, before acceptance, so it is unaffected.)
+            if ctx.self_riichi_accepted {
+                // …with one exception: the auto-discard is held back
+                // while an own-draw operation prompt is open — kita on
+                // a drawn North (sanma), a riichi-legal ankan, or a
+                // tsumo agari. Majsoul waits for an answer, so a bot
+                // decision to tsumogiri must decline the prompt via
+                // the X button; the client then discards the draw on
+                // its own. Returning with no click here left the game
+                // hanging until the turn timer and the entire time
+                // bank drained (the server eventually auto-declines).
+                if riichi_prompt_pending(ctx, pai) {
+                    if let Some(button) = action_button_for(MajsoulOpType::None, ctx) {
+                        result.targets.push(MappedClick {
+                            x_norm: button.0,
+                            y_norm: button.1,
+                        });
+                    }
                 }
+                return result;
             }
 
-            // ----- Ryukyoku (九種九牌) -------------------------------------
-            MjaiEvent::Ryukyoku { .. } => {
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Ryukyoku, 0);
-                if let Some(button) = action_button_for(MajsoulOpType::Ryukyoku, ctx) {
-                    result.steps.push(Step::Click {
-                        x_norm: button.0,
-                        y_norm: button.1,
-                    });
-                }
+            let whence = if *tsumogiri {
+                Whence::Drawn
+            } else {
+                Whence::Hand
+            };
+            if let Some(click) = plan_dahai_click(pai, whence, ctx) {
+                result.targets.push(click);
             }
-
-            // ----- Kita (3p 北抜き) ----------------------------------------
-            MjaiEvent::Kita { actor, .. } if *actor == ctx.our_seat => {
-                // On the opening draw of a kyoku, Majsoul plays a tile-
-                // dealing animation; clicks issued during it land on the
-                // wrong target. Folded into the delay model as
-                // `opening_animation` (same wait as dealer first discard).
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Kita, 0);
-                if let Some(button) = action_button_for(MajsoulOpType::Nukidora, ctx) {
-                    result.steps.push(Step::Click {
-                        x_norm: button.0,
-                        y_norm: button.1,
-                    });
-                }
-            }
-
-            // ----- None — pass / cancel button -----------------------------
-            //
-            // The bot emits `None` on every mjai event it has nothing to say
-            // about — including pure echoes of other players' tsumo/dahai
-            // notifies, where Majsoul is showing no buttons at all. Without
-            // a gate we'd loop-click the lobby/preview UI's rightmost button
-            // on every other-player turn.
-            //
-            // riichienv only adds `ActionType::Pass` to legal_actions in
-            // `Phase::WaitResponse` (`riichienv-core/src/state/legal_actions.rs:249`)
-            // — i.e. exactly when Majsoul is showing the Pass button after a
-            // claimable discard. Use that as the visibility gate.
-            MjaiEvent::None => {
-                if !pass_button_visible(ctx) {
-                    return result;
-                }
-                // Extra guard: never click Pass during WaitAct (own draw turn).
-                // Stale legal_actions from the previous round can falsely expose
-                // Pass before the tracker has processed start_kyoku.
-                if ctx.snapshot.phase != crate::game_state::snapshot::Phase::WaitResponse {
-                    return result;
-                }
-                // Extra guard: only click Skip when there's an actual claim option
-                // (pon/ron/daiminkan). In 3p there's no chi, so many WaitResponse
-                // windows have no claimable actions — Majsoul shows no buttons at all
-                // and a ghost click would land on the wrong UI element.
-                let has_claim = ctx.legal_actions.iter().any(|a| {
-                    matches!(
-                        a.action_type,
-                        riichienv_core::action::ActionType::Pon
-                            | riichienv_core::action::ActionType::Daiminkan
-                            | riichienv_core::action::ActionType::Ron
-                            | riichienv_core::action::ActionType::Chi
-                    )
-                });
-                if !has_claim {
-                    return result;
-                }
-                push_pre_delay(&mut result.steps, ctx, DecisionKind::Pass, 0);
-                if let Some(button) = action_button_for(MajsoulOpType::None, ctx) {
-                    result.steps.push(Step::Click {
-                        x_norm: button.0,
-                        y_norm: button.1,
-                    });
-                }
-            }
-
-            // Everything else (StartGame, Tsumo, Dora, ReachAccepted,
-            // EndKyoku, EndGame, events from other seats) doesn't drive
-            // a click.
-            _ => {}
         }
 
-        // Anything the dealer presses on its first turn answers a hand that
-        // is still being dealt when the window opens.
-        result.dealt = !result.steps.is_empty() && is_dealer_opening(ctx);
-        result
+        // ----- Reach (立直) — declaration + tile in one plan ----------
+        MjaiEvent::Reach {
+            actor,
+            pai,
+            tsumogiri,
+        } if *actor == ctx.our_seat => {
+            // Majsoul fuses declaring + discarding into one action, so the
+            // tile must be known up front. It normally is — the bot fills
+            // `Reach.pai` (natively or via the manager's autoplay reach
+            // follow-up, #257, which logs when it cannot). A bare reach
+            // here means that resolution failed; declare nothing rather
+            // than press the button and leave the client sitting on an
+            // owed discard until timeout.
+            let Some(tile) = pai else {
+                return TargetMapping::default();
+            };
+
+            if let Some(button) = action_button_for(MajsoulOpType::Reach, ctx) {
+                result.targets.push(MappedClick {
+                    x_norm: button.0,
+                    y_norm: button.1,
+                });
+            } else {
+                // Reach not in legal_actions — bridge desync; bail.
+                return TargetMapping::default();
+            }
+            // The copy the bot named, as for a discard; a bot that names
+            // none leaves it to `Whence::Unsaid`.
+            let whence = match tsumogiri {
+                Some(true) => Whence::Drawn,
+                Some(false) => Whence::Hand,
+                None => Whence::Unsaid,
+            };
+            if let Some(click) = plan_dahai_click(tile, whence, ctx) {
+                result.targets.push(click);
+            }
+        }
+
+        // ----- Chi / Pon / Daiminkan / Ankan / Kakan -------------------
+        // (action button + optional candidate disambiguation)
+        MjaiEvent::Chi { actor, .. } if *actor == ctx.our_seat => {
+            plan_meld(MajsoulOpType::Chi, ActionType::Chi, &mut result, ctx);
+        }
+        MjaiEvent::Pon { actor, .. } if *actor == ctx.our_seat => {
+            plan_meld(MajsoulOpType::Pon, ActionType::Pon, &mut result, ctx);
+        }
+        MjaiEvent::Daiminkan { actor, .. } if *actor == ctx.our_seat => {
+            plan_meld(
+                MajsoulOpType::Daiminkan,
+                ActionType::Daiminkan,
+                &mut result,
+                ctx,
+            );
+        }
+        MjaiEvent::Ankan { actor, .. } if *actor == ctx.our_seat => {
+            plan_kan(MajsoulOpType::Ankan, ActionType::Ankan, &mut result, ctx);
+        }
+        MjaiEvent::Kakan { actor, .. } if *actor == ctx.our_seat => {
+            plan_kan(MajsoulOpType::Kakan, ActionType::Kakan, &mut result, ctx);
+        }
+
+        // ----- Hora — zimo button on own draw, ron on opponent ---------
+        MjaiEvent::Hora { actor, .. } if *actor == ctx.our_seat => {
+            let op = if hora_is_tsumo(ctx) {
+                MajsoulOpType::Zimo
+            } else {
+                MajsoulOpType::Ron
+            };
+
+            if let Some(button) = action_button_for(op, ctx) {
+                result.targets.push(MappedClick {
+                    x_norm: button.0,
+                    y_norm: button.1,
+                });
+            }
+        }
+
+        // ----- Ryukyoku (九種九牌) -------------------------------------
+        MjaiEvent::Ryukyoku { .. } => {
+            if let Some(button) = action_button_for(MajsoulOpType::Ryukyoku, ctx) {
+                result.targets.push(MappedClick {
+                    x_norm: button.0,
+                    y_norm: button.1,
+                });
+            }
+        }
+
+        // ----- Kita (3p 北抜き) ----------------------------------------
+        MjaiEvent::Kita { actor, .. } if *actor == ctx.our_seat => {
+            // On the opening draw of a kyoku, Majsoul plays a tile-
+            // dealing animation; clicks issued during it land on the
+            // wrong target. Folded into the delay model as
+            // `opening_animation` (same wait as dealer first discard).
+
+            if let Some(button) = action_button_for(MajsoulOpType::Nukidora, ctx) {
+                result.targets.push(MappedClick {
+                    x_norm: button.0,
+                    y_norm: button.1,
+                });
+            }
+        }
+
+        // ----- None — pass / cancel button -----------------------------
+        //
+        // The bot emits `None` on every mjai event it has nothing to say
+        // about — including pure echoes of other players' tsumo/dahai
+        // notifies, where Majsoul is showing no buttons at all. Without
+        // a gate we'd loop-click the lobby/preview UI's rightmost button
+        // on every other-player turn.
+        //
+        // riichienv only adds `ActionType::Pass` to legal_actions in
+        // `Phase::WaitResponse` (`riichienv-core/src/state/legal_actions.rs:249`)
+        // — i.e. exactly when Majsoul is showing the Pass button after a
+        // claimable discard. Use that as the visibility gate.
+        MjaiEvent::None => {
+            if !pass_button_visible(ctx) {
+                return result;
+            }
+            // Extra guard: never click Pass during WaitAct (own draw turn).
+            // Stale legal_actions from the previous round can falsely expose
+            // Pass before the tracker has processed start_kyoku.
+            if ctx.snapshot.phase != crate::game_state::snapshot::Phase::WaitResponse {
+                return result;
+            }
+            // Extra guard: only click Skip when there's an actual claim option
+            // (pon/ron/daiminkan). In 3p there's no chi, so many WaitResponse
+            // windows have no claimable actions — Majsoul shows no buttons at all
+            // and a ghost click would land on the wrong UI element.
+            let has_claim = ctx.legal_actions.iter().any(|a| {
+                matches!(
+                    a.action_type,
+                    riichienv_core::action::ActionType::Pon
+                        | riichienv_core::action::ActionType::Daiminkan
+                        | riichienv_core::action::ActionType::Ron
+                        | riichienv_core::action::ActionType::Chi
+                )
+            });
+            if !has_claim {
+                return result;
+            }
+
+            if let Some(button) = action_button_for(MajsoulOpType::None, ctx) {
+                result.targets.push(MappedClick {
+                    x_norm: button.0,
+                    y_norm: button.1,
+                });
+            }
+        }
+
+        // Everything else (StartGame, Tsumo, Dora, ReachAccepted,
+        // EndKyoku, EndGame, events from other seats) doesn't drive
+        // a click.
+        _ => {}
     }
+
+    // Anything the dealer presses on its first turn answers a hand that
+    // is still being dealt when the window opens.
+    result.dealt = !result.targets.is_empty() && is_dealer_opening(ctx);
+    result
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Compute the pre-click "thinking" delay via the delay model
-/// (`autoplay::delay`) and push it as the leading `Sleep` step.
-///
-/// The model returns a target **total** thinking time for the decision
-/// window; when the server budget is known, the time already consumed
-/// (network, proxy, bot inference) is subtracted so the server-observed
-/// interval matches the target rather than exceeding it.
-///
-/// `extra_clicks` is how many clicks follow the *first* one in this plan
-/// (candidate disambiguation, riichi tile). It sizes the click-sequence
-/// overhead the budget layer must reserve: each is waited for, moved to
-/// and pressed.
-///
-/// Returns the delay model's decision, for what it says besides the pause.
-fn push_pre_delay(
-    steps: &mut Vec<Step>,
-    ctx: &ActionContext,
-    kind: DecisionKind,
-    extra_clicks: u32,
-) -> delay::DelayDecision {
-    let cfg = ctx.cfg;
-    let per_click = cfg.hover_delay_ms + cfg.click_hold_ms;
-    let see_next =
-        (crate::autoplay::humanize::SEE_NEXT.median as u32).max(cfg.inter_click_delay_ms);
-    let click_overhead_ms = per_click
-        + extra_clicks * (per_click + see_next + crate::autoplay::pointer::next_press_ms());
-
-    // Whatever the dealer does first in a kyoku — a discard, a riichi, a
-    // concealed kan, a win off the deal, nine terminals, a kita — waits out
-    // the deal: presses issued during it are dropped.
-    let opening_animation = matches!(
-        kind,
-        DecisionKind::Dahai
-            | DecisionKind::Reach
-            | DecisionKind::Ankan
-            | DecisionKind::Hora
-            | DecisionKind::Ryukyoku
-            | DecisionKind::Kita
-    ) && is_dealer_opening(ctx);
-
-    // Discard sub-kind: tsumogiri comes straight off the event; a
-    // post-call discard is the only dahai decision with no just-drawn
-    // tile — the meld consumed the turn's draw. (Hand size cannot tell
-    // the cases apart: with the drawn tile in `tehai`, both post-draw
-    // and post-call hands are ≡ 2 mod 3.) `drawn_tile` is tracked for
-    // the active seat, which we are when discarding; requiring a meld
-    // guards states where no draw is tracked for other reasons, e.g.
-    // the dealer's opening hand.
-    let (is_tsumogiri, is_post_call, tile_class) = match ctx.action {
-        MjaiEvent::Dahai { tsumogiri, pai, .. } => {
-            let me = ctx.snapshot.players.get(ctx.our_seat as usize);
-            (
-                *tsumogiri,
-                me.is_some_and(|p| !p.melds.is_empty() && p.drawn_tile.is_none()),
-                crate::autoplay::delay::TileClass::of_mjai(pai),
-            )
-        }
-        _ => (false, false, None),
-    };
-    // An opponent riichi turns every decision into a defence read.
-    let opponent_riichi = ctx
-        .snapshot
-        .players
-        .iter()
-        .any(|p| p.seat != ctx.our_seat && p.riichi_declared);
-
-    // Legacy mode reproduces the historical fixed model: uniform draw,
-    // no script consulted. The manager already withholds the script in
-    // legacy mode; forcing the distribution here completes the split.
-    let legacy = ctx.delay_cfg.mode == crate::config::DelayMode::Legacy;
-    let mut delay_cfg = ctx.delay_cfg.clone();
-    if legacy {
-        delay_cfg.distribution = crate::config::DelayDistribution::Uniform;
-    }
-
-    let input = DelayInput {
-        kind,
-        is_tsumogiri,
-        is_post_call,
-        first_action_of_kyoku: ctx.last_kawa_tile.is_none(),
-        opening_animation,
-        can_riichi: ctx
-            .legal_actions
-            .iter()
-            .any(|a| a.action_type == ActionType::Riichi),
-        in_riichi: ctx.self_riichi_accepted,
-        opponent_riichi,
-        tile_class,
-        junme: ctx
-            .snapshot
-            .players
-            .get(ctx.our_seat as usize)
-            .map(|p| p.river.len() as u32 + 1)
-            .unwrap_or(0),
-        legal_action_count: ctx.legal_actions.len(),
-        probs: ctx.probs,
-        reading: ctx.reading,
-        budget: ctx.budget,
-        click_overhead_ms,
-        cfg,
-        delay_cfg: &delay_cfg,
-    };
-    // User Lua policy first (falls back internally on any failure), then
-    // the built-in model. Both are bound by the same caps and floors.
-    let decision = ctx
-        .delay_script
-        .filter(|_| !legacy)
-        .and_then(|s| s.try_decide(&input))
-        .unwrap_or_else(|| delay::decide(&input, &mut rand::rng()));
-
-    // Convert target total time to a sleep: subtract what the window has
-    // already consumed AND what the click sequence itself will take —
-    // the target is the server-observed total, and hover/hold/candidate
-    // clicks all land after this sleep. Without a budget there is no
-    // window clock — only the click overhead is deducted. A riichi's
-    // declaration and tile go out in one plan, so the whole action is
-    // budgeted here as a single interval (the calibration source measures
-    // declaration plus tile as one server-observed interval).
-    let sleep = match ctx.budget {
-        Some(b) => decision
-            .total_target_ms
-            .saturating_sub(b.elapsed_ms)
-            .saturating_sub(click_overhead_ms),
-        None => decision.total_target_ms.saturating_sub(click_overhead_ms),
-    };
-    // The overhead deduction must not undercut UI readiness: the first
-    // click still has to land after the functional floor. Time already
-    // elapsed in the window counts toward that floor.
-    let elapsed = ctx.budget.map_or(0, |b| b.elapsed_ms);
-    let sleep = sleep.max(delay::functional_floor(&input).saturating_sub(elapsed));
-    steps.push(Step::Sleep { duration_ms: sleep });
-    decision
-}
-
 /// Where `pai` sits in our hand, as a normalised 16:9 point — the place a
 /// discard of it would be pressed.
 pub fn discard_point(pai: &str, ctx: &ActionContext) -> Option<(f64, f64)> {
     match plan_dahai_click(pai, Whence::Unsaid, ctx)? {
-        Step::Click { x_norm, y_norm } => Some((x_norm, y_norm)),
+        MappedClick { x_norm, y_norm } => Some((x_norm, y_norm)),
         _ => None,
     }
 }
@@ -547,8 +752,28 @@ fn pick_copy(
 }
 
 /// Plan a hand-tile click for a discard or riichi-declaring discard.
-fn plan_dahai_click(pai: &str, whence: Whence, ctx: &ActionContext) -> Option<Step> {
-    plan_dahai_click_with(pai, whence, ctx, &mut rand::rng())
+fn plan_dahai_click(pai: &str, whence: Whence, ctx: &ActionContext) -> Option<MappedClick> {
+    {
+        use rand::SeedableRng;
+        use std::hash::{Hash, Hasher};
+        let mut key = std::collections::hash_map::DefaultHasher::new();
+        (
+            pai,
+            ctx.snapshot.kyoku,
+            ctx.snapshot.honba,
+            ctx.snapshot.turn_count,
+        )
+            .hash(&mut key);
+        if let Some(player) = ctx.snapshot.players.get(ctx.our_seat as usize) {
+            player.tehai.hash(&mut key);
+        }
+        plan_dahai_click_with(
+            pai,
+            whence,
+            ctx,
+            &mut rand::rngs::StdRng::seed_from_u64(key.finish()),
+        )
+    }
 }
 
 fn plan_dahai_click_with(
@@ -556,7 +781,7 @@ fn plan_dahai_click_with(
     whence: Whence,
     ctx: &ActionContext,
     rng: &mut impl Rng,
-) -> Option<Step> {
+) -> Option<MappedClick> {
     let our_seat = ctx.our_seat as usize;
     if our_seat >= ctx.snapshot.players.len() {
         return None;
@@ -572,7 +797,7 @@ fn plan_dahai_click_with(
         let copies: Vec<usize> = (0..sorted.len()).filter(|&i| sorted[i] == pai).collect();
         let idx = pick_copy(&copies, |i| TILES.get(i).copied(), ctx.pointer, rng)?;
         let (x, y) = TILES.get(idx).copied()?;
-        return Some(Step::Click {
+        return Some(MappedClick {
             x_norm: x,
             y_norm: y,
         });
@@ -620,7 +845,7 @@ fn plan_dahai_click_with(
         // when the hand holds no other copy of it.
         if pai == t && (whence != Whence::Hand || copies.is_empty()) {
             let (x, y) = get_pai_coord(13, tehai.len() - 1);
-            return Some(Step::Click {
+            return Some(MappedClick {
                 x_norm: x,
                 y_norm: y,
             });
@@ -632,7 +857,7 @@ fn plan_dahai_click_with(
             return None;
         }
         let (x, y) = get_pai_coord(idx, rack);
-        return Some(Step::Click {
+        return Some(MappedClick {
             x_norm: x,
             y_norm: y,
         });
@@ -648,7 +873,7 @@ fn plan_dahai_click_with(
         return None;
     }
     let (x, y) = get_pai_coord(idx, tehai.len());
-    Some(Step::Click {
+    Some(MappedClick {
         x_norm: x,
         y_norm: y,
     })
@@ -682,11 +907,11 @@ fn is_dealer_opening(ctx: &ActionContext) -> bool {
 
 /// Plan a chi/pon/daiminkan: action button click + optional candidate
 /// disambiguation when multiple consume-tile combinations are legal.
-fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut PlanResult, ctx: &ActionContext) {
+fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx: &ActionContext) {
     let Some(button) = action_button_for(op, ctx) else {
         return;
     };
-    result.steps.push(Step::Click {
+    result.targets.push(MappedClick {
         x_norm: button.0,
         y_norm: button.1,
     });
@@ -709,10 +934,7 @@ fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut PlanResult, ctx: &A
         .position(|c| same_consumed(c, &sorted_consumed))
     {
         if let Some(p) = candidate_pos(idx, candidates.len()) {
-            result.steps.push(Step::Sleep {
-                duration_ms: ctx.cfg.inter_click_delay_ms,
-            });
-            result.steps.push(Step::Click {
+            result.targets.push(MappedClick {
                 x_norm: p.0,
                 y_norm: p.1,
             });
@@ -726,11 +948,11 @@ fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut PlanResult, ctx: &A
 /// Majsoul shows ONE kan button whose candidate row contains the union
 /// of both, ordered `[kakan…, ankan…]`. The candidate index for the
 /// bot's chosen tile is computed against the unified list.
-fn plan_kan(op: MajsoulOpType, at: ActionType, result: &mut PlanResult, ctx: &ActionContext) {
+fn plan_kan(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx: &ActionContext) {
     let Some(button) = action_button_for(op, ctx) else {
         return;
     };
-    result.steps.push(Step::Click {
+    result.targets.push(MappedClick {
         x_norm: button.0,
         y_norm: button.1,
     });
@@ -787,10 +1009,7 @@ fn plan_kan(op: MajsoulOpType, at: ActionType, result: &mut PlanResult, ctx: &Ac
         // Suppress unused-variable warning when the action type is unused
         // — kept in the signature so future logic can branch on it.
         let _ = at;
-        result.steps.push(Step::Sleep {
-            duration_ms: ctx.cfg.inter_click_delay_ms,
-        });
-        result.steps.push(Step::Click {
+        result.targets.push(MappedClick {
             x_norm: p.0,
             y_norm: p.1,
         });
@@ -949,6 +1168,78 @@ fn riichi_prompt_pending(ctx: &ActionContext, dahai_pai: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn semantic_reach_has_no_site_timing_and_only_the_discard_finishes_input() {
+        let snapshot = snapshot_with_oya(
+            0,
+            1,
+            vec![
+                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p", "5p",
+            ],
+        );
+        let action = MjaiEvent::Reach {
+            actor: 0,
+            pai: Some("5p".into()),
+            tsumogiri: Some(true),
+        };
+        let legal = [Action::new(ActionType::Riichi, None, vec![], Some(0))];
+        let context = ctx_for(&action, &snapshot, &legal, Some("1m"), Some("5p"), false);
+        let adapter = MajsoulAutoplay::new(Arc::new(AutoplayContext::new()));
+        let plan = adapter.plan(&context);
+        assert_eq!(
+            plan.presses
+                .iter()
+                .map(|p| (p.role, p.confirmation))
+                .collect::<Vec<_>>(),
+            vec![
+                (PressRole::Declaration, Confirmation::Dispatch),
+                (PressRole::Discard, Confirmation::ClientCommand)
+            ]
+        );
+    }
+    #[test]
+    fn actual_hand_layout_keeps_red_and_drawn_identity_in_viewport_css_pixels() {
+        let mut snapshot = snapshot_with_oya(0, 1, vec!["5mr", "5m"]);
+        snapshot.players[0].drawn_tile = Some("5m".into());
+        let context = ctx_for(
+            &MjaiEvent::None,
+            &snapshot,
+            &[],
+            Some("1m"),
+            Some("5m"),
+            false,
+        );
+        let mut view = ClientView {
+            viewport: CanvasRect {
+                x: 100.0,
+                y: 50.0,
+                width: 1280.0,
+                height: 720.0,
+            },
+            tiles: vec![
+                VisibleTile {
+                    tile: "0m".into(),
+                    drawn: false,
+                },
+                VisibleTile {
+                    tile: "5m".into(),
+                    drawn: true,
+                },
+            ],
+            can_discard: false,
+            controls: vec![],
+            candidates: vec![],
+        };
+        let actual = layout(&view, &context).unwrap();
+        assert_eq!(actual.tiles[0].tile, "5mr");
+        assert!(!actual.tiles[0].drawn);
+        assert_eq!(actual.tiles[1].tile, "5m");
+        assert!(actual.tiles[1].drawn);
+        let expected = tile_bounds(view.viewport, get_pai_coord(13, 1));
+        assert_eq!(actual.tiles[1].bounds, expected);
+        view.tiles[0].tile = "5m".into();
+        assert!(!hand_matches(&view, &context));
+    }
 
     /// Each kind of target has its own reach, and the hand's drawn tile,
     /// set apart from the rest, is a tile like any other.
@@ -981,29 +1272,9 @@ mod tests {
         assert!(coords::REMATCH_ASK_CONFIRM.0 - ask.half_x > 5.18);
     }
     use crate::autoplay::context::CanvasRect;
-    use crate::config::MajsoulAutoplayConfig;
+
     use crate::game_state::snapshot::{GameStateSnapshot, Phase, PlayerSnapshot};
     use coords::{ACTIONS, CANDIDATES};
-
-    fn cfg() -> MajsoulAutoplayConfig {
-        MajsoulAutoplayConfig {
-            pre_click_delay_min_ms: 0,
-            pre_click_delay_max_ms: 0,
-            inter_click_delay_ms: 0,
-            hover_delay_ms: 0,
-            click_hold_ms: 0,
-            verify_input_ms: 0,
-            click_retries: 0,
-            reload_after_failures: 0,
-            dealer_first_discard_extra_delay_ms: 0,
-        }
-    }
-
-    fn cfg_with_dealer_delay(ms: u32) -> MajsoulAutoplayConfig {
-        let mut c = cfg();
-        c.dealer_first_discard_extra_delay_ms = ms;
-        c
-    }
 
     fn snapshot_with_oya(seat: u8, oya: u8, tehai: Vec<&str>) -> GameStateSnapshot {
         let mut s = snapshot_with_hand(seat, tehai);
@@ -1056,7 +1327,6 @@ mod tests {
         last_kawa: Option<&'a str>,
         last_tsumo: Option<&'a str>,
         riichi_accepted: bool,
-        cfg_ref: &'a MajsoulAutoplayConfig,
     ) -> ActionContext<'a> {
         ActionContext {
             action,
@@ -1067,13 +1337,7 @@ mod tests {
             last_self_tsumo: last_tsumo,
             self_riichi_accepted: riichi_accepted,
             num_players: snapshot.num_players,
-            cfg: cfg_ref,
-            delay_cfg: crate::config::DelayModelConfig::default(),
-            budget: None,
-            probs: None,
-            reading: Default::default(),
-            delay_script: None,
-            tenhou: None,
+
             pointer: None,
         }
     }
@@ -1095,13 +1359,13 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        // sleep + click
-        assert_eq!(result.steps.len(), 2);
-        match &result.steps[1] {
-            Step::Click { x_norm, .. } => {
+
+        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false);
+        let result = mapped_targets(&ctx);
+        // one click target
+        assert_eq!(result.targets.len(), 1);
+        match &result.targets[0] {
+            MappedClick { x_norm, .. } => {
                 // Tsumohai (5p) → idx 13, with TSUMO_SPACE offset.
                 let expected = TILES[13].0 + TSUMO_SPACE;
                 assert!(
@@ -1109,7 +1373,7 @@ mod tests {
                     "expected tsumohai at {expected}, got {x_norm}"
                 );
             }
-            _ => panic!("second step should be a click"),
+            _ => panic!("expected a click target"),
         }
     }
 
@@ -1118,7 +1382,7 @@ mod tests {
         use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         match plan_dahai_click_with(pai, whence, ctx, &mut rng) {
-            Some(Step::Click { x_norm, .. }) => x_norm,
+            Some(MappedClick { x_norm, .. }) => x_norm,
             other => panic!("expected a click, got {other:?}"),
         }
     }
@@ -1142,8 +1406,8 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref);
+
+        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false);
         // Left of the gap the rack is 1m 1m 3m 4m 5m 6m 7m 8m 9m 1p 5p 5p 7p:
         // the hand's 5p are at 10 and 11, never the drawn one at 13.
         let hand = [get_pai_coord(10, 13).0, get_pai_coord(11, 13).0];
@@ -1166,15 +1430,15 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: true,
         };
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref);
+
+        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false);
         let drawn = TILES[13].0 + TSUMO_SPACE;
         for seed in 0..8 {
             assert!((dahai_x("5p", Whence::Drawn, &ctx, seed) - drawn).abs() < 1e-9);
         }
         // The plan reads the choice off the event itself.
-        match &MajsoulAutoplay::new().plan(&ctx).steps[1] {
-            Step::Click { x_norm, .. } => assert!((*x_norm - drawn).abs() < 1e-9),
+        match &mapped_targets(&ctx).targets[0] {
+            MappedClick { x_norm, .. } => assert!((*x_norm - drawn).abs() < 1e-9),
             other => panic!("expected a click, got {other:?}"),
         }
     }
@@ -1212,9 +1476,9 @@ mod tests {
             pai: "3m".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg();
+
         // Drawn 3m, the only one: the drawn tile is the only copy to press.
-        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("3m"), false, &cfg_ref);
+        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("3m"), false);
         let drawn = get_pai_coord(13, 13).0;
         assert!((dahai_x("3m", Whence::Hand, &ctx, 0) - drawn).abs() < 1e-9);
     }
@@ -1227,8 +1491,8 @@ mod tests {
             pai: "1m".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref);
+
+        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false);
         let places = [get_pai_coord(0, 13).0, get_pai_coord(1, 13).0];
         let mut seen = [false, false];
         for seed in 0..64 {
@@ -1249,7 +1513,7 @@ mod tests {
     #[test]
     fn a_discard_presses_the_copy_the_pointer_is_already_on() {
         let snap = doubled_hand();
-        let cfg_ref = cfg();
+
         for (pai, places) in [("1m", [0, 1]), ("5p", [10, 11])] {
             let act = MjaiEvent::Dahai {
                 actor: 0,
@@ -1259,7 +1523,7 @@ mod tests {
             for at in places {
                 let ctx = ActionContext {
                     pointer: on(at, 13),
-                    ..ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref)
+                    ..ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false)
                 };
                 let want = get_pai_coord(at, 13).0;
                 for seed in 0..32 {
@@ -1281,10 +1545,10 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: true,
         };
-        let cfg_ref = cfg();
+
         let ctx = ActionContext {
             pointer: on(10, 13),
-            ..ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref)
+            ..ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false)
         };
         let drawn = get_pai_coord(13, 13).0;
         assert!((dahai_x("5p", Whence::Drawn, &ctx, 0) - drawn).abs() < 1e-9);
@@ -1298,11 +1562,11 @@ mod tests {
             pai: "1m".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg();
+
         // By the buttons, where the pointer rests between turns.
         let ctx = ActionContext {
             pointer: Some(ACTIONS[0]),
-            ..ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref)
+            ..ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false)
         };
         let places = [get_pai_coord(0, 13).0, get_pai_coord(1, 13).0];
         let mut seen = [false, false];
@@ -1349,10 +1613,10 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: true,
         };
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), true, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert!(result.steps.is_empty(), "no click while riichi accepted");
+
+        let ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), true);
+        let result = mapped_targets(&ctx);
+        assert!(result.targets.is_empty(), "no click while riichi accepted");
     }
 
     /// Regression (2026-08-22, West 1): a bot `hora` on a robbed kan must
@@ -1384,18 +1648,18 @@ mod tests {
             Action::new(ActionType::Ron, Some(88), vec![], Some(0)), // 5s
             Action::new(ActionType::Pass, None, vec![], Some(0)),
         ];
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &legal, Some("4z"), None, false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert_eq!(result.steps.len(), 2, "sleep + ron click, got {result:?}");
-        match &result.steps[1] {
-            Step::Click { x_norm, y_norm } => {
+
+        let ctx = ctx_for(&act, &snap, &legal, Some("4z"), None, false);
+        let result = mapped_targets(&ctx);
+        assert_eq!(result.targets.len(), 1, "ron target, got {result:?}");
+        match &result.targets[0] {
+            MappedClick { x_norm, y_norm } => {
                 // [Ron, Pass] sorted by priority → Ron in slot 1, one left
                 // of the always-rightmost pass.
                 assert_eq!(*x_norm, 8.637_5);
                 assert_eq!(*y_norm, 7.0);
             }
-            _ => panic!("second step should be a click"),
+            _ => panic!("expected a click target"),
         }
     }
 
@@ -1415,16 +1679,16 @@ mod tests {
             Action::new(ActionType::Ron, Some(88), vec![], Some(0)), // 5s
             Action::new(ActionType::Pass, None, vec![], Some(0)),
         ];
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &legal, Some("4z"), None, false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert_eq!(result.steps.len(), 2, "sleep + pass click, got {result:?}");
-        match &result.steps[1] {
-            Step::Click { x_norm, y_norm } => {
+
+        let ctx = ctx_for(&act, &snap, &legal, Some("4z"), None, false);
+        let result = mapped_targets(&ctx);
+        assert_eq!(result.targets.len(), 1, "pass target, got {result:?}");
+        match &result.targets[0] {
+            MappedClick { x_norm, y_norm } => {
                 assert_eq!(*x_norm, 10.875);
                 assert_eq!(*y_norm, 7.0);
             }
-            _ => panic!("second step should be a click"),
+            _ => panic!("expected a click target"),
         }
     }
 
@@ -1450,18 +1714,18 @@ mod tests {
             pai: "N".into(),
             tsumogiri: true,
         };
-        let cfg_ref = cfg();
+
         // What the engine offers on a drawn North during riichi: the
         // forced tsumogiri plus the kita (N = tile ids 120..=123).
         let legal = vec![
             Action::new(ActionType::Discard, Some(120), vec![], Some(0)),
             Action::new(ActionType::Kita, Some(120), vec![], Some(0)),
         ];
-        let ctx = ctx_for(&act, &snap, &legal, Some("1z"), Some("N"), true, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert_eq!(result.steps.len(), 2, "sleep + X click, got {result:?}");
-        match &result.steps[1] {
-            Step::Click { x_norm, y_norm } => {
+        let ctx = ctx_for(&act, &snap, &legal, Some("1z"), Some("N"), true);
+        let result = mapped_targets(&ctx);
+        assert_eq!(result.targets.len(), 1, "pass target, got {result:?}");
+        match &result.targets[0] {
+            MappedClick { x_norm, y_norm } => {
                 // The X (pass / cancel) is always the rightmost button —
                 // slot 0 — regardless of what else is on the row.
                 assert_eq!(*x_norm, 10.875);
@@ -1491,15 +1755,15 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: true,
         };
-        let cfg_ref = cfg();
+
         let legal = vec![
             Action::new(ActionType::Discard, Some(53), vec![], Some(0)),
             Action::new(ActionType::Kita, Some(120), vec![], Some(0)),
         ];
-        let ctx = ctx_for(&act, &snap, &legal, Some("1z"), Some("5p"), true, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
+        let ctx = ctx_for(&act, &snap, &legal, Some("1z"), Some("5p"), true);
+        let result = mapped_targets(&ctx);
         assert!(
-            result.steps.is_empty(),
+            result.targets.is_empty(),
             "no prompt on screen — stay suppressed, got {result:?}"
         );
     }
@@ -1521,176 +1785,21 @@ mod tests {
             pai: "1m".into(),
             tsumogiri: true,
         };
-        let cfg_ref = cfg();
+
         let legal = vec![
             Action::new(ActionType::Discard, Some(3), vec![], Some(0)),
             Action::new(ActionType::Ankan, Some(0), vec![0, 1, 2, 3], Some(0)),
         ];
-        let ctx = ctx_for(&act, &snap, &legal, Some("1z"), Some("1m"), true, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert_eq!(result.steps.len(), 2, "sleep + X click, got {result:?}");
-        match &result.steps[1] {
-            Step::Click { x_norm, y_norm } => {
+        let ctx = ctx_for(&act, &snap, &legal, Some("1z"), Some("1m"), true);
+        let result = mapped_targets(&ctx);
+        assert_eq!(result.targets.len(), 1, "pass target, got {result:?}");
+        match &result.targets[0] {
+            MappedClick { x_norm, y_norm } => {
                 assert_eq!(*x_norm, 10.875);
                 assert_eq!(*y_norm, 7.0);
             }
             _ => panic!("expected a click on the X button"),
         }
-    }
-
-    /// Regression: `is_post_call` was derived from `hand_len % 3 == 1`,
-    /// which is never true — with the drawn tile inside `tehai`, both
-    /// post-draw and post-call hands are ≡ 2 (mod 3) — so the calibrated
-    /// post-call distribution and the script's `ctx.post_call` never
-    /// fired. The real signal is a melded hand with no tracked draw.
-    #[test]
-    fn post_call_discard_is_detected_by_missing_draw() {
-        use crate::game_state::snapshot::{MeldKind, MeldSnapshot};
-
-        let assert_script = |expected: bool| {
-            crate::autoplay::delay::DelayScript::compile(
-                &format!(
-                    "function decide_delay(ctx)
-                       assert(ctx.post_call == {expected}, 'post_call must be {expected}')
-                       return {{ delay_ms = 3456 }}
-                     end"
-                ),
-                "test",
-            )
-            .unwrap()
-        };
-
-        // Post-call: one meld, no drawn tile (the pon consumed the draw).
-        let mut snap = snapshot_with_oya(
-            0,
-            1,
-            vec![
-                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p",
-            ],
-        );
-        snap.players[0].melds.push(MeldSnapshot {
-            kind: MeldKind::Pon,
-            tiles: vec!["P".into(), "P".into(), "P".into()],
-            from_who: 1,
-            called_tile: Some("P".into()),
-        });
-        let act = MjaiEvent::Dahai {
-            actor: 0,
-            pai: "2p".into(),
-            tsumogiri: false,
-        };
-        let cfg_ref = cfg();
-        let script = assert_script(true);
-        let mut ctx = ctx_for(&act, &snap, &[], Some("1m"), None, false, &cfg_ref);
-        ctx.delay_script = Some(&script);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert!(
-            matches!(
-                result.steps.first(),
-                Some(Step::Sleep { duration_ms: 3456 })
-            ),
-            "script must see post_call=true (a fallback means its assert fired): {:?}",
-            result.steps.first()
-        );
-
-        // Post-draw discard on the same melded hand: draw tracked.
-        snap.players[0].drawn_tile = Some("2p".into());
-        let script = assert_script(false);
-        let mut ctx = ctx_for(&act, &snap, &[], Some("1m"), None, false, &cfg_ref);
-        ctx.delay_script = Some(&script);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert!(
-            matches!(
-                result.steps.first(),
-                Some(Step::Sleep { duration_ms: 3456 })
-            ),
-            "script must see post_call=false: {:?}",
-            result.steps.first()
-        );
-    }
-
-    /// Regression: the click sequence (hover + hold + candidate clicks)
-    /// lands *after* the pre-click sleep, so it must be deducted from
-    /// the target — otherwise every action systematically overruns the
-    /// modelled server-observed total by the click overhead.
-    #[test]
-    fn click_overhead_is_deducted_from_sleep() {
-        let script = crate::autoplay::delay::DelayScript::compile(
-            "function decide_delay(ctx) return { delay_ms = 3000 } end",
-            "test",
-        )
-        .unwrap();
-        let snap = snapshot_with_hand(0, vec!["1m", "2m", "3m"]);
-        let act = MjaiEvent::Dahai {
-            actor: 0,
-            pai: "3m".into(),
-            tsumogiri: false,
-        };
-        let mut cfg_ref = cfg();
-        cfg_ref.hover_delay_ms = 200;
-        cfg_ref.click_hold_ms = 100; // single-click dahai → 300ms overhead
-        let mut ctx = ctx_for(&act, &snap, &[], Some("1m"), None, false, &cfg_ref);
-        ctx.delay_script = Some(&script);
-
-        // No budget clock: target minus the click overhead.
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert!(
-            matches!(
-                result.steps.first(),
-                Some(Step::Sleep { duration_ms: 2700 })
-            ),
-            "no-budget sleep must be target − overhead: {:?}",
-            result.steps.first()
-        );
-
-        // With a budget clock: elapsed time comes off as well.
-        ctx.budget = Some(crate::autoplay::delay::BudgetSnapshot {
-            fixed_ms: 60_000,
-            add_ms: 0,
-            elapsed_ms: 500,
-        });
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert!(
-            matches!(
-                result.steps.first(),
-                Some(Step::Sleep { duration_ms: 2200 })
-            ),
-            "budgeted sleep must be target − elapsed − overhead: {:?}",
-            result.steps.first()
-        );
-    }
-
-    /// The overhead deduction must not undercut UI readiness: a target
-    /// sitting on the functional floor keeps its full pre-click pause.
-    #[test]
-    fn overhead_deduction_keeps_ui_floor() {
-        let script = crate::autoplay::delay::DelayScript::compile(
-            "function decide_delay(ctx) return { delay_ms = 0 } end",
-            "test",
-        )
-        .unwrap();
-        let snap = snapshot_with_hand(0, vec!["1m", "2m", "3m"]);
-        let act = MjaiEvent::Dahai {
-            actor: 0,
-            pai: "3m".into(),
-            tsumogiri: false,
-        };
-        let mut cfg_ref = cfg();
-        cfg_ref.hover_delay_ms = 200;
-        cfg_ref.click_hold_ms = 100;
-        let mut ctx = ctx_for(&act, &snap, &[], Some("1m"), None, false, &cfg_ref);
-        ctx.delay_script = Some(&script);
-        let floor = ctx.delay_cfg.min_delay_ms;
-
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert!(
-            matches!(
-                result.steps.first(),
-                Some(Step::Sleep { duration_ms }) if *duration_ms == floor
-            ),
-            "sleep must not dip below the UI-readiness floor: {:?}",
-            result.steps.first()
-        );
     }
 
     #[test]
@@ -1706,31 +1815,31 @@ mod tests {
             pai: Some("5p".into()),
             tsumogiri: None,
         };
-        let cfg_ref = cfg();
+
         // Reach must be in legal_actions for the button position to resolve.
         let legal = vec![Action::new(ActionType::Riichi, None, vec![], Some(0))];
-        let ctx = ctx_for(&act, &snap, &legal, Some("1m"), Some("5p"), false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        // sleep + reach btn + sleep + tile click
-        assert_eq!(result.steps.len(), 4);
-        assert!(matches!(result.steps[1], Step::Click { .. }));
-        assert!(matches!(result.steps[3], Step::Click { .. }));
+        let ctx = ctx_for(&act, &snap, &legal, Some("1m"), Some("5p"), false);
+        let result = mapped_targets(&ctx);
+        // declaration and discard targets
+        assert_eq!(result.targets.len(), 2);
+        assert!(matches!(result.targets[0], MappedClick { .. }));
+        assert!(matches!(result.targets[1], MappedClick { .. }));
     }
 
     #[test]
     fn a_reach_presses_the_copy_it_names() {
         let snap = doubled_hand();
         let legal = vec![Action::new(ActionType::Riichi, None, vec![], Some(0))];
-        let cfg_ref = cfg();
+
         let pressed = |tsumogiri: Option<bool>| {
             let act = MjaiEvent::Reach {
                 actor: 0,
                 pai: Some("5p".into()),
                 tsumogiri,
             };
-            let ctx = ctx_for(&act, &snap, &legal, Some("1m"), Some("5p"), false, &cfg_ref);
-            match MajsoulAutoplay::new().plan(&ctx).steps[3] {
-                Step::Click { x_norm, .. } => x_norm,
+            let ctx = ctx_for(&act, &snap, &legal, Some("1m"), Some("5p"), false);
+            match mapped_targets(&ctx).targets[1] {
+                MappedClick { x_norm, .. } => x_norm,
                 ref other => panic!("the fourth step should press the tile: {other:?}"),
             }
         };
@@ -1757,12 +1866,12 @@ mod tests {
             pai: None,
             tsumogiri: None,
         };
-        let cfg_ref = cfg();
+
         let legal = vec![Action::new(ActionType::Riichi, None, vec![], Some(0))];
-        let ctx = ctx_for(&act, &snap, &legal, Some("1m"), None, false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
+        let ctx = ctx_for(&act, &snap, &legal, Some("1m"), None, false);
+        let result = mapped_targets(&ctx);
         assert!(
-            result.steps.is_empty(),
+            result.targets.is_empty(),
             "a tile-less reach must not press anything"
         );
     }
@@ -1774,16 +1883,16 @@ mod tests {
         let mut snap = snapshot_with_hand(0, vec!["1m"]);
         snap.phase = Phase::WaitResponse;
         let act = MjaiEvent::None;
-        let cfg_ref = cfg();
+
         let legal = vec![
             Action::new(ActionType::Pass, None, vec![], Some(0)),
             Action::new(ActionType::Pon, None, vec![], Some(0)),
         ];
-        let ctx = ctx_for(&act, &snap, &legal, Some("1m"), None, false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert_eq!(result.steps.len(), 2);
-        match &result.steps[1] {
-            Step::Click { x_norm, y_norm } => {
+        let ctx = ctx_for(&act, &snap, &legal, Some("1m"), None, false);
+        let result = mapped_targets(&ctx);
+        assert_eq!(result.targets.len(), 1);
+        match &result.targets[0] {
+            MappedClick { x_norm, y_norm } => {
                 // ACTIONS[0] is the pass slot (rightmost top row).
                 assert_eq!(*x_norm, 10.875);
                 assert_eq!(*y_norm, 7.0);
@@ -1799,11 +1908,11 @@ mod tests {
         // cancel button on every other-player turn.
         let snap = snapshot_with_hand(0, vec!["1m"]);
         let act = MjaiEvent::None;
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &[], Some("1m"), None, false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
+
+        let ctx = ctx_for(&act, &snap, &[], Some("1m"), None, false);
+        let result = mapped_targets(&ctx);
         assert!(
-            result.steps.is_empty(),
+            result.targets.is_empty(),
             "None must not click when Pass is not in legal_actions"
         );
     }
@@ -1814,15 +1923,15 @@ mod tests {
         // emitting None here is buggy, but the gate must hold.
         let snap = snapshot_with_hand(0, vec!["1m", "2m"]);
         let act = MjaiEvent::None;
-        let cfg_ref = cfg();
+
         let legal = vec![
             Action::new(ActionType::Discard, Some(0), vec![], Some(0)),
             Action::new(ActionType::Discard, Some(4), vec![], Some(0)),
         ];
-        let ctx = ctx_for(&act, &snap, &legal, Some("1m"), Some("1m"), false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
+        let ctx = ctx_for(&act, &snap, &legal, Some("1m"), Some("1m"), false);
+        let result = mapped_targets(&ctx);
         assert!(
-            result.steps.is_empty(),
+            result.targets.is_empty(),
             "None must not click during a discard turn (no Pass button shown)"
         );
     }
@@ -1845,14 +1954,14 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg();
+
         // Even with last_self_tsumo set, dealer-first-discard layout
         // must override the tsumohai-offset path.
-        let ctx = ctx_for(&act, &snap, &[], None, Some("5p"), false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        assert_eq!(result.steps.len(), 2);
-        match &result.steps[1] {
-            Step::Click { x_norm, .. } => {
+        let ctx = ctx_for(&act, &snap, &[], None, Some("5p"), false);
+        let result = mapped_targets(&ctx);
+        assert_eq!(result.targets.len(), 1);
+        match &result.targets[0] {
+            MappedClick { x_norm, .. } => {
                 assert!(
                     (*x_norm - TILES[13].0).abs() < 1e-9,
                     "expected raw TILES[13] (no TSUMO_SPACE), got {x_norm}"
@@ -1862,39 +1971,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dealer_first_discard_pads_extra_delay() {
-        let snap = snapshot_with_oya(
-            0,
-            0,
-            vec![
-                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p", "5p",
-            ],
-        );
-        let act = MjaiEvent::Dahai {
-            actor: 0,
-            pai: "1m".into(),
-            tsumogiri: false,
-        };
-        let cfg_ref = cfg_with_dealer_delay(2000);
-        let ctx = ctx_for(&act, &snap, &[], None, None, false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        // The dealer-pad wait is folded into the single pre-delay sleep:
-        // [pre-delay sleep (>= animation pad), click]. With the zeroed
-        // test config the sleep is exactly the pad.
-        assert_eq!(result.steps.len(), 2);
-        match &result.steps[0] {
-            Step::Sleep { duration_ms } => assert_eq!(*duration_ms, 2000),
-            _ => panic!("expected sleep step at index 0"),
-        }
-    }
-
     /// Whatever the dealer does first waits out the deal, not only a
     /// discard — a double riichi, a concealed kan, a win off the deal, nine
     /// terminals — and its plan says the window opened with a deal. Past
     /// the dealer's first turn, or not the dealer, neither.
     #[test]
-    fn whatever_the_dealer_does_first_waits_out_the_deal() {
+    fn dealer_opening_is_reported_for_every_first_action() {
         let hand = vec![
             "1m", "1m", "1m", "1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "N", "P",
         ];
@@ -1937,11 +2019,7 @@ mod tests {
                 Action::new(ActionType::KyushuKyuhai, None, vec![], Some(0)),
             ),
         ];
-        let cfg_ref = cfg_with_dealer_delay(2000);
-        let sleep = |result: &PlanResult| match result.steps[0] {
-            Step::Sleep { duration_ms } => duration_ms,
-            ref other => panic!("expected a leading sleep, got {other:?}"),
-        };
+
         let opening = snapshot_with_oya(0, 0, hand.clone());
         let mut later = opening.clone();
         later.players[0]
@@ -1955,15 +2033,14 @@ mod tests {
         let not_dealer = snapshot_with_oya(0, 1, hand);
         for (act, legal) in &cases {
             let legal = std::slice::from_ref(legal);
-            let ctx = ctx_for(act, &opening, legal, None, None, false, &cfg_ref);
-            let result = MajsoulAutoplay::new().plan(&ctx);
+            let ctx = ctx_for(act, &opening, legal, None, None, false);
+            let result = mapped_targets(&ctx);
             assert!(result.dealt, "{act:?}: {result:?}");
-            assert_eq!(sleep(&result), 2000, "{act:?} waits out the deal");
+
             for snap in [&later, &not_dealer] {
-                let ctx = ctx_for(act, snap, legal, None, None, false, &cfg_ref);
-                let result = MajsoulAutoplay::new().plan(&ctx);
+                let ctx = ctx_for(act, snap, legal, None, None, false);
+                let result = mapped_targets(&ctx);
                 assert!(!result.dealt, "{act:?}: {result:?}");
-                assert!(sleep(&result) < 2000, "{act:?}: {result:?}");
             }
         }
     }
@@ -1993,11 +2070,11 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &[], Some("9m"), Some("5p"), false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        match &result.steps.last().unwrap() {
-            Step::Click { x_norm, .. } => {
+
+        let ctx = ctx_for(&act, &snap, &[], Some("9m"), Some("5p"), false);
+        let result = mapped_targets(&ctx);
+        match &result.targets.last().unwrap() {
+            MappedClick { x_norm, .. } => {
                 // Tsumohai click → TILES[13] + TSUMO_SPACE.
                 let expected = TILES[13].0 + TSUMO_SPACE;
                 assert!((*x_norm - expected).abs() < 1e-9);
@@ -2023,87 +2100,11 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg_with_dealer_delay(2000);
-        let ctx = ctx_for(&act, &snap, &[], None, Some("5p"), false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
+
+        let ctx = ctx_for(&act, &snap, &[], None, Some("5p"), false);
+        let result = mapped_targets(&ctx);
         // No dealer pad: just [pre-delay, click].
-        assert_eq!(result.steps.len(), 2);
-    }
-
-    /// The delay model returns a target *total* thinking time; the sleep
-    /// step must be target minus what the decision window has already
-    /// consumed, saturating at zero — never a negative-wrapped huge sleep.
-    #[test]
-    fn pre_delay_deducts_budget_elapsed() {
-        let snap = snapshot_with_oya(
-            0,
-            1,
-            vec![
-                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p", "5p",
-            ],
-        );
-        let act = MjaiEvent::Dahai {
-            actor: 0,
-            pai: "5p".into(),
-            tsumogiri: false,
-        };
-        // Deterministic target: min == max == 1000ms, uniform mode.
-        let mut cfg_ref = cfg();
-        cfg_ref.pre_click_delay_min_ms = 1000;
-        cfg_ref.pre_click_delay_max_ms = 1000;
-
-        let sleep_with_elapsed = |elapsed_ms: u32| {
-            let mut ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref);
-            ctx.delay_cfg = crate::config::DelayModelConfig {
-                distribution: crate::config::DelayDistribution::Uniform,
-                ..Default::default()
-            };
-            ctx.budget = Some(crate::autoplay::delay::BudgetSnapshot {
-                fixed_ms: 5000,
-                add_ms: 0,
-                elapsed_ms,
-            });
-            let result = MajsoulAutoplay::new().plan(&ctx);
-            match result.steps[0] {
-                Step::Sleep { duration_ms } => duration_ms,
-                _ => panic!("expected leading sleep"),
-            }
-        };
-
-        assert_eq!(sleep_with_elapsed(0), 1000);
-        assert_eq!(sleep_with_elapsed(400), 600, "elapsed must be deducted");
-        assert_eq!(sleep_with_elapsed(5000), 0, "sleep must saturate at zero");
-    }
-
-    /// The Path-B riichi follow-up dahai runs inside the same still-open
-    /// Legacy mode must reproduce the historical fixed model even when
-    /// the config still carries log-normal parameters: the distribution
-    /// is forced to uniform and the sleep is exactly min==max.
-    #[test]
-    fn legacy_mode_forces_uniform() {
-        let snap = snapshot_with_oya(
-            0,
-            1,
-            vec![
-                "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p", "5p",
-            ],
-        );
-        let act = MjaiEvent::Dahai {
-            actor: 0,
-            pai: "5p".into(),
-            tsumogiri: false,
-        };
-        let mut cfg_ref = cfg();
-        cfg_ref.pre_click_delay_min_ms = 1234;
-        cfg_ref.pre_click_delay_max_ms = 1234;
-        let mut ctx = ctx_for(&act, &snap, &[], Some("1m"), Some("5p"), false, &cfg_ref);
-        // Config keeps LogNormal + calibrated table, but mode is legacy.
-        ctx.delay_cfg.mode = crate::config::DelayMode::Legacy;
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        match result.steps[0] {
-            Step::Sleep { duration_ms } => assert_eq!(duration_ms, 1234),
-            _ => panic!("expected leading sleep"),
-        }
+        assert_eq!(result.targets.len(), 1);
     }
 
     /// Build a 3-player snapshot for our seat with optional kita pool and
@@ -2181,7 +2182,7 @@ mod tests {
             pai: "5p".into(),
             tsumogiri: false,
         };
-        let cfg_ref = cfg();
+
         let ctx = ctx_for(
             &act,
             &snap,
@@ -2189,11 +2190,10 @@ mod tests {
             None,       // opening turn: no kawa tile yet
             Some("1m"), // rinshan replacement is the live tsumohai
             false,
-            &cfg_ref,
         );
-        let result = MajsoulAutoplay::new().plan(&ctx);
-        match result.steps.last().unwrap() {
-            Step::Click { x_norm, .. } => {
+        let result = mapped_targets(&ctx);
+        match result.targets.last().unwrap() {
+            MappedClick { x_norm, .. } => {
                 assert!(
                     (*x_norm - TILES[12].0).abs() < 1e-9,
                     "post-kita discard must click the true visual slot TILES[12] \
@@ -2239,14 +2239,14 @@ mod tests {
             pai: pai.into(),
             consumed: [consumed[0].to_string(), consumed[1].to_string()],
         };
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, legal, Some(pai), None, false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
+
+        let ctx = ctx_for(&act, &snap, legal, Some(pai), None, false);
+        let result = mapped_targets(&ctx);
         result
-            .steps
+            .targets
             .iter()
             .filter_map(|s| match s {
-                Step::Click { x_norm, y_norm } => Some((*x_norm, *y_norm)),
+                MappedClick { x_norm, y_norm } => Some((*x_norm, *y_norm)),
                 _ => None,
             })
             .collect()
@@ -2339,14 +2339,14 @@ mod tests {
             pai: "5p".into(),
             consumed: ["5p".into(), "5p".into()],
         };
-        let cfg_ref = cfg();
-        let ctx = ctx_for(&act, &snap, &legal, Some("5p"), None, false, &cfg_ref);
-        let result = MajsoulAutoplay::new().plan(&ctx);
+
+        let ctx = ctx_for(&act, &snap, &legal, Some("5p"), None, false);
+        let result = mapped_targets(&ctx);
         let clicks: Vec<(f64, f64)> = result
-            .steps
+            .targets
             .iter()
             .filter_map(|s| match s {
-                Step::Click { x_norm, y_norm } => Some((*x_norm, *y_norm)),
+                MappedClick { x_norm, y_norm } => Some((*x_norm, *y_norm)),
                 _ => None,
             })
             .collect();
