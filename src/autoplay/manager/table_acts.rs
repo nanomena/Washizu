@@ -143,8 +143,8 @@ impl AutoplayManager {
     async fn touch_times(&self) -> (u32, u32) {
         let cfg = self.cfg.read().await;
         (
-            cfg.autoplay.majsoul.hover_delay_ms,
-            cfg.autoplay.majsoul.click_hold_ms,
+            cfg.autoplay.input.hover_delay_ms,
+            cfg.autoplay.input.click_hold_ms,
         )
     }
 

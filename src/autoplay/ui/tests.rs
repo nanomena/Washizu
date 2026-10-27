@@ -420,94 +420,6 @@ async fn delayed_observation_and_old_timer_cannot_restore_previous_round() {
 }
 
 #[tokio::test]
-async fn semantic_plans_require_their_window_positive_table_pixels_and_single_consumption() {
-    for phase in [TablePhase::OwnDecision, TablePhase::Claim] {
-        let mut h = Harness::new();
-        assert!(h
-            .ui
-            .begin_decision(
-                request(Window {
-                    opened_at: h.now,
-                    phase,
-                    expires_at: h.now + Duration::from_secs(30),
-                }),
-                2
-            )
-            .is_none());
-        let w = h.window(phase);
-        let run = h.ui.begin_decision(request(w), 2).unwrap();
-        assert!(
-            h.ui.begin_decision(request(w), 2).is_none(),
-            "one selected action per window"
-        );
-        let t = h.ui.decision_click(run, 0).unwrap();
-        assert!(
-            !h.click(t, frame(Sight::Nothing)).await,
-            "unknown frame is not table evidence"
-        );
-        assert!(!h.click(t, table()).await, "rejected ticket stays spent");
-        h.ui.finish_decision(run);
-        let w = h.window(phase);
-        let run = h.ui.begin_decision(request(w), 2).unwrap();
-        let t = h.ui.decision_click(run, 0).unwrap();
-        assert!(h.click(t, table()).await);
-        assert!(!h.click(t, table()).await);
-        assert!(
-            h.ui.decision_click(run, 0).is_none(),
-            "duplicate step callback"
-        );
-        let t2 = h.ui.decision_click(run, 1).unwrap(); // next step, same plan
-        assert!(h.click(t2, table()).await);
-        let late = h.ui.decision_click(run, 2).unwrap();
-        h.window(phase); // actual current window replaced during travel
-        assert!(!h.click(late, table()).await);
-        assert!(!h.ui.retry(run, 0));
-        assert_eq!(h.mouse.downs(), 2);
-    }
-}
-
-#[tokio::test]
-async fn verification_only_retries_the_active_run_and_reload_is_an_fsm_effect() {
-    let mut h = Harness::new();
-    let w = h.window(TablePhase::Claim);
-    let run = h.ui.begin_decision(request(w), 2).unwrap();
-    for attempt in 0..3 {
-        let t = h.ui.decision_click(run, 0).unwrap();
-        assert!(h.click(t, table()).await);
-        if !h.ui.retry(run, attempt) {
-            break;
-        }
-        assert!(!h.ui.retry(run, attempt), "duplicate timeout callback");
-    }
-    assert_eq!(h.mouse.downs(), 3);
-    assert!(!h.ui.retry(run, 2));
-    assert_eq!(h.ui.verified(run, false, 2), None);
-    assert_eq!(
-        h.ui.verified(run, false, 2),
-        None,
-        "duplicate proof is inert"
-    );
-    h.ui.finish_decision(run);
-    h.ui.table_started(None); // failure evidence survives round reset
-    let w = h.window(TablePhase::OwnDecision);
-    let run2 = h.ui.begin_decision(request(w), 0).unwrap();
-    assert_eq!(
-        h.ui.verified(run2, false, 2),
-        Some(DecisionEffect::ReloadClient)
-    );
-    assert!(!h.ui.decision_live(run2));
-    h.ui.game_started(); // failure evidence resets at a new game
-    let w = h.window(TablePhase::OwnDecision);
-    let run3 = h.ui.begin_decision(request(w), 0).unwrap();
-    assert_eq!(h.ui.verified(run3, false, 2), None);
-    assert_eq!(
-        h.ui.verified(run2, true, 2),
-        None,
-        "old proof cannot clear current failures"
-    );
-}
-
-#[tokio::test]
 async fn auto_win_has_no_permission_during_decisions_results_or_unknown_frames() {
     let mut h = Harness::new();
     let t = h.ui.auto_win().unwrap();
@@ -544,23 +456,6 @@ async fn auto_win_has_no_permission_during_decisions_results_or_unknown_frames()
 }
 
 #[tokio::test]
-async fn an_input_ack_during_retry_travel_cancels_the_pending_mouse_down() {
-    let mut h = Harness::new();
-    let w = h.window(TablePhase::OwnDecision);
-    let run = h.ui.begin_decision(request(w), 2).unwrap();
-    let t = h.ui.decision_click(run, 0).unwrap();
-    assert!(h.click(t, table()).await);
-    assert!(h.ui.retry(run, 0));
-    let retry = h.ui.decision_click(run, 0).unwrap();
-    let watch = crate::autoplay::verify::InputWatch::default();
-    watch.note_sent(crate::autoplay::verify::InputKind::Discard);
-    h.env.input = watch.ticket();
-    assert!(!h.click(retry, table()).await);
-    assert!(!h.ui.retry(run, 1));
-    assert_eq!(h.mouse.downs(), 1);
-}
-
-#[tokio::test]
 async fn terminal_event_order_does_not_create_two_result_plans() {
     for end_first in [true, false] {
         let mut h = Harness::new();
@@ -581,19 +476,6 @@ async fn terminal_event_order_does_not_create_two_result_plans() {
         h.screen(frame(Sight::Rematch)).await;
         assert_eq!(h.mouse.downs(), 3);
     }
-}
-
-#[tokio::test]
-async fn an_expired_protocol_clock_cannot_click_even_if_the_bridge_slot_has_not_cleared() {
-    let mut h = Harness::new();
-    let w = h.window(TablePhase::Claim);
-    let run = h.ui.begin_decision(request(w), 1).unwrap();
-    let t = h.ui.decision_click(run, 0).unwrap();
-    h.now = w.expires_at;
-    assert!(!h.click(t, table()).await);
-    assert_eq!(h.ui.phase(), Phase::Table(TablePhase::Waiting));
-    assert!(!h.ui.retry(run, 0));
-    assert_eq!(h.mouse.downs(), 0);
 }
 
 #[tokio::test]
@@ -621,47 +503,6 @@ async fn lobby_cancel_retires_ending_and_matching_without_inventing_a_lobby_clic
     assert_eq!(h.ui.phase(), Phase::WaitingStart);
     assert!(h.ui.due().is_none());
     assert_eq!(h.mouse.downs(), 0);
-}
-
-#[tokio::test]
-async fn profile_or_restore_change_requires_protocol_reentry_and_new_decision_identity() {
-    let mut h = Harness::new();
-    let w = h.window(TablePhase::OwnDecision);
-    let run = h.ui.begin_decision(request(w), 0).unwrap();
-    let t = h.ui.decision_click(run, 0).unwrap();
-    h.env.settings.enabled = false;
-    h.env.generation.session += 1;
-    assert!(!h.click(t, table()).await);
-    h.env.settings.enabled = true;
-    h.sync();
-    assert_eq!(h.ui.phase(), Phase::WaitingStart);
-    assert!(h.ui.begin_decision(request(w), 0).is_none());
-    h.env.generation.table += 1; // syncGame/authGame boundary
-    h.sync();
-    h.ui.game_started();
-    let w2 = h.window(TablePhase::Claim);
-    h.ui.table_started(Some(w2));
-    let run2 = h.ui.begin_decision(request(w2), 0).unwrap();
-    let fresh = h.ui.decision_click(run2, 0).unwrap();
-    assert!(!h.click(t, table()).await);
-    assert!(h.click(fresh, table()).await);
-    h.ui.table_started(Some(w2)); // duplicate start cannot reconsume a window
-    assert!(h.ui.begin_decision(request(w2), 0).is_none());
-    assert_eq!(h.mouse.downs(), 1);
-}
-
-#[tokio::test]
-async fn first_subscription_mid_hand_uses_only_a_verified_current_decision_window() {
-    let mut h = Harness::new();
-    let w = h.window(TablePhase::OwnDecision);
-    h.ui = Machine::default(); // subscribed after the real start_game/kyoku
-    h.sync();
-    assert_eq!(h.ui.phase(), Phase::WaitingStart);
-    let run = h.ui.begin_decision(request(w), 0).unwrap();
-    let t = h.ui.decision_click(run, 0).unwrap();
-    assert!(h.click(t, table()).await);
-    assert_eq!(h.ui.phase(), Phase::Table(TablePhase::OwnDecision));
-    assert_eq!(h.mouse.downs(), 1);
 }
 
 #[tokio::test]
@@ -698,58 +539,4 @@ async fn held_transport_failure_still_attempts_release() {
             MouseEvent::Up
         ]
     );
-}
-
-fn request(w: Window) -> crate::bot::control::DecisionRequest {
-    use crate::autoplay::{BudgetSource, TimeBudget};
-    crate::bot::control::DecisionRequest {
-        context: crate::monitor::DecisionContext {
-            game: 1,
-            round: 1,
-            event_seq: 1,
-        },
-        window: Some(crate::bot::control::InputWindow::Majsoul(TimeBudget {
-            opened_at: w.opened_at,
-            fixed_ms: w.expires_at.duration_since(w.opened_at).as_millis() as u32,
-            add_ms: 0,
-            source: if w.phase == TablePhase::Claim {
-                BudgetSource::DiscardTile
-            } else {
-                BudgetSource::DealTile
-            },
-        })),
-    }
-}
-
-#[tokio::test]
-async fn original_context_and_tracker_fault_are_checked_at_final_mouse_down() {
-    for changed in [
-        None,
-        Some(crate::monitor::DecisionContext {
-            game: 2,
-            round: 1,
-            event_seq: 1,
-        }),
-        Some(crate::monitor::DecisionContext {
-            game: 1,
-            round: 2,
-            event_seq: 1,
-        }),
-        Some(crate::monitor::DecisionContext {
-            game: 1,
-            round: 1,
-            event_seq: 2,
-        }),
-    ] {
-        let mut h = Harness::new();
-        let w = h.window(TablePhase::OwnDecision);
-        let original = request(w);
-        let run = h.ui.begin_decision(original, 1).unwrap();
-        let ticket = h.ui.decision_click(run, 0).unwrap();
-        h.env.context = changed; // same window, visible board and input counters
-        assert!(!h.click(ticket, table()).await);
-        assert!(!h.ui.retry(run, 0));
-        assert!(h.ui.begin_decision(original, 0).is_none());
-        assert_eq!(h.mouse.downs(), 0);
-    }
 }

@@ -87,6 +87,7 @@ pub mod tenhou;
 pub mod tenhou_state;
 pub mod tenpai;
 pub mod toggles;
+pub mod transaction;
 pub mod ui;
 pub mod verify;
 

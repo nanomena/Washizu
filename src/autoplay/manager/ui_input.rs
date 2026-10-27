@@ -159,22 +159,6 @@ impl AutoplayManager {
         }
     }
 
-    pub(super) async fn decision_press(
-        &mut self,
-        token: ui::DecisionToken,
-        click: u32,
-        to: Point,
-        rect: CanvasRect,
-        touch: Touch,
-    ) -> bool {
-        self.sync_ui().await;
-        let ticket = self.ui.lock().unwrap().decision_click(token, click);
-        match ticket {
-            Some(ticket) => self.ui_press(ticket, to, rect, touch).await,
-            None => false,
-        }
-    }
-
     pub(super) async fn ui_press(
         &mut self,
         ticket: ui::Ticket,

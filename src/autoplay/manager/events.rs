@@ -93,6 +93,10 @@ impl AutoplayManager {
                     ..ManagerState::default()
                 };
                 self.hand.reset();
+                self.turn
+                    .lock()
+                    .unwrap()
+                    .cancel(crate::autoplay::transaction::CancelReason::Context);
             }
             MjaiEvent::Tsumo { actor, pai } => {
                 if self.is_ours(*actor) {
@@ -138,6 +142,7 @@ impl AutoplayManager {
 
     /// A new table: nothing carries over, the canvas cache included.
     fn new_game(&mut self) {
+        self.turn.lock().unwrap().new_game();
         self.state = ManagerState::default();
         self.hand.reset();
         self.canvas = Canvas::default();

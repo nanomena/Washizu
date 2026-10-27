@@ -182,27 +182,9 @@ enum State {
 enum Input {
     Observe,
     Screen(Sight),
-    Decision,
     AutoWin,
     WebObserve,
     WebControl,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecisionToken {
-    context: crate::monitor::DecisionContext,
-    revision: u64,
-    serial: u64,
-    window: Window,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DecisionRun {
-    token: DecisionToken,
-    retries: u32,
-    limit: u32,
-    input: InputTicket,
-    next_click: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,11 +199,6 @@ pub enum Effect {
         ticket: Ticket,
         control: tenhou_web::Control,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecisionEffect {
-    ReloadClient,
 }
 
 /// Final capture facts, read after hover. `table_visible` is positive pixel
@@ -239,12 +216,7 @@ pub struct Machine {
     state: State,
     suspension: Option<Suspension>,
     env: Option<Environment>,
-    serial: u64,
     effects: Effects<Input>,
-    decision: Option<DecisionRun>,
-    consumed: Option<Window>,
-    dead_clicks: u32,
-    checked_at: Option<Instant>,
 }
 
 impl Default for Machine {
@@ -253,12 +225,7 @@ impl Default for Machine {
             state: State::WaitingStart(WaitingReason::NoGame),
             suspension: None,
             env: None,
-            serial: 0,
             effects: Effects::default(),
-            decision: None,
-            consumed: None,
-            dead_clicks: 0,
-            checked_at: None,
         }
     }
 }
@@ -286,7 +253,6 @@ impl Machine {
 
     fn revoke(&mut self) {
         self.effects.revoke();
-        self.decision = None;
     }
 
     pub fn waiting_reason(&self) -> Option<WaitingReason> {
@@ -311,7 +277,6 @@ impl Machine {
     /// Revoke old callbacks on every ownership change, including an off/on
     /// or manual interval that completed while an executor was awaiting CDP.
     pub fn synchronize(&mut self, env: Environment, now: Instant) {
-        self.checked_at = Some(now);
         let session_changed = self.env.is_some_and(|old| {
             old.client != env.client
                 || old.generation.session != env.generation.session
@@ -402,7 +367,6 @@ impl Machine {
     }
 
     pub fn game_started(&mut self) {
-        self.dead_clicks = 0;
         self.table_started(None);
     }
 
@@ -600,13 +564,6 @@ impl Machine {
                 frame.sight == sight
                     && matches!(self.state, State::Screens(s) if s.seen.is_some_and(|seen| seen.0 == sight))
             }
-            Input::Decision => {
-                frame.table_visible
-                    && frame.sight == Sight::Nothing
-                    && self
-                        .decision
-                        .is_some_and(|run| self.decision_live(run.token))
-            }
             Input::AutoWin => {
                 env.settings.auto_win
                     && env.window.is_none()
@@ -659,130 +616,6 @@ impl Machine {
             },
             Input::Observe,
         );
-    }
-
-    pub fn begin_decision(
-        &mut self,
-        request: crate::bot::control::DecisionRequest,
-        retries: u32,
-    ) -> Option<DecisionToken> {
-        if self.client() != Client::Majsoul {
-            return None;
-        }
-        let Some(crate::bot::control::InputWindow::Majsoul(budget)) = request.window else {
-            return None;
-        };
-        let window = Window::from(budget);
-        let env = self.env?;
-        if env.context != Some(request.context) {
-            return None;
-        }
-        if self.suspension.is_some()
-            || env.window != Some(window)
-            || !self.checked_at.is_some_and(|now| now < window.expires_at)
-            || self.consumed == Some(window)
-        {
-            return None;
-        }
-        // Autoplay can first subscribe in the middle of a hand. The caller
-        // has admitted an original coordinator proof and a legal plan for
-        // this exact live window: this is real table evidence, without a
-        // fabricated StartGame. A retired session/ending never uses it to
-        // revive an old plan.
-        if matches!(self.state, State::WaitingStart(WaitingReason::NoGame)) {
-            self.state = State::Table(window.phase);
-        }
-        if !matches!(self.state, State::Table(p) if p == window.phase && p != TablePhase::Waiting) {
-            return None;
-        }
-        self.revoke();
-        self.serial += 1;
-        let token = DecisionToken {
-            context: request.context,
-            revision: self.effects.revision(),
-            serial: self.serial,
-            window,
-        };
-        self.decision = Some(DecisionRun {
-            token,
-            retries: 0,
-            limit: retries,
-            input: env.input,
-            next_click: 0,
-        });
-        self.consumed = Some(window);
-        Some(token)
-    }
-
-    pub fn decision_live(&self, token: DecisionToken) -> bool {
-        self.suspension.is_none()
-            && self.decision.is_some_and(|r| r.token == token)
-            && self
-                .env
-                .is_some_and(|e| e.window == Some(token.window) && e.context == Some(token.context))
-            && self
-                .checked_at
-                .is_some_and(|now| now < token.window.expires_at)
-            && self
-                .decision
-                .is_some_and(|r| self.env.is_some_and(|e| e.input == r.input))
-    }
-
-    pub fn decision_click(&mut self, token: DecisionToken, click: u32) -> Option<Ticket> {
-        if !self.decision_live(token) {
-            return None;
-        }
-        let run = self.decision.as_mut().unwrap();
-        if run.next_click != click {
-            return None;
-        }
-        run.next_click += 1;
-        Some(self.ticket(Input::Decision))
-    }
-
-    /// Verification supplies a missed-input event; only this owner grants
-    /// another attempt. Changing a window or completing a run revokes it.
-    pub fn retry(&mut self, token: DecisionToken, attempt: u32) -> bool {
-        if !self.decision_live(token) {
-            return false;
-        }
-        let run = self.decision.as_mut().unwrap();
-        if attempt != run.retries || run.retries >= run.limit {
-            return false;
-        }
-        run.retries += 1;
-        run.next_click = 0;
-        self.effects.cancel();
-        true
-    }
-
-    pub fn finish_decision(&mut self, token: DecisionToken) {
-        if self.decision.is_some_and(|r| r.token == token) {
-            self.revoke();
-        }
-    }
-
-    pub fn verified(
-        &mut self,
-        token: DecisionToken,
-        registered: bool,
-        reload_after: u32,
-    ) -> Option<DecisionEffect> {
-        if !self.decision_live(token) {
-            return None;
-        }
-        self.dead_clicks = if registered {
-            0
-        } else {
-            self.dead_clicks.saturating_add(1)
-        };
-        self.revoke(); // each proof callback is consumed once
-        if reload_after > 0 && self.dead_clicks >= reload_after {
-            self.dead_clicks = 0;
-            self.state = State::WaitingStart(WaitingReason::ClientReload);
-            return Some(DecisionEffect::ReloadClient);
-        }
-        None
     }
 
     pub fn auto_win(&mut self) -> Option<Ticket> {

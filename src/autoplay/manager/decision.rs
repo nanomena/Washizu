@@ -1,15 +1,12 @@
 //! Reading a decision: the bot's answer joined with everything known about
 //! the table at that moment, owned so that the stages after it can borrow it.
 
-use super::{AutoplayManager, ManagerState};
-use crate::autoplay::budget::TimeBudget;
-use crate::autoplay::canvas::Canvas;
-use crate::autoplay::delay::{BudgetSnapshot, DecisionProbs, DelayScript, Reading};
+use super::AutoplayManager;
+use crate::autoplay::delay::{DecisionProbs, Reading};
 use crate::autoplay::platform::ActionContext;
-use crate::autoplay::tenhou_state::{DecisionWindow, TenhouState};
-use crate::bot::control::{DecisionRequest, DecisionSource, InputWindow, WindowProof};
+use crate::bot::control::{DecisionRequest, DecisionSource, WindowProof};
 use crate::bot::BotResponse;
-use crate::config::{DelayModelConfig, MajsoulAutoplayConfig, Platform};
+use crate::config::{DelayModelConfig, InputConfig, Platform};
 use crate::game_state::snapshot::GameStateSnapshot;
 use crate::schema::MjaiEvent;
 use riichienv_core::action::Action;
@@ -39,55 +36,34 @@ fn selected_window_current(
 /// One decision's reading of the table.
 pub(super) struct Decision {
     pub(super) request: DecisionRequest,
-    pub(super) input_owner: crate::autoplay::tenhou::input::Owner,
-    pub(super) ui_token: Option<crate::autoplay::ui::DecisionToken>,
-    pub(super) cfg: MajsoulAutoplayConfig,
-    delay_cfg: DelayModelConfig,
+    pub(super) owner: crate::autoplay::transaction::Owner,
+    pub(super) cfg: InputConfig,
+    pub(super) delay_cfg: DelayModelConfig,
     pub(super) platform: Platform,
-    /// Tenhou's planner needs the bridge's hand at Tenhou tile-index
-    /// resolution; the slot stays empty on every other platform.
-    pub(super) tenhou_state: Option<TenhouState>,
-    /// The original Tenhou window, retained for the common delay/planning path.
-    pub(super) planned_window: Option<DecisionWindow>,
-    /// The server time budget for the current decision window (written by
-    /// the Majsoul bridge; None off-Majsoul or pre-game). Its `opened_at` is
-    /// the window's identity for the post-sleep staleness check.
-    pub(super) planned_budget: Option<TimeBudget>,
-    budget: Option<BudgetSnapshot>,
-    probs: Option<DecisionProbs>,
-    our_seat: u8,
-    legal_actions: Vec<Action>,
-    snapshot: GameStateSnapshot,
-    num_players: u8,
-    reading: Reading,
-    /// Where the pointer is, as a normalised point.
+    pub(super) probs: Option<DecisionProbs>,
+    pub(super) our_seat: u8,
+    pub(super) legal_actions: Vec<Action>,
+    pub(super) snapshot: GameStateSnapshot,
+    pub(super) num_players: u8,
+    pub(super) reading: Reading,
     pub(super) pointer: Option<(f64, f64)>,
+    pub(super) runner_up: Option<String>,
+    pub(super) last_kawa_tile: Option<String>,
+    last_self_tsumo: Option<String>,
+    pub(super) self_riichi_accepted: bool,
 }
 
 impl Decision {
-    /// What the platform plans from.
-    pub(super) fn context<'a>(
-        &'a self,
-        action: &'a MjaiEvent,
-        state: &'a ManagerState,
-        delay_script: Option<&'a DelayScript>,
-    ) -> ActionContext<'a> {
+    pub(super) fn context<'a>(&'a self, action: &'a MjaiEvent) -> ActionContext<'a> {
         ActionContext {
             action,
             snapshot: &self.snapshot,
             legal_actions: &self.legal_actions,
             our_seat: self.our_seat,
-            last_kawa_tile: state.last_kawa_tile.as_deref(),
-            last_self_tsumo: state.last_self_tsumo.as_deref(),
-            self_riichi_accepted: state.self_riichi_accepted,
+            last_kawa_tile: self.last_kawa_tile.as_deref(),
+            last_self_tsumo: self.last_self_tsumo.as_deref(),
+            self_riichi_accepted: self.self_riichi_accepted,
             num_players: self.num_players,
-            cfg: &self.cfg,
-            delay_cfg: self.delay_cfg.clone(),
-            budget: self.budget,
-            probs: self.probs,
-            reading: self.reading,
-            delay_script,
-            tenhou: self.tenhou_state.as_ref(),
             pointer: self.pointer,
         }
     }
@@ -107,15 +83,11 @@ impl AutoplayManager {
         // Re-read config every time so `cfg.autoplay.enabled` can be
         // toggled at runtime via the Settings UI without restarting.
         let cfg_guard = self.cfg.read().await;
-        let input_owner = crate::autoplay::tenhou::input::Owner {
-            session: self.ctx.ui_session(),
-            settings: self.ctx.ui_settings(),
-            user: crate::autoplay::cdp_input::user_revision(),
-        };
+        let owner = super::turn::owner(&self.ctx);
         if !cfg_guard.autoplay.enabled {
             return None;
         }
-        let cfg = cfg_guard.autoplay.majsoul.clone();
+        let cfg = cfg_guard.autoplay.input.clone();
         let delay_cfg = cfg_guard.autoplay.delay.clone();
         let platform = cfg_guard.platform.kind;
         drop(cfg_guard);
@@ -132,35 +104,7 @@ impl AutoplayManager {
             return None;
         }
 
-        let tenhou_state = self.ctx.tenhou_state.read().ok().and_then(|g| g.clone());
-        let planned_window = match request.window {
-            Some(InputWindow::Tenhou(w)) => Some(w),
-            _ => None,
-        };
-
-        // The time budget and the bot's confidence both feed the delay model
-        // — neither can alter the chosen action.
-        let planned_budget = match request.window {
-            Some(InputWindow::Majsoul(b)) => Some(b),
-            _ => None,
-        };
-        let budget = planned_budget.map(|b| BudgetSnapshot {
-            fixed_ms: b.fixed_ms,
-            add_ms: b.add_ms,
-            elapsed_ms: b.elapsed_ms(),
-        });
         let probs = crate::autoplay::delay::probs::normalize_meta(resp.meta.as_ref());
-
-        // The delay script lives at a fixed path next to the config file.
-        // In Lua mode it is generated from the bundled default when
-        // missing, then hot-reloaded on change (cheap mtime stat). In
-        // legacy mode the script is dropped entirely.
-        let lua_mode = delay_cfg.mode == crate::config::DelayMode::Lua;
-        let script_path = self.config_dir.join("delay.lua");
-        if lua_mode {
-            self.delay_script.ensure_default(&script_path);
-        }
-        self.delay_script.maybe_reload(&script_path, lua_mode);
 
         // Pull our seat + legal actions from the live engine state. This
         // bracket releases the tracker mutex before we sleep/click.
@@ -193,23 +137,20 @@ impl AutoplayManager {
         // Where the pointer is now: a discard of the tile it rests on presses
         // that copy, not its twin. The user's own mouse may have left it somewhere.
         self.hand.sync_with_user();
-        let pointer = match self.hand.at() {
-            Some((px, py)) => Canvas::cached(&self.ctx)
-                .await
-                .map(|rect| rect.norm(px, py)),
-            None => None,
+        let pointer = self.hand.at();
+        let candidates = crate::autoplay::delay::probs::candidates(resp.meta.as_ref());
+        let runner_up = match &resp.action {
+            MjaiEvent::Dahai { pai, .. } => {
+                crate::autoplay::pointer::runner_up(&candidates, pai).map(str::to_owned)
+            }
+            _ => None,
         };
         Some(Decision {
             request,
-            input_owner,
-            ui_token: None,
+            owner,
             cfg,
             delay_cfg,
             platform,
-            tenhou_state,
-            planned_window,
-            planned_budget,
-            budget,
             probs,
             our_seat,
             legal_actions,
@@ -217,6 +158,10 @@ impl AutoplayManager {
             num_players,
             reading,
             pointer,
+            runner_up,
+            last_kawa_tile: self.state.last_kawa_tile.clone(),
+            last_self_tsumo: self.state.last_self_tsumo.clone(),
+            self_riichi_accepted: self.state.self_riichi_accepted,
         })
     }
 
@@ -263,7 +208,8 @@ impl AutoplayManager {
 #[cfg(test)]
 mod control_tests {
     use super::*;
-    use crate::bot::control::{DecisionControl, RunnerHealth};
+    use crate::autoplay::TimeBudget;
+    use crate::bot::control::{DecisionControl, InputWindow, RunnerHealth};
     #[test]
     fn all_available_sources_keep_the_original_context_and_producer_window() {
         let budget = TimeBudget {
