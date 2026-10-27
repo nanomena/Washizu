@@ -190,11 +190,6 @@ pub enum TargetRequest {
         window: String,
         identity: String,
     },
-    Hover {
-        hand: Vec<u32>,
-        tile: u32,
-        identity: String,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
