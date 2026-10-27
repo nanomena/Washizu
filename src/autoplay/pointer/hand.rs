@@ -16,9 +16,7 @@
 //! manager resets it at every hand's start and end, and the pointer stays
 //! where it was.
 
-use super::approach::{
-    approach, changed_mind, dealt_lead, wait_to_see, Approach, LOOK_MS, LOOK_REACH,
-};
+use super::approach::{approach, changed_mind, Approach, LOOK_MS, LOOK_REACH};
 use super::layout::{center, PointerLayout};
 use super::lean::{self, Lean, Spot};
 use super::queue::{self, Errand, Motion, Queue};
@@ -37,8 +35,6 @@ pub struct ApproachInput {
     pub glance: Option<Point>,
     pub look_ms: Option<u32>,
     pub rect: CanvasRect,
-    pub shown_at: Option<Instant>,
-    pub dealt: bool,
 }
 
 pub struct PointerController {
@@ -149,16 +145,8 @@ impl PointerController {
         self.glance_at
     }
 
-    /// Plan the pointer's way to the plan's first press and take its time
-    /// out of the pause that leads the plan. `None` for a plan that does not
-    /// open with a pause and a press: there is no thinking time to move in.
-    /// `glance` is the runner-up to look at, in viewport CSS pixels; `shown_at`
-    /// when what the decision answers came on screen, before which the
-    /// pointer cannot have seen it (see [`wait_to_see`]); after a deal the
-    /// whole way is made once the hand can have been seen ([`dealt_lead`]).
-    /// A decision
-    /// that presses another tile than the one the pointer rests on after its
-    /// looks between turns is a changed mind ([`changed_mind`]).
+    /// Allocate the granted pacing interval across motion and dwell. Readiness
+    /// and deadlines belong to the turn controller; pointer style adds no time.
     pub fn plan_approach(&mut self, input: ApproachInput, action: &MjaiEvent) -> Approach {
         let ApproachInput {
             think_ms,
@@ -166,29 +154,16 @@ impl PointerController {
             glance,
             look_ms,
             rect,
-            shown_at,
-            dealt,
         } = input;
         self.sync_with_user();
         let looked_at = self.looked_at.take();
         let rest_ms = look_ms.unwrap_or(LOOK_MS);
         let mut rng = rand::rng();
-        // How long from now until what it answers can have been seen.
-        let see_ms = shown_at.map(|shown_at| {
-            let seen_at =
-                shown_at + Duration::from_millis(u64::from(humanize::SEE.draw_ms(&mut rng)));
-            let ms = seen_at
-                .saturating_duration_since(Instant::now())
-                .as_millis();
-            u32::try_from(ms).unwrap_or(u32::MAX)
-        });
-        let lead = see_ms.map_or(0, |see_ms| dealt_lead(dealt, see_ms, think_ms));
-        let think_ms = think_ms.saturating_sub(lead);
         // A pointer that has not been anywhere yet starts from where it
         // would have been resting.
         let from = *self.at.get_or_insert_with(|| spots::rest(rect, &mut rng));
         // The runner-up is rested on where a tile is: high on it, as a press.
-        let mut approach = match (looked_at, pressed_spot(action)) {
+        match (looked_at, pressed_spot(action)) {
             (Some(old), Some(new)) if old != new => {
                 info!("autoplay: a changed mind: the pointer was on {old:?}, pressing {new:?}");
                 // A changed mind spends the already-granted pacing interval.
@@ -204,12 +179,7 @@ impl PointerController {
                 rect.width / 16.0,
                 &mut rng,
             ),
-        };
-        approach.pause_ms += lead;
-        if let Some(see_ms) = see_ms {
-            wait_to_see(&mut approach, see_ms);
         }
-        approach
     }
 
     /// Walk the pointer along `approach`. False when it could not be moved.
