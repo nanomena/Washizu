@@ -52,6 +52,7 @@ pub struct TenhouBridge {
     /// after every parsed frame; `None` unless the chromium capture path
     /// wired it (see [`crate::autoplay::tenhou_state`]).
     shared: Option<SharedTenhouState>,
+    input_watch: Option<crate::autoplay::verify::SharedInputWatch>,
     /// Frontend toast channel, for states the user has to know about but no
     /// mjai event can carry (a mid-hand reconnect). `None` in tests.
     notify: Option<NotifyBus>,
@@ -66,6 +67,7 @@ impl TenhouBridge {
             session,
             mjai_log: None,
             shared: None,
+            input_watch: None,
             notify: None,
         }
     }
@@ -86,6 +88,14 @@ impl TenhouBridge {
     /// Attach the slot autoplay reads the hand and decision window from.
     pub fn with_shared_state(mut self, shared: Option<SharedTenhouState>) -> Self {
         self.shared = shared;
+        self
+    }
+
+    pub fn with_input_watch(
+        mut self,
+        watch: Option<crate::autoplay::verify::SharedInputWatch>,
+    ) -> Self {
+        self.input_watch = watch;
         self
     }
 
@@ -1005,12 +1015,25 @@ impl TenhouBridge {
 impl Bridge for TenhouBridge {
     fn parse(&mut self, direction: Direction, content: &[u8]) -> ParseResult {
         use crate::schema::ParsedFrame;
-        // NEXTREADY acknowledges the complete result queue in the official
-        // client. Other uplink input remains outside the observation stream.
+        // Uplink commands acknowledge physical client input, never advance
+        // the real game stream. NEXTREADY also closes the pending result group.
         if direction == Direction::Up {
             let Ok(msg) = serde_json::from_slice::<JsonValue>(content) else {
                 return ParseResult::empty();
             };
+            if let Some(kind) = client_input_kind(&msg) {
+                if let Some(watch) = &self.input_watch {
+                    watch.note_sent(kind);
+                }
+                return ParseResult {
+                    events: Vec::new(),
+                    window: None,
+                    parsed: Some(ParsedFrame {
+                        method: msg["tag"].as_str().unwrap().to_owned(),
+                        args: msg,
+                    }),
+                };
+            }
             if msg.get("tag").and_then(JsonValue::as_str) != Some("NEXTREADY") {
                 return ParseResult::empty();
             }
@@ -1090,6 +1113,31 @@ impl Bridge for TenhouBridge {
     /// [`encode::encode`].
     fn build(&mut self, command: &MjaiEvent) -> Option<Vec<u8>> {
         encode::encode(command, self.state.hand_view()).map(String::into_bytes)
+    }
+}
+
+/// Observed official Web3 client commands. A server echo or a DOM handler's
+/// return value is not a substitute for this independent uplink evidence.
+fn client_input_kind(message: &JsonValue) -> Option<crate::autoplay::verify::InputKind> {
+    use crate::autoplay::verify::InputKind;
+    match message.get("tag")?.as_str()? {
+        "D" if message
+            .get("p")
+            .and_then(JsonValue::as_u64)
+            .is_some_and(|tile| tile < 136) =>
+        {
+            Some(InputKind::Discard)
+        }
+        "REACH" => Some(InputKind::Reach),
+        "N" if message.get("type").is_none()
+            || message
+                .get("type")
+                .and_then(JsonValue::as_u64)
+                .is_some_and(|kind| matches!(kind, 1..=7 | 9)) =>
+        {
+            Some(InputKind::Other)
+        }
+        _ => None,
     }
 }
 
@@ -1205,6 +1253,39 @@ mod tests {
         let out = b.parse(Direction::Up, br#"{"tag":"INIT"}"#);
         assert!(out.events.is_empty());
         assert!(out.parsed.is_none());
+    }
+
+    #[test]
+    fn real_uplink_commands_acknowledge_input_without_inventing_game_events() {
+        use crate::autoplay::verify::InputWatch;
+        let watch = Arc::new(InputWatch::default());
+        let mut bridge = TenhouBridge::new(None, None).with_input_watch(Some(watch.clone()));
+        let before = watch.ticket();
+        for invalid in [
+            br#"{"tag":"INIT"}"#.as_slice(),
+            br#"{"tag":"D","p":136}"#,
+            br#"{"tag":"N","type":true}"#,
+        ] {
+            assert!(bridge.parse(Direction::Up, invalid).events.is_empty());
+        }
+        assert!(!watch.sent_since(before));
+        let result = bridge.parse(Direction::Up, br#"{"tag":"D","p":16}"#);
+        assert!(result.events.is_empty() && result.window.is_none());
+        assert!(watch.sent_since(before));
+        assert!(!watch.non_discard_since(before));
+        let before = watch.ticket();
+        assert!(bridge
+            .parse(Direction::Up, br#"{"tag":"N"}"#)
+            .events
+            .is_empty());
+        assert!(watch.non_discard_since(before));
+        assert!(!watch.reach_since(before));
+        let before = watch.ticket();
+        assert!(bridge
+            .parse(Direction::Up, br#"{"tag":"REACH"}"#)
+            .events
+            .is_empty());
+        assert!(watch.reach_since(before));
     }
 
     #[test]

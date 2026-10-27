@@ -144,6 +144,7 @@ pub fn for_platform(
         crate::config::Platform::Tenhou => Box::new(
             TenhouBridge::new(flow_log, session)
                 .with_shared_state(hooks.tenhou_state)
+                .with_input_watch(hooks.input_watch)
                 .with_notify(hooks.notify),
         ),
         crate::config::Platform::RiichiCity => {
