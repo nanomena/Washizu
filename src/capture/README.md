@@ -49,3 +49,9 @@ supervisor::start ─▶ EmbeddedGame::run ─▶ cdp::run ─▶ FlowBridges �
 reaches the view at. `start` says `running` as soon as the task is spawned, so
 the interface sees the change at once; a connection that then fails arrives as
 `error`, with a notice.
+
+A bridge retains the original per-frame input window in `ParseResult.window`.
+`into_captured` attaches it only to that frame's final complete event prefix,
+then `MjaiBus` carries `CapturedEvent` to the tracker and other consumers.
+Capture never re-reads a newer shared slot to assign an older event's identity.
+History and inspector consumers record the underlying MJAI event as before.

@@ -30,6 +30,7 @@ impl Primary {
             fail_at: None,
             calls: Arc::new(Mutex::new(vec![])),
             last: BotResponse {
+                request: None,
                 action: MjaiEvent::None,
                 meta: None,
             },
@@ -70,6 +71,12 @@ impl BotRunner for Primary {
                         tsumogiri: true,
                     }
                 }
+                MjaiEvent::Dora { .. } => self.last.action.clone(),
+                MjaiEvent::Pon { actor: 0, .. } => MjaiEvent::Dahai {
+                    actor: 0,
+                    pai: "1m".into(),
+                    tsumogiri: false,
+                },
                 _ => MjaiEvent::None,
             };
         }
@@ -82,7 +89,7 @@ impl BotRunner for Primary {
     }
 }
 
-fn opening() -> Vec<MjaiEvent> {
+pub(crate) fn opening() -> Vec<MjaiEvent> {
     serde_json::from_value(json!([
         {"type":"start_game","id":0,"names":["","","", ""],"aka_flag":true,"num_players":4},
         {"type":"start_kyoku","bakaze":"E","kyoku":1,"honba":0,"kyotaku":0,"oya":0,
@@ -340,10 +347,30 @@ impl Rig {
         } else if can_act != Some(true) {
             *self.clock.time_budget.write().unwrap() = None;
         }
+        let window = self
+            .clock
+            .time_budget
+            .read()
+            .unwrap()
+            .map(InputWindow::Majsoul);
+        self.publish(event, can_act, window);
+    }
+
+    fn captured(&mut self, captured: crate::event_bus::CapturedEvent) {
+        self.tracker.handle(&captured.event).unwrap();
+        self.publish(
+            captured.event,
+            self.tracker.our_seat_can_act(),
+            captured.window,
+        );
+    }
+
+    fn publish(&mut self, event: MjaiEvent, can_act: Option<bool>, window: Option<InputWindow>) {
         let context = self
             .monitor
             .game_event(&event, self.tracker.snapshot(), None);
         let tracked = TrackedEvent {
+            window,
             event,
             context: Some(context),
             can_act,
@@ -543,29 +570,140 @@ async fn a_real_tracker_gap_retires_both_sources_even_if_the_primary_later_answe
 }
 
 #[tokio::test]
-async fn an_original_request_without_a_bridge_window_never_publishes_an_action() {
+async fn an_original_request_without_a_bridge_window_cannot_borrow_an_ahead_window() {
     let mut rig = Rig::new(Primary::new(None));
+    let b = TimeBudget {
+        fixed_ms: 1400,
+        add_ms: 0,
+        opened_at: Instant::now(),
+        source: BudgetSource::DealTile,
+    };
+    *rig.clock.time_budget.write().unwrap() = Some(b); // already ahead of queued events
     for event in opening() {
-        rig.feed(event);
+        rig.captured(event.into());
     }
-    *rig.clock.time_budget.write().unwrap() = None;
-    let mut updates = rig.monitor.subscribe();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !updates
-            .borrow()
-            .decision
-            .as_ref()
-            .is_some_and(|d| d.state == "unavailable")
-        {
-            updates.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    let control = rig.monitor.snapshot().control.unwrap();
-    assert_eq!(control.source, DecisionSource::Unavailable);
-    assert_eq!(control.window, None);
+    rig.caught_up(3).await;
+    assert!(rig.monitor.snapshot().decision.is_none());
     assert!(rig.output.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_queued_original_window_is_never_rebound_to_a_newer_capture_slot() {
+    let mut rig = Rig::new(Primary::new(None));
+    let old = TimeBudget {
+        fixed_ms: 3000,
+        add_ms: 0,
+        opened_at: Instant::now(),
+        source: BudgetSource::DealTile,
+    };
+    let newer = TimeBudget {
+        opened_at: old.opened_at + Duration::from_nanos(1),
+        ..old
+    };
+    *rig.clock.time_budget.write().unwrap() = Some(old);
+    for event in (crate::bridge::ParseResult {
+        events: opening(),
+        parsed: None,
+        window: Some(InputWindow::Majsoul(old)),
+    })
+    .into_captured()
+    {
+        rig.captured(event);
+    }
+    // Capture has advanced, but tracker and coordinator still hold the old prefix.
+    *rig.clock.time_budget.write().unwrap() = Some(newer);
+    rig.caught_up(3).await;
+    let control = rig.monitor.snapshot().control.unwrap();
+    assert_eq!(control.window, Some(InputWindow::Majsoul(old).proof()));
+    assert_ne!(control.window, Some(InputWindow::Majsoul(newer).proof()));
+    assert!(rig.output.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_frame_ending_in_dora_and_its_restored_prefix_keep_their_original_window() {
+    let mut rig = Rig::new(Primary::new(None));
+    let calls = Arc::new(Mutex::new(Vec::<MjaiEvent>::new()));
+    let mut events = opening();
+    events.push(serde_json::from_value(json!({"type":"dora","dora_marker":"9p"})).unwrap());
+    let b = TimeBudget {
+        fixed_ms: 3000,
+        add_ms: 0,
+        opened_at: Instant::now(),
+        source: BudgetSource::DealTile,
+    };
+    for pass in 0..2 {
+        let original = TimeBudget {
+            opened_at: b.opened_at + Duration::from_nanos(pass),
+            ..b
+        };
+        *rig.clock.time_budget.write().unwrap() = Some(original);
+        let parsed = crate::bridge::ParseResult {
+            events: events.clone(),
+            parsed: None,
+            window: Some(InputWindow::Majsoul(original)),
+        };
+        for event in parsed.into_captured() {
+            rig.captured(event);
+        }
+        let reply = rig.reply().await;
+        assert_eq!(
+            reply.control().unwrap().unwrap().source,
+            DecisionSource::Primary
+        );
+        assert_eq!(
+            reply.request.unwrap().window,
+            Some(InputWindow::Majsoul(original))
+        );
+        assert_eq!(
+            reply.request.unwrap().context,
+            rig.last.as_ref().unwrap().context.unwrap()
+        );
+        assert_eq!(reply.meta.as_ref().unwrap()["delivery"]["through"], 4);
+        assert!(matches!(
+            rig.last.as_ref().unwrap().event,
+            MjaiEvent::Dora { .. }
+        ));
+        calls.lock().unwrap().push(reply.action);
+    }
+    assert_eq!(calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_post_pon_frame_ending_in_dora_still_opens_its_discard_decision() {
+    let mut rig = Rig::new(Primary::new(None));
+    let mut events = opening();
+    events.extend(serde_json::from_value::<Vec<MjaiEvent>>(json!([
+        {"type":"dahai","actor":0,"pai":"N","tsumogiri":true},
+        {"type":"tsumo","actor":1,"pai":"?"}, {"type":"dahai","actor":1,"pai":"F","tsumogiri":false},
+        {"type":"pon","actor":0,"target":1,"pai":"F","consumed":["F","F"]},
+        {"type":"dora","dora_marker":"9p"}
+    ])).unwrap());
+    let b = TimeBudget {
+        fixed_ms: 3000,
+        add_ms: 0,
+        opened_at: Instant::now(),
+        source: BudgetSource::ChiPengGang,
+    };
+    *rig.clock.time_budget.write().unwrap() = Some(b);
+    for event in (crate::bridge::ParseResult {
+        events,
+        parsed: None,
+        window: Some(InputWindow::Majsoul(b)),
+    })
+    .into_captured()
+    {
+        rig.captured(event);
+    }
+    let reply = rig.reply().await;
+    assert_eq!(
+        reply.control().unwrap().unwrap().source,
+        DecisionSource::Primary
+    );
+    assert!(matches!(reply.action, MjaiEvent::Dahai { actor: 0, .. }));
+    assert_eq!(
+        reply.request.unwrap().context,
+        rig.last.as_ref().unwrap().context.unwrap()
+    );
 }
 
 #[test]
@@ -580,6 +718,7 @@ fn full_riichi_legality_requires_the_legal_discard_and_its_physical_copy() {
     }
     let legal = bot.legal();
     let reach = |pai: &str, tsumogiri| BotResponse {
+        request: None,
         action: MjaiEvent::Reach {
             actor: 0,
             pai: Some(pai.into()),
@@ -656,7 +795,11 @@ fn remaining_budget_deducts_elapsed_time_input_reserve_and_bounded_bank() {
     config.autoplay.majsoul.hover_delay_ms = 20;
     config.autoplay.majsoul.click_hold_ms = 10;
     config.autoplay.majsoul.inter_click_delay_ms = 40;
-    let (deadline, reserve, remaining) = inference_deadline(&clock, &config, now);
+    let (deadline, reserve, remaining) = inference_deadline(
+        clock.time_budget.read().unwrap().map(InputWindow::Majsoul),
+        &config,
+        now,
+    );
     assert_eq!(remaining, 7_500);
     assert_eq!(reserve, 870);
     assert_eq!(deadline.duration_since(now), Duration::from_millis(6_630));
@@ -677,6 +820,7 @@ fn local_standby_has_no_cloud_route_and_rejects_wrong_actor_or_red_identity() {
     }
     assert!(!standby::legal_response(&wrong, &legal));
     let red = BotResponse {
+        request: None,
         action: MjaiEvent::Dahai {
             actor: 0,
             pai: "5pr".into(),
@@ -686,6 +830,7 @@ fn local_standby_has_no_cloud_route_and_rejects_wrong_actor_or_red_identity() {
     };
     assert!(standby::legal_response(&red, &legal));
     let normal = BotResponse {
+        request: None,
         action: MjaiEvent::Dahai {
             actor: 0,
             pai: "5p".into(),

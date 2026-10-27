@@ -657,7 +657,7 @@ async fn attach_page(
                         &ev.response.payload_data,
                         &result,
                     );
-                    for e in result.events {
+                    for e in result.into_captured() {
                         let _ = mjai_bus.send(e);
                     }
                 }
@@ -690,7 +690,7 @@ async fn attach_page(
                         &ev.response.payload_data,
                         &result,
                     );
-                    for e in result.events {
+                    for e in result.into_captured() {
                         let _ = mjai_bus.send(e);
                     }
                 }

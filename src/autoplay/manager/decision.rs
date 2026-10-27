@@ -7,7 +7,7 @@ use crate::autoplay::canvas::Canvas;
 use crate::autoplay::delay::{BudgetSnapshot, DecisionProbs, DelayScript, Reading};
 use crate::autoplay::platform::ActionContext;
 use crate::autoplay::tenhou_state::{DecisionWindow, TenhouState};
-use crate::bot::control::{DecisionSource, WindowProof};
+use crate::bot::control::{DecisionRequest, DecisionSource, InputWindow, WindowProof};
 use crate::bot::BotResponse;
 use crate::config::{DelayModelConfig, MajsoulAutoplayConfig, Platform};
 use crate::game_state::snapshot::GameStateSnapshot;
@@ -20,14 +20,25 @@ use tracing::{info, warn};
 /// The coordinator supplies provenance; UI accepts either available source
 /// equally and only checks freshness. Missing/malformed identity is a failure,
 /// never permission to rebind a late reply to the newest budget slot.
-fn selected_window_current(resp: &BotResponse, current: Option<WindowProof>) -> bool {
+fn selected_window_current(
+    resp: &BotResponse,
+    current_context: Option<crate::monitor::DecisionContext>,
+    current: Option<WindowProof>,
+) -> bool {
+    let Some(request) = resp.request else {
+        return false;
+    };
     resp.unavailable_reason().is_none()
+        && current_context == Some(request.context)
+        && request.window.is_some()
+        && request.window.map(|w| w.proof()) == current
         && matches!(resp.control(), Ok(Some(control)) if control.source != DecisionSource::Unavailable
-        && control.window.is_some() && control.window == current)
+            && control.context == request.context && control.window == current)
 }
 
 /// One decision's reading of the table.
 pub(super) struct Decision {
+    pub(super) request: DecisionRequest,
     pub(super) ui_token: Option<crate::autoplay::ui::DecisionToken>,
     pub(super) cfg: MajsoulAutoplayConfig,
     delay_cfg: DelayModelConfig,
@@ -83,6 +94,10 @@ impl Decision {
 }
 
 impl AutoplayManager {
+    pub(super) fn current_context(&self) -> Option<crate::monitor::DecisionContext> {
+        let s = self.monitor.snapshot();
+        (s.sync_error.is_none() && !s.round_ended && !s.game_ended).then_some(s.context)
+    }
     /// Read the table for `resp`. `None` when autoplay is off, or when the
     /// game has not started for our seat.
     pub(super) async fn read_decision(&mut self, resp: &BotResponse) -> Option<Decision> {
@@ -100,19 +115,30 @@ impl AutoplayManager {
         let platform = cfg_guard.platform.kind;
         drop(cfg_guard);
 
-        if platform == Platform::Majsoul
-            && !selected_window_current(resp, WindowProof::capture(&self.ctx, platform))
+        let request = resp.request?;
+        if matches!(platform, Platform::Majsoul | Platform::Tenhou)
+            && !selected_window_current(
+                resp,
+                self.current_context(),
+                WindowProof::capture(&self.ctx, platform),
+            )
         {
             warn!("autoplay: selected reply lacks the exact current coordinator window proof; withholding input");
             return None;
         }
 
         let tenhou_state = self.ctx.tenhou_state.read().ok().and_then(|g| g.clone());
-        let planned_window = tenhou_state.as_ref().and_then(|s| s.window);
+        let planned_window = match request.window {
+            Some(InputWindow::Tenhou(w)) => Some(w),
+            _ => None,
+        };
 
         // The time budget and the bot's confidence both feed the delay model
         // — neither can alter the chosen action.
-        let planned_budget = self.ctx.time_budget.read().ok().and_then(|g| *g);
+        let planned_budget = match request.window {
+            Some(InputWindow::Majsoul(b)) => Some(b),
+            _ => None,
+        };
         let budget = planned_budget.map(|b| BudgetSnapshot {
             fixed_ms: b.fixed_ms,
             add_ms: b.add_ms,
@@ -169,6 +195,7 @@ impl AutoplayManager {
             None => None,
         };
         Some(Decision {
+            request,
             ui_token: None,
             cfg,
             delay_cfg,
@@ -230,101 +257,74 @@ impl AutoplayManager {
 #[cfg(test)]
 mod control_tests {
     use super::*;
-    use crate::autoplay::AutoplayContext;
     use crate::bot::control::{DecisionControl, RunnerHealth};
-
     #[test]
-    fn coordinator_proof_is_required_and_available_sources_obey_the_same_window_contract() {
-        let current = Some(WindowProof::Majsoul { opened_ns: 123 });
-        let mut resp = BotResponse {
-            action: MjaiEvent::None,
-            meta: None,
+    fn all_available_sources_keep_the_original_context_and_producer_window() {
+        let budget = TimeBudget {
+            fixed_ms: 5000,
+            add_ms: 0,
+            opened_at: std::time::Instant::now(),
+            source: crate::autoplay::BudgetSource::DealTile,
         };
-        assert!(
-            !selected_window_current(&resp, current),
-            "unstamped reply cannot borrow a current window"
-        );
+        let request = DecisionRequest {
+            context: crate::monitor::DecisionContext {
+                game: 2,
+                round: 1,
+                event_seq: 10,
+            },
+            window: Some(InputWindow::Majsoul(budget)),
+        };
+        let proof = request.window.map(|w| w.proof());
         for source in [
             DecisionSource::Primary,
             DecisionSource::NativeStandby,
             DecisionSource::Unavailable,
         ] {
-            resp.set_control(DecisionControl {
-                context: crate::monitor::DecisionContext {
-                    game: 9,
-                    round: 4,
-                    event_seq: 83,
-                },
-                window: current,
+            let mut reply = BotResponse {
+                request: Some(request),
+                action: MjaiEvent::None,
+                meta: None,
+            };
+            reply.set_control(DecisionControl {
+                context: request.context,
+                window: proof,
                 source,
-                primary: RunnerHealth::Blocked {
-                    through: 72,
-                    reason: "explicit test fault".into(),
-                },
-                standby: RunnerHealth::Ready { through: 83 },
+                primary: RunnerHealth::DirectReady { delivered: 3 },
+                standby: RunnerHealth::Ready { through: 3 },
             });
             assert_eq!(
-                selected_window_current(&resp, current),
+                selected_window_current(&reply, Some(request.context), proof),
                 source != DecisionSource::Unavailable
             );
+            let changed = crate::monitor::DecisionContext {
+                event_seq: 11,
+                ..request.context
+            };
+            assert!(!selected_window_current(&reply, Some(changed), proof));
+            assert!(!selected_window_current(&reply, None, proof));
             assert!(!selected_window_current(
-                &resp,
-                Some(WindowProof::Majsoul { opened_ns: 124 })
+                &reply,
+                Some(request.context),
+                None
             ));
-            assert!(!selected_window_current(&resp, None));
+            let next = InputWindow::Majsoul(TimeBudget {
+                opened_at: budget.opened_at + std::time::Duration::from_nanos(1),
+                ..budget
+            });
             assert!(!selected_window_current(
-                &resp,
-                Some(WindowProof::Tenhou {
-                    opened_ns: 123,
-                    ops: 8
-                })
+                &reply,
+                Some(request.context),
+                Some(next.proof())
+            ));
+            // Wire metadata cannot manufacture the original in-process request.
+            let wire = serde_json::to_vec(&reply).unwrap();
+            let untrusted: BotResponse = serde_json::from_slice(&wire).unwrap();
+            assert!(untrusted.request.is_none());
+            assert!(!selected_window_current(
+                &untrusted,
+                Some(request.context),
+                proof
             ));
         }
-        resp.meta = Some(serde_json::json!({"control":{"source":"native_standby"}}));
-        assert!(
-            !selected_window_current(&resp, current),
-            "malformed proof cannot default missing fields"
-        );
-    }
-
-    #[test]
-    fn window_proof_is_the_existing_monotonic_window_including_restored_backdating() {
-        let ctx = AutoplayContext::default();
-        let now = std::time::Instant::now();
-        let mut budget = TimeBudget {
-            fixed_ms: 5000,
-            add_ms: 10000,
-            opened_at: now - std::time::Duration::from_secs(16),
-            source: crate::autoplay::budget::BudgetSource::DealTile,
-        };
-        *ctx.time_budget.write().unwrap() = Some(budget);
-        let original = WindowProof::capture(&ctx, Platform::Majsoul).unwrap();
-        let mut resp = BotResponse {
-            action: MjaiEvent::None,
-            meta: None,
-        };
-        resp.set_control(DecisionControl {
-            context: crate::monitor::DecisionContext {
-                game: 2,
-                round: 1,
-                event_seq: 32,
-            },
-            window: Some(original),
-            source: DecisionSource::Primary,
-            primary: RunnerHealth::Ready { through: 32 },
-            standby: RunnerHealth::Ready { through: 32 },
-        });
-        assert!(selected_window_current(
-            &resp,
-            WindowProof::capture(&ctx, Platform::Majsoul)
-        ));
-        budget.opened_at += std::time::Duration::from_nanos(1);
-        *ctx.time_budget.write().unwrap() = Some(budget);
-        assert!(!selected_window_current(
-            &resp,
-            WindowProof::capture(&ctx, Platform::Majsoul)
-        ));
-        resp.meta.as_mut().unwrap()["unavailable"] = serde_json::json!("model did not decide");
-        assert!(!selected_window_current(&resp, Some(original)));
     }
 }

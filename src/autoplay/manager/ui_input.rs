@@ -14,9 +14,12 @@ pub(super) async fn environment(
     ctx: &AutoplayContext,
     cfg: &RwLock<AppConfig>,
     page_available: bool,
+    monitor: &crate::monitor::MonitorHandle,
 ) -> ui::Environment {
     let cfg = cfg.read().await;
+    let s = monitor.snapshot();
     ui::Environment {
+        context: (s.sync_error.is_none() && !s.round_ended && !s.game_ended).then_some(s.context),
         settings: ui::Settings {
             enabled: cfg.autoplay.enabled && cfg.platform.kind == Platform::Majsoul,
             quick_confirm: cfg.monitor.quick_confirm,
@@ -55,7 +58,7 @@ impl AutoplayManager {
     }
     pub(super) async fn sync_ui(&mut self) {
         let page_available = self.ctx.page.read().await.is_some();
-        let env = environment(&self.ctx, &self.cfg, page_available).await;
+        let env = environment(&self.ctx, &self.cfg, page_available, &self.monitor).await;
         let (before, after, reason) = {
             let mut ui = self.ui.lock().unwrap();
             let before = ui.phase();
@@ -96,6 +99,7 @@ impl AutoplayManager {
         let ctx = self.ctx.clone();
         let cfg = self.cfg.clone();
         let machine = self.ui.clone();
+        let monitor = self.monitor.clone();
         let pressed = self
             .hand
             .press_when("UI effect", to, rect, touch, move |page| async move {
@@ -104,7 +108,6 @@ impl AutoplayManager {
                 let after = cdp_input::evaluate_canvas_rect(&page).await.ok();
                 // Hand holds this page's read lease through dispatch; do not
                 // reacquire it behind a queued capture writer.
-                let env = environment(&ctx, &cfg, true).await;
                 let frame = match (captured, measured) {
                     (Some((image, scale)), Some(measured)) => ui::Frame {
                         stable_geometry: measured == rect
@@ -121,6 +124,7 @@ impl AutoplayManager {
                         auto_win: pixels::Glyph::Absent,
                     },
                 };
+                let env = environment(&ctx, &cfg, true, &monitor).await;
                 let mut ui = machine.lock().unwrap();
                 let before = ui.phase();
                 ui.synchronize(env, Instant::now());

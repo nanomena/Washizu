@@ -8,7 +8,7 @@ bridge to them.
 A reply with `meta.unavailable` set to a reason string means the model cannot
 decide, for example after synchronization loss or a transport failure. The
 manager records it for inspection/monitoring but never publishes it to the
-autoplay response bus, including before any riichi follow-up. The marker is
+autoplay response bus, including incomplete riichi replies. The marker is
 part of the reply, so gating does not race the independent stderr notification
 pump. The bot must mark every unavailable reply until it can decide again;
 notifications still describe the fault to the user.
@@ -442,3 +442,9 @@ per real input window. Plain `mjai` remains the default active protocol.
 See [recovery design](RECOVERY.md), [shared control contract](CONTROL.md), and
 [offline qualification](RECOVERY-TESTS.md). Matching relay/server and core changes
 must be installed together; source changes alone are not a deployment.
+
+Direct Native/API and plain MJAI responses now carry the same core-owned
+original request as positioned responses. Direct `delivered` is separate from
+positioned acknowledged `through`; unavailable direct responses never report
+ready. Incomplete executable riichi is withheld, without speculative feeding
+or suppressing its later real echo.

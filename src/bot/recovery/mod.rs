@@ -5,13 +5,15 @@
 mod journal;
 mod standby;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod worker;
 
 use crate::autoplay::AutoplayContext;
-use crate::bot::control::{DecisionControl, DecisionSource, RunnerHealth, WindowProof};
+use crate::bot::control::{
+    DecisionControl, DecisionRequest, DecisionSource, InputWindow, RunnerHealth, WindowProof,
+};
 use crate::bot::{BotResponse, BotRunner};
-use crate::config::{AppConfig, Platform};
+use crate::config::AppConfig;
 use crate::event_bus::{BotResponseBus, TrackedEvent};
 use crate::inspector::InspectorWriter;
 use crate::monitor::{DecisionContext, MonitorHandle};
@@ -64,6 +66,7 @@ impl RecoveryHandle {
 }
 
 struct Pending {
+    request: DecisionRequest,
     context: DecisionContext,
     window: Option<WindowProof>,
     trigger: MjaiEvent,
@@ -202,11 +205,11 @@ impl Coordinator {
             });
         }
         let cfg = self.config.read().await;
-        let window = WindowProof::capture(&self.clock, cfg.platform.kind);
+        let window = tracked.window.map(|w| w.proof());
         let can_decide = frontier
             && !boundary
             && tracked.can_act == Some(true)
-            && (opens_window(&tracked.event, self.seat) || self.pending.is_some())
+            && tracked.window.is_some()
             && (window.is_none() || window != self.selected);
         let work = Observation {
             context,
@@ -227,7 +230,8 @@ impl Coordinator {
                 return true;
             }
             let now = Instant::now();
-            let (deadline, reserve_ms, remaining_ms) = inference_deadline(&self.clock, &cfg, now);
+            let (deadline, reserve_ms, remaining_ms) =
+                inference_deadline(tracked.window, &cfg, now);
             let id = self.monitor.begin(context, &self.name, &tracked.event);
             self.monitor.set_control(DecisionControl {
                 context,
@@ -237,6 +241,10 @@ impl Coordinator {
                 standby: self.standby_health.clone(),
             });
             self.pending = Some(Pending {
+                request: DecisionRequest {
+                    context,
+                    window: tracked.window,
+                },
                 context,
                 window,
                 trigger: tracked.event,
@@ -351,12 +359,14 @@ impl Coordinator {
             DecisionSource::Primary => pending.primary.expect("validated primary"),
             DecisionSource::NativeStandby => pending.standby.expect("validated standby"),
             DecisionSource::Unavailable => BotResponse {
+                request: None,
                 action: MjaiEvent::None,
                 meta: Some(
                     serde_json::json!({"unavailable":"No validated decision source answered within this window's inference budget."}),
                 ),
             },
         };
+        response.request = Some(pending.request);
         response.set_control(control.clone());
         let latency = pending.started.elapsed().as_millis() as u64;
         response.meta.as_mut().expect("control creates meta")["recovery_timing"] = serde_json::json!({
@@ -384,6 +394,7 @@ impl Coordinator {
     }
 }
 
+#[cfg(test)]
 fn opens_window(event: &MjaiEvent, seat: u8) -> bool {
     match event {
         MjaiEvent::Tsumo { actor, .. }
@@ -394,7 +405,11 @@ fn opens_window(event: &MjaiEvent, seat: u8) -> bool {
     }
 }
 
-fn inference_deadline(ctx: &AutoplayContext, cfg: &AppConfig, now: Instant) -> (Instant, u32, u32) {
+fn inference_deadline(
+    window: Option<InputWindow>,
+    cfg: &AppConfig,
+    now: Instant,
+) -> (Instant, u32, u32) {
     let click = &cfg.autoplay.majsoul;
     // Reserve a three-input plan, pointer travel, configured scheduling margin.
     let reserve = cfg
@@ -404,8 +419,8 @@ fn inference_deadline(ctx: &AutoplayContext, cfg: &AppConfig, now: Instant) -> (
         .saturating_add(3 * click.hover_delay_ms.saturating_add(click.click_hold_ms))
         .saturating_add(2 * click.inter_click_delay_ms)
         .saturating_add(600);
-    let remaining = match cfg.platform.kind {
-        Platform::Majsoul => ctx.time_budget.read().ok().and_then(|g| *g).map(|b| {
+    let remaining = match window {
+        Some(InputWindow::Majsoul(b)) => Some({
             b.fixed_ms
                 .saturating_add(
                     ((f64::from(b.add_ms) * cfg.autoplay.delay.bank_use_fraction) as u32)
@@ -416,17 +431,12 @@ fn inference_deadline(ctx: &AutoplayContext, cfg: &AppConfig, now: Instant) -> (
                         .unwrap_or(u32::MAX),
                 )
         }),
-        Platform::Tenhou => ctx
-            .tenhou_state
-            .read()
-            .ok()
-            .and_then(|g| g.as_ref().and_then(|s| s.window))
-            .map(|w| {
-                crate::autoplay::tenhou_state::TURN_BASE_MS.saturating_sub(
-                    u32::try_from(now.saturating_duration_since(w.opened_at).as_millis())
-                        .unwrap_or(u32::MAX),
-                )
-            }),
+        Some(InputWindow::Tenhou(w)) => Some({
+            crate::autoplay::tenhou_state::TURN_BASE_MS.saturating_sub(
+                u32::try_from(now.saturating_duration_since(w.opened_at).as_millis())
+                    .unwrap_or(u32::MAX),
+            )
+        }),
         _ => None,
     }
     .unwrap_or(0);

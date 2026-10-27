@@ -486,6 +486,7 @@ fn start_autoplay(state: &AppState, enabled: bool) {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default(),
+        state.monitor.clone(),
     );
     tokio::spawn(async move {
         if let Err(e) = manager.await {
@@ -556,14 +557,14 @@ fn mirror_statuses(state: &AppState) {
 /// Mirror every event the bridge emits into the session's inspector timeline,
 /// so frames, events and the bot's reactions read as one record.
 async fn record_events(
-    mut events: broadcast::Receiver<schema::MjaiEvent>,
+    mut events: broadcast::Receiver<event_bus::CapturedEvent>,
     inspector: crate::inspector::InspectorWriter,
 ) {
     loop {
         match events.recv().await {
             Ok(event) => inspector.record(schema::InspectorEntry::MjaiEvent {
                 ts_ms: chrono::Local::now().timestamp_millis(),
-                event,
+                event: event.event,
             }),
             // The timeline is a view; the session's own files hold every event.
             Err(broadcast::error::RecvError::Lagged(_)) => {}

@@ -32,6 +32,8 @@ describe('monitor stream identities', () => {
     expect(decisionSound(s)).toBe(true)
     expect(alertsOf(s, { ui: null, bridge: null })).toEqual([])
     expect(controlLabel(control)).toBe('本地备用 · 主模型恢复中')
+    expect(controlLabel({ ...control, source: 'primary', primary: { state: 'direct_ready', delivered: 10 } })).toBe('主模型 · 主模型就绪')
+    expect(controlLabel({ ...control, source: 'unavailable', primary: { state: 'direct_unavailable', delivered: 10, reason: 'pipe lost' } })).toBe('暂无有效来源 · 主模型不可用')
     expect(decisionSound({ ...s, sync_error: 'missing real event' })).toBe(false)
     expect(alertsOf({ ...s, sync_error: 'missing real event' }, { ui: null, bridge: null }).map(a => a.key)).toEqual(['sync'])
     expect(decisionSound({ ...s, control: { ...control, source: 'unavailable' } })).toBe(false)

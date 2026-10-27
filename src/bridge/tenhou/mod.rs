@@ -1006,6 +1006,7 @@ impl Bridge for TenhouBridge {
             // method name — the user can filter them out, but seeing them
             // confirms the connection is alive.
             return ParseResult {
+                window: None,
                 events: Vec::new(),
                 parsed: Some(ParsedFrame {
                     method: "<heartbeat>".into(),
@@ -1041,7 +1042,20 @@ impl Bridge for TenhouBridge {
         // dispatched frame, not just the ones that produced mjai events: a
         // frame that only closes the decision window still has to be seen.
         self.publish();
-        ParseResult { events, parsed }
+        ParseResult {
+            events,
+            parsed,
+            // REACH confirms/accepts the already-selected declaration. The
+            // shared window still advances for that plan's discard, but the
+            // confirmation must not request a second model decision.
+            window: if msg.get("tag").and_then(JsonValue::as_str) == Some("REACH") {
+                None
+            } else {
+                self.state
+                    .window
+                    .map(crate::bot::control::InputWindow::Tenhou)
+            },
+        }
     }
 
     /// Encode a bot action as the Tenhou client frame that performs it.
@@ -1917,7 +1931,16 @@ mod tests {
             &mut b,
             r#"{"tag":"INIT","seed":"0,0,0,1,2,4","ten":"250,250,250,250","oya":"0","hai":"0,1,2,3,4,5,6,7,8,9,10,11,12"}"#,
         );
-        let e1 = parse_one(&mut b, r#"{"tag":"REACH","who":"0","step":"1"}"#);
+        let confirmed = b.parse(Direction::Down, br#"{"tag":"REACH","who":"0","step":"1"}"#);
+        assert!(
+            confirmed.window.is_none(),
+            "confirmation cannot ask the model again"
+        );
+        assert!(
+            b.state.window.is_some(),
+            "the original plan still owes its discard"
+        );
+        let e1 = confirmed.events;
         assert!(matches!(e1[0], MjaiEvent::Reach { actor: 0, .. }));
         let e2 = parse_one(
             &mut b,

@@ -212,6 +212,7 @@ pub struct MajsoulBridge {
     /// (`operation.time_fixed` / `time_add`, both ms). `None` when the
     /// autoplay context isn't wired (MITM path, tests).
     time_budget: Option<SharedTimeBudget>,
+    window: Option<TimeBudget>,
     /// True while `handle_game_restore` replays historical actions through
     /// `handle_action_prototype`. Replayed operations must not clobber the
     /// live budget slot — the last one is committed after the replay with
@@ -253,6 +254,7 @@ impl MajsoulBridge {
             opening_deal: None,
             num_players: 4,
             time_budget: None,
+            window: None,
             replaying: false,
             restore_budget: None,
             input_watch: None,
@@ -609,9 +611,6 @@ impl MajsoulBridge {
                 watch.reset_ui_table();
             }
         }
-        if self.time_budget.is_none() {
-            return;
-        }
         // The slot is shared by every flow bridge (spectate tabs, the
         // dying socket during a reconnect). A bridge that never resolved
         // a seat cannot own a decision window — it must not write, or
@@ -628,7 +627,8 @@ impl MajsoulBridge {
         }
     }
 
-    fn store_budget(&self, budget: Option<TimeBudget>) {
+    fn store_budget(&mut self, budget: Option<TimeBudget>) {
+        self.window = budget;
         if let Some(slot) = &self.time_budget {
             if let Ok(mut guard) = slot.write() {
                 *guard = budget;
@@ -2085,7 +2085,11 @@ impl Bridge for MajsoulBridge {
                     self.rotate_mjai_log();
                 }
                 self.write_mjai(&events);
-                ParseResult { events, parsed }
+                ParseResult {
+                    events,
+                    parsed,
+                    window: self.window.map(crate::bot::control::InputWindow::Majsoul),
+                }
             }
             Err(e) => {
                 warn!(
@@ -5660,12 +5664,22 @@ mod tests {
             .expect("final window must be committed");
         assert_eq!(b.fixed_ms, 300_000, "wire value of the final window");
         assert_eq!(b.source, BudgetSource::DealTile);
+        assert_eq!(
+            bridge.window,
+            Some(b),
+            "the producer retains the same window"
+        );
         assert!(
             b.elapsed_ms() >= 16_000,
             "opened_at must be backdated by passed_waiting_time (got {}ms)",
             b.elapsed_ms()
         );
         assert!(!bridge.replaying, "replay flag must be reset");
+        assert_eq!(
+            bridge.window,
+            Some(b),
+            "the event envelope retains restore backdating"
+        );
     }
 
     /// Regression: chankan / babei windows (`ActionAnGangAddGang`,

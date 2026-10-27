@@ -110,3 +110,16 @@ rejection. Keep eight historical pixel fixtures and real matching-response
 parsing tests. Production processes must be absent; builds use
 `design/build-env.sh` shared lock, explicit `AKAGI_SOURCE` for this tree,
 and only `AKAGI_BUILD=ui-fsm`. Integration/deployment are the parent's job.
+
+## Integrated original request binding
+
+`BotResponse.request` is core-owned and serde-skipped. It carries the original
+tracked context and producer window through planning. Queued protocol facts
+are applied in order before response admission. `DecisionToken` binds that
+context plus the window derived from its original budget; final consume reads
+current tracker context (absent on a real gap/end), current producer window,
+settings and page facts after capture. A same-window context change therefore
+revokes input. Direct Native/API and positioned primary/standby use the same
+contract; no UI policy selection or second controller is introduced. Tenhou
+retains its prior handler and riichi-continuation behavior. See
+[the shared contract](../bot/CONTROL.md).

@@ -46,7 +46,7 @@ pub async fn round_advance_watcher(
     let mut rx = bus.subscribe();
     loop {
         match rx.recv().await {
-            Ok(ev) => match ev {
+            Ok(ev) => match ev.event {
                 MjaiEvent::EndKyoku => {
                     if !autoplay_enabled_for_riichi(&cfg).await {
                         continue;

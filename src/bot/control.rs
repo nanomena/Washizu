@@ -19,9 +19,39 @@ pub enum DecisionSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RunnerHealth {
+    DirectReady { delivered: u64 },
+    DirectUnavailable { delivered: u64, reason: String },
     Ready { through: u64 },
     Recovering { through: u64, reason: String },
     Blocked { through: u64, reason: String },
+}
+
+/// Original producer-owned input window, retained internally through planning.
+/// This is never reconstructed from a later shared-slot read or wire metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputWindow {
+    Majsoul(crate::autoplay::TimeBudget),
+    Tenhou(crate::autoplay::tenhou_state::DecisionWindow),
+}
+
+impl InputWindow {
+    pub fn proof(self) -> WindowProof {
+        match self {
+            Self::Majsoul(b) => WindowProof::Majsoul {
+                opened_ns: instant_token(b.opened_at),
+            },
+            Self::Tenhou(w) => WindowProof::Tenhou {
+                opened_ns: instant_token(w.opened_at),
+                ops: w.ops,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionRequest {
+    pub context: DecisionContext,
+    pub window: Option<InputWindow>,
 }
 
 /// Serialization of the existing bridge-owned monotonic window identity.

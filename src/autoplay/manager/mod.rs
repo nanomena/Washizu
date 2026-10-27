@@ -51,6 +51,7 @@ pub struct AutoplayManager {
     cfg: Arc<RwLock<AppConfig>>,
     ctx: Arc<AutoplayContext>,
     tracker: Arc<Mutex<GameTracker>>,
+    monitor: crate::monitor::MonitorHandle,
     mjai_bus: MjaiBus,
     /// For telling the user about a decision that came out wrong — see the
     /// riichi check and the dead-click reload in [`press`].
@@ -119,6 +120,7 @@ impl AutoplayManager {
             cfg,
             ctx,
             tracker,
+            monitor: crate::monitor::MonitorHandle::default(),
             mjai_bus,
             notify,
             majsoul: MajsoulAutoplay::new(),
@@ -130,6 +132,11 @@ impl AutoplayManager {
             advisor: crate::autoplay::advisor::Advisor::default(),
             config_dir,
         }
+    }
+
+    pub fn with_monitor(mut self, monitor: crate::monitor::MonitorHandle) -> Self {
+        self.monitor = monitor;
+        self
     }
 
     /// Run forever. Returns `Err` only on bus closure (process exit).
@@ -183,7 +190,14 @@ impl AutoplayManager {
                     Err(RecvError::Closed) => return Ok(()),
                 },
                 msg = bot_rx.recv() => match msg {
-                    Ok(resp) => self.handle_bot_response(resp).await,
+                    Ok(resp) => {
+                        // A response is produced after tracker application, while
+                        // this consumer can still have the corresponding raw
+                        // protocol events queued. Admit only after applying them
+                        // in their original order to the sole UI phase owner.
+                        self.apply_pending_protocol(&mut mjai_rx).await;
+                        self.handle_bot_response(resp).await;
+                    },
                     Err(RecvError::Lagged(n)) => warn!("autoplay: bot bus lagged {n}"),
                     Err(RecvError::Closed) => {
                         info!("autoplay: bot bus closed; exiting");
@@ -193,7 +207,7 @@ impl AutoplayManager {
                 msg = mjai_rx.recv() => match msg {
                     Ok(ev) => {
                         self.sync_ui().await;
-                        self.handle_mjai_event(&ev);
+                        self.handle_mjai_event(&ev.event);
                     }
                     Err(RecvError::Lagged(n)) => {
                         warn!("autoplay: mjai bus lagged {n}; revoking UI session");
@@ -205,6 +219,25 @@ impl AutoplayManager {
                         return Ok(());
                     }
                 },
+            }
+        }
+    }
+
+    async fn apply_pending_protocol(
+        &mut self,
+        rx: &mut tokio::sync::broadcast::Receiver<crate::event_bus::CapturedEvent>,
+    ) {
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    self.sync_ui().await;
+                    self.handle_mjai_event(&event.event);
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                    self.ctx.invalidate_ui();
+                    self.hand.cancel();
+                }
+                Err(_) => break,
             }
         }
     }
@@ -297,7 +330,10 @@ impl AutoplayManager {
         let ticket = self.ctx.input_watch.ticket();
 
         if decision.platform == Platform::Majsoul {
-            let Some(window) = decision.planned_budget.map(Into::into) else {
+            let Some(_window) = decision
+                .planned_budget
+                .map(crate::autoplay::ui::Window::from)
+            else {
                 warn!("autoplay: no authoritative Majsoul window; withholding semantic input");
                 return;
             };
@@ -306,7 +342,7 @@ impl AutoplayManager {
                 .ui
                 .lock()
                 .unwrap()
-                .begin_decision(window, decision.cfg.click_retries);
+                .begin_decision(decision.request, decision.cfg.click_retries);
             if decision.ui_token.is_none() {
                 debug!("autoplay: phase/window already consumed or unavailable; withholding reply");
                 return;
@@ -449,8 +485,73 @@ pub async fn run_autoplay_manager(
     response_bus: BotResponseBus,
     notify: NotifyBus,
     config_dir: std::path::PathBuf,
+    monitor: crate::monitor::MonitorHandle,
 ) -> anyhow::Result<()> {
     AutoplayManager::new(cfg, ctx, tracker, mjai_bus, notify, config_dir)
+        .with_monitor(monitor)
         .run(response_bus)
         .await
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[tokio::test]
+    async fn a_fast_new_game_reply_is_admitted_after_its_queued_protocol_boundaries() {
+        use crate::autoplay::{BudgetSource, TimeBudget};
+        use crate::bot::control::{
+            DecisionControl, DecisionRequest, DecisionSource, InputWindow, RunnerHealth,
+        };
+        let mut manager = AutoplayManager::for_tests();
+        manager.cfg.write().await.autoplay.enabled = true;
+        let budget = TimeBudget {
+            fixed_ms: 5000,
+            add_ms: 0,
+            opened_at: Instant::now(),
+            source: BudgetSource::DealTile,
+        };
+        *manager.ctx.time_budget.write().unwrap() = Some(budget);
+        let mut rx = manager.mjai_bus.subscribe();
+        for event in crate::bot::recovery::tests::opening() {
+            let mut tracker = manager.tracker.lock().await;
+            tracker.handle(&event).unwrap();
+            manager.monitor.game_event(&event, tracker.snapshot(), None);
+            manager.mjai_bus.send(event.into()).unwrap();
+        }
+        let request = DecisionRequest {
+            context: manager.monitor.snapshot().context,
+            window: Some(InputWindow::Majsoul(budget)),
+        };
+        let mut reply = crate::bot::BotResponse {
+            request: Some(request),
+            action: MjaiEvent::Dahai {
+                actor: 0,
+                pai: "N".into(),
+                tsumogiri: true,
+            },
+            meta: None,
+        };
+        reply.set_control(DecisionControl {
+            context: request.context,
+            window: Some(request.window.unwrap().proof()),
+            source: DecisionSource::NativeStandby,
+            primary: RunnerHealth::Recovering {
+                through: 2,
+                reason: "late".into(),
+            },
+            standby: RunnerHealth::Ready { through: 3 },
+        });
+        manager.apply_pending_protocol(&mut rx).await;
+        // This offline test supplies an available fake browser; production
+        // sync_ui reads the actual page handle and final capture separately.
+        let mut env =
+            ui_input::environment(&manager.ctx, &manager.cfg, true, &manager.monitor).await;
+        env.manual = false; // fake browser has no human pointer owner
+        manager.ui.lock().unwrap().synchronize(env, Instant::now());
+        let decision = manager.read_decision(&reply).await.unwrap();
+        assert_eq!(decision.request, request);
+        let mut ui = manager.ui.lock().unwrap();
+        assert!(ui.begin_decision(decision.request, 0).is_some(), "{ui:?}");
+        assert_eq!(manager.state.last_self_tsumo.as_deref(), Some("N"));
+    }
 }
