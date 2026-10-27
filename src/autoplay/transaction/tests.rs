@@ -158,7 +158,9 @@ impl Harness {
             100,
             self.now
         ));
-        assert!(self.controller.dispatched(permit, true, self.now));
+        assert!(self
+            .controller
+            .dispatched(permit, true, &self.facts, self.now));
         permit
     }
     fn command(&mut self, kind: InputKind) {
@@ -216,6 +218,245 @@ fn both_site_observations_use_the_same_discard_and_client_confirmation_lifetime(
             h.now
         ));
     }
+}
+
+#[test]
+fn manual_yield_resumes_the_same_abort_action_with_a_new_single_use_permit() {
+    for site in ["canvas", "dom"] {
+        let action = MjaiEvent::Ryukyoku {
+            deltas: None,
+            tehais: None,
+            scores: None,
+            reason: None,
+        };
+        let mut h = Harness::new(
+            site,
+            action.clone(),
+            vec![press(
+                PressRole::Action,
+                &action,
+                Confirmation::ClientCommand,
+            )],
+        );
+        let old = h.permit();
+        h.facts.manual = true;
+        h.facts.owner.manual += 1;
+        assert!(matches!(h.next(), Effect::YieldManual));
+        assert_eq!(h.controller.phase(), Some(Phase::PausedManual));
+        assert!(!h
+            .controller
+            .consume(old, &h.facts, &h.observation, (125., 530.), 100, h.now));
+        h.now += Duration::from_millis(500);
+        assert!(matches!(h.next(), Effect::YieldManual));
+        h.facts.manual = false;
+        // Re-observe geometry rather than reviving the old point or permit.
+        h.observation.target.as_mut().unwrap().bounds.x += 5.;
+        let next = h.permit();
+        assert_ne!(next, old);
+        assert!(!h
+            .controller
+            .consume(old, &h.facts, &h.observation, (125., 530.), 100, h.now));
+        assert!(h
+            .controller
+            .consume(next, &h.facts, &h.observation, (125., 530.), 100, h.now));
+        assert!(h.controller.dispatched(next, true, &h.facts, h.now));
+        h.command(InputKind::Other);
+        assert_eq!(h.outcome(), Outcome::ClientAccepted);
+    }
+}
+
+#[test]
+fn manual_yield_before_press_is_handled_at_travel_gate_and_final_consume() {
+    for boundary in 0..3 {
+        let action = discard();
+        let mut h = Harness::new(
+            "either",
+            action.clone(),
+            vec![press(
+                PressRole::Discard,
+                &action,
+                Confirmation::ClientCommand,
+            )],
+        );
+        let permit = if boundary == 0 {
+            assert!(matches!(h.next(), Effect::Pace { .. }));
+            assert!(h.controller.paced(h.now));
+            None
+        } else {
+            Some(h.permit())
+        };
+        h.facts.manual = true;
+        h.facts.owner.manual += 1;
+        match boundary {
+            0 => {
+                // The common pacing walk precedes permission creation.
+                h.controller.approach_failed(&h.facts, h.now);
+            }
+            1 => assert!(!h
+                .controller
+                .dispatched(permit.unwrap(), false, &h.facts, h.now)),
+            _ => assert!(!h.controller.consume(
+                permit.unwrap(),
+                &h.facts,
+                &h.observation,
+                (125., 530.),
+                100,
+                h.now
+            )),
+        }
+        assert_eq!(h.controller.phase(), Some(Phase::PausedManual));
+        h.facts.manual = false;
+        h.dispatch();
+        h.command(InputKind::Discard);
+        assert_eq!(h.outcome(), Outcome::ClientAccepted);
+    }
+}
+
+#[test]
+fn manual_yield_never_extends_deadline_or_reuses_a_changed_context_window_or_input() {
+    for change in 0..9 {
+        let action = discard();
+        let mut h = Harness::new(
+            "either",
+            action.clone(),
+            vec![press(
+                PressRole::Discard,
+                &action,
+                Confirmation::ClientCommand,
+            )],
+        );
+        h.permit();
+        h.facts.manual = true;
+        h.facts.owner.manual += 1;
+        assert!(matches!(h.next(), Effect::YieldManual));
+        h.facts.manual = false;
+        match change {
+            0 => h.now += Duration::from_secs(20),
+            1 => h.facts.context.as_mut().unwrap().event_seq += 1,
+            2 => h.facts.window = Some("another-window".into()),
+            3 => {
+                h.watch.note_sent(InputKind::Discard);
+                h.facts.input = h.watch.ticket();
+            }
+            4 => h.facts.owner.session += 1,
+            5 => h.facts.owner.table += 1,
+            6 => h.facts.owner.settings += 1,
+            7 => {
+                h.observation.target.as_mut().unwrap().identity.window =
+                    "different-native-window".into()
+            }
+            _ => h
+                .observation
+                .target
+                .as_mut()
+                .unwrap()
+                .identity
+                .hand
+                .reverse(),
+        }
+        assert!(matches!(h.outcome(), Outcome::Cancelled(_)));
+    }
+}
+
+#[test]
+fn a_manual_revision_between_polls_revokes_permission_even_after_the_mouse_has_rested() {
+    let action = discard();
+    let mut h = Harness::new(
+        "either",
+        action.clone(),
+        vec![press(
+            PressRole::Discard,
+            &action,
+            Confirmation::ClientCommand,
+        )],
+    );
+    let old = h.permit();
+    h.facts.owner.manual += 1;
+    assert!(matches!(h.next(), Effect::YieldManual));
+    let next = h.permit();
+    assert_ne!(next, old);
+    assert!(!h
+        .controller
+        .consume(old, &h.facts, &h.observation, (125., 530.), 100, h.now));
+    assert!(h
+        .controller
+        .consume(next, &h.facts, &h.observation, (125., 530.), 100, h.now));
+}
+
+#[test]
+fn manual_input_after_dispatch_preserves_acknowledgement_and_never_repeats_the_press() {
+    let action = discard();
+    let mut h = Harness::new(
+        "either",
+        action.clone(),
+        vec![press(
+            PressRole::Discard,
+            &action,
+            Confirmation::ClientCommand,
+        )],
+    );
+    let old = h.dispatch();
+    h.facts.manual = true;
+    h.facts.owner.manual += 1;
+    h.command(InputKind::Discard);
+    assert_eq!(h.outcome(), Outcome::ClientAccepted);
+    assert!(!h
+        .controller
+        .consume(old, &h.facts, &h.observation, (125., 530.), 100, h.now));
+}
+
+#[test]
+fn an_unknown_partial_dispatch_is_not_retried_as_a_manual_yield() {
+    let action = discard();
+    let mut h = Harness::new(
+        "either",
+        action.clone(),
+        vec![press(
+            PressRole::Discard,
+            &action,
+            Confirmation::ClientCommand,
+        )],
+    );
+    let permit = h.permit();
+    assert!(h
+        .controller
+        .consume(permit, &h.facts, &h.observation, (125., 530.), 100, h.now));
+    h.facts.manual = true;
+    h.facts.owner.manual += 1;
+    assert!(!h.controller.dispatched(permit, false, &h.facts, h.now));
+    assert_eq!(
+        h.outcome(),
+        Outcome::Cancelled(CancelReason::DispatchUnknown)
+    );
+}
+
+#[test]
+fn manual_yield_before_geometry_uses_the_real_clock_once_without_extending_it() {
+    let action = discard();
+    let mut h = Harness::new(
+        "either",
+        action.clone(),
+        vec![press(
+            PressRole::Discard,
+            &action,
+            Confirmation::ClientCommand,
+        )],
+    );
+    h.facts.manual = true;
+    h.observation.ready = false;
+    assert!(matches!(h.next(), Effect::YieldManual));
+    // The real window grants 20 seconds; initial readiness was only 8 seconds.
+    h.now += Duration::from_secs(12);
+    h.facts.manual = false;
+    h.observation.ready = true;
+    // A later observation may not restart the original clock.
+    h.observation.clock.as_mut().unwrap().started_at = h.now;
+    let permit = h.permit();
+    h.now += Duration::from_secs(9);
+    assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Expired));
+    assert!(!h
+        .controller
+        .consume(permit, &h.facts, &h.observation, (125., 530.), 100, h.now));
 }
 
 #[test]
@@ -318,7 +559,7 @@ fn declaration_echo_is_one_exact_continuation_and_never_completes_the_declaring_
     assert!(h
         .controller
         .consume(permit, &h.facts, &h.observation, (125., 530.), 100, h.now));
-    assert!(h.controller.dispatched(permit, true, h.now));
+    assert!(h.controller.dispatched(permit, true, &h.facts, h.now));
     assert!(
         matches!(h.next(), Effect::Observe),
         "declaration echo cannot finish final discard"
@@ -456,11 +697,15 @@ fn final_mouse_permission_rechecks_every_owner_context_input_and_physical_target
                 100,
                 h.now
             ));
-            assert!(!h.controller.dispatched(permit, true, h.now));
-            assert!(matches!(
-                h.controller.phase(),
-                Some(Phase::Finished(Outcome::Cancelled(_)))
-            ));
+            assert!(!h.controller.dispatched(permit, true, &h.facts, h.now));
+            if change == 1 || change == 5 {
+                assert_eq!(h.controller.phase(), Some(Phase::PausedManual));
+            } else {
+                assert!(matches!(
+                    h.controller.phase(),
+                    Some(Phase::Finished(Outcome::Cancelled(_)))
+                ));
+            }
         }
     }
 }
@@ -521,7 +766,7 @@ fn expired_clocks_invalid_geometry_and_unknown_dispatch_never_grant_another_pres
         )],
     );
     let permit = h.permit();
-    assert!(!h.controller.dispatched(permit, false, h.now));
+    assert!(!h.controller.dispatched(permit, false, &h.facts, h.now));
     assert_eq!(
         h.outcome(),
         Outcome::Cancelled(CancelReason::DispatchUnknown)
@@ -550,8 +795,8 @@ fn retries_are_bounded_single_use_and_a_late_ack_cannot_be_transplanted_from_ano
         assert!(h
             .controller
             .consume(permit, &h.facts, &h.observation, (125., 530.), 100, h.now));
-        assert!(!h.controller.dispatched(old, true, h.now));
-        assert!(h.controller.dispatched(permit, true, h.now));
+        assert!(!h.controller.dispatched(old, true, &h.facts, h.now));
+        assert!(h.controller.dispatched(permit, true, &h.facts, h.now));
         h.command(InputKind::Discard);
         h.facts.context.as_mut().unwrap().event_seq += 1;
         h.facts.window = Some("unrelated-window".into());

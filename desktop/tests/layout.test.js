@@ -1,7 +1,7 @@
 // @ts-check
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { MIN, RATIO, SIZE, conform, framedRatio, gameBounds, handOnGame, onGame, openingSize, restoredBounds, settle, trailBounds } from '../src/layout.js'
+import { MIN, RATIO, SIZE, conform, framedRatio, gameBounds, handOnGame, manualPointerArea, onGame, openingSize, restoredBounds, settle, trailBounds } from '../src/layout.js'
 
 test('a fresh window opens at its own size, or as much of it as the display has room for', () => {
   assert.deepEqual(openingSize({ width: 2560, height: 1400 }), SIZE)
@@ -65,6 +65,19 @@ test("the user's hand is on the game while the cursor moves inside it, and off o
   assert.equal(handOnGame({ x: 50, y: 300 }, area, 1000, 1100, 400), false, 'beside the game')
   assert.equal(handOnGame({ x: 600, y: 900 }, area, 1000, 1100, 400), false, 'over the dock')
   assert.equal(handOnGame({ x: 600, y: 300 }, null, 1000, 1100, 400), false, 'no game shown')
+})
+
+test('three overlapping accounts attribute the real cursor only to the focused visible game', () => {
+  const content = { x: 100, y: 50, width: 1200, height: 900 }
+  const game = { x: 0, y: 0, width: 1200, height: 675 }
+  const point = { x: 600, y: 300 }
+  const active = [false, true, false].map(focused => {
+    const area = manualPointerArea(content, game, focused, false)
+    return handOnGame(point, area, 1000, 1200, 400)
+  })
+  assert.deepEqual(active, [false, true, false])
+  assert.equal(manualPointerArea(content, game, true, true), null)
+  assert.equal(manualPointerArea(content, null, true, false), null)
 })
 
 test('the cursor over the game view is read in the view\'s own pixels', () => {

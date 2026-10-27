@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url'
 import { Core } from './core.js'
 import { TEXT_MAX, toGame } from './input.js'
 import { Journal, chromiumSwitches, hasChromiumLog, prune, runName } from './journal.js'
-import { MIN, conform, gameBounds, handOnGame, onGame, onView, openingSize, restoredBounds, trailBounds } from './layout.js'
+import { MIN, conform, gameBounds, handOnGame, manualPointerArea, onGame, onView, openingSize, restoredBounds, trailBounds } from './layout.js'
 import { registerDockScheme, serveDock } from './dock.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, WEBGL_CONTEXTS, processLine, worthKeeping } from './watch.js'
@@ -474,7 +474,7 @@ function watchCursor() {
     cursorAt = point
     cursorMovedAt = now
   }
-  const area = gameAt && !window.isMinimized() ? trailBounds(window.getContentBounds(), gameAt) : null
+  const area = manualPointerArea(window.getContentBounds(), gameAt, window.isFocused(), window.isMinimized())
   const active = handOnGame(point, area, cursorMovedAt, now, USER_STILL_MS)
   if (active !== userActive) {
     userActive = active

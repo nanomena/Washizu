@@ -287,7 +287,7 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
         panic!("declaration target must be permitted");
     };
     assert!(controller.consume(permit, &facts, &observation, (125.0, 420.0), 100, now));
-    assert!(controller.dispatched(permit, true, now));
+    assert!(controller.dispatched(permit, true, &facts, now));
     assert_eq!(controller.phase(), Some(TurnPhase::WaitingDeclaration));
     assert_eq!(controller.intent().unwrap().role, PressRole::Declaration);
     // Real own REACH, not an invented follow-up event; no declaration button
@@ -345,7 +345,7 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
         panic!("declaring discard permit")
     };
     assert!(controller.consume(permit, &facts, &discard, (125.0, 420.0), 100, now));
-    assert!(controller.dispatched(permit, true, now));
+    assert!(controller.dispatched(permit, true, &facts, now));
     assert!(
         matches!(
             controller.next(&facts, Some(&discard), now),

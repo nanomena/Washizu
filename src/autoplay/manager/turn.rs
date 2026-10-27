@@ -204,6 +204,11 @@ impl AutoplayManager {
             };
             match effect {
                 Effect::Observe => tokio::time::sleep(Duration::from_millis(20)).await,
+                Effect::YieldManual => {
+                    prepared = None;
+                    self.hand.cancel();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
                 Effect::WaitUntil(at) => {
                     tokio::time::sleep_until(
                         at.min(Instant::now() + Duration::from_millis(20)).into(),
@@ -249,7 +254,9 @@ impl AutoplayManager {
                                 continue;
                             }
                         };
-                    self.turn.lock().unwrap().paced(pacing.start_at);
+                    if !self.turn.lock().unwrap().paced(pacing.start_at) {
+                        continue;
+                    }
                     let point =
                         pointer::aim::target(target.bounds, self.hand.at(), &mut rand::rng());
                     let glance = if pacing.hesitate {
@@ -293,13 +300,25 @@ impl AutoplayManager {
                         )
                         .await
                     {
+                        prepared = None;
+                        self.hand.cancel();
                         continue;
                     }
                     if !self.hand.walk(&approach).await {
+                        let current = facts(
+                            &self.ctx,
+                            &self.cfg,
+                            &self.monitor,
+                            decision.platform,
+                            &self.turn,
+                        )
+                        .await;
                         self.turn
                             .lock()
                             .unwrap()
-                            .cancel(CancelReason::DispatchUnknown);
+                            .approach_failed(&current, Instant::now());
+                        prepared = None;
+                        self.hand.cancel();
                         continue;
                     }
                     prepared = Some((target.identity.clone(), point));
@@ -338,6 +357,7 @@ impl AutoplayManager {
                     let monitor = self.monitor.clone();
                     let turn = self.turn.clone();
                     let adapter = adapter.clone();
+                    let platform = decision.platform;
                     let decision = decision.clone();
                     let selected = action.clone();
                     let pressed = self
@@ -374,10 +394,12 @@ impl AutoplayManager {
                             },
                         )
                         .await;
+                    let current =
+                        facts(&self.ctx, &self.cfg, &self.monitor, platform, &self.turn).await;
                     self.turn
                         .lock()
                         .unwrap()
-                        .dispatched(permit, pressed, Instant::now());
+                        .dispatched(permit, pressed, &current, Instant::now());
                     viewport = Some(target.viewport);
                 }
                 Effect::Finished { outcome, reload } => {
@@ -415,7 +437,7 @@ impl AutoplayManager {
                     .unwrap()
                     .next(&current, None, Instant::now())
             };
-            if matches!(effect, Effect::Finished { .. }) {
+            if matches!(effect, Effect::Finished { .. } | Effect::YieldManual) {
                 return false;
             }
             let now = Instant::now();

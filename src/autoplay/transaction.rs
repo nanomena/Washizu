@@ -22,6 +22,14 @@ pub struct Owner {
     pub manual: u64,
 }
 
+impl Owner {
+    fn same_scope(self, other: Self) -> bool {
+        self.session == other.session
+            && self.table == other.table
+            && self.settings == other.settings
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Binding {
     pub context: DecisionContext,
@@ -90,6 +98,7 @@ pub enum Phase {
     Preparing,
     WaitingReady,
     WaitingPacing,
+    PausedManual,
     Permitted,
     Dispatching,
     WaitingCommand,
@@ -99,6 +108,7 @@ pub enum Phase {
 
 pub enum Effect {
     Observe,
+    YieldManual,
     Pace {
         clock: TurnClockFacts,
     },
@@ -132,6 +142,7 @@ struct Run {
     native_window: Option<String>,
     may_rebind: bool,
     revealed: Option<(TargetIdentity, Instant)>,
+    clock: Option<TurnClockFacts>,
     deadline: Instant,
     verify_at: Instant,
     ready_at: Instant,
@@ -191,6 +202,7 @@ impl TurnController {
             native_window: None,
             may_rebind: false,
             revealed: None,
+            clock: None,
             deadline: now + Duration::from_millis(u64::from(settings.ready_ms)),
             verify_at: now,
             ready_at: now,
@@ -274,9 +286,25 @@ impl TurnController {
                 reload: run.reload,
             };
         }
-        if !facts.enabled || facts.manual || facts.owner != run.binding.owner {
+        if !facts.enabled || !facts.owner.same_scope(run.binding.owner) {
             run.finish(Outcome::Cancelled(CancelReason::Ownership));
             return run.effect();
+        }
+        // Readiness and manual input may precede target binding. Anchor the
+        // real protocol clock once, rather than expiring a paused turn by the
+        // provisional readiness timeout or restarting its budget on resume.
+        if run.clock.is_none()
+            && facts.context == Some(run.binding.context)
+            && facts.window.as_deref() == Some(run.binding.window.as_str())
+            && facts.input == run.binding.input
+        {
+            if let Some(clock) = observation.and_then(|observation| observation.clock) {
+                run.deadline = clock.started_at
+                    + Duration::from_millis(
+                        u64::from(clock.fixed_ms) + u64::from(clock.bank_at_start_ms.unwrap_or(0)),
+                    );
+                run.clock = Some(clock);
+            }
         }
         // A server echo is independent evidence. Never label mouse dispatch as accepted.
         if run.committed
@@ -353,10 +381,27 @@ impl TurnController {
             run.finish(Outcome::Cancelled(CancelReason::Context));
             return run.effect();
         }
-        if matches!(
-            run.phase,
-            Phase::WaitingPacing | Phase::Permitted | Phase::Dispatching
-        ) {
+        if run.phase == Phase::Dispatching {
+            return Effect::Observe;
+        }
+        if run.phase != Phase::PausedManual
+            && (facts.manual || facts.owner.manual != run.binding.owner.manual)
+        {
+            run.pause_manual();
+            return Effect::YieldManual;
+        }
+        if run.phase == Phase::PausedManual {
+            if facts.manual {
+                return Effect::YieldManual;
+            }
+            // Only the manual revision may change. The real context, window,
+            // input ticket, session/settings and original deadline survived
+            // the checks above; the next target is observed and bound anew.
+            run.binding.owner.manual = facts.owner.manual;
+            run.phase = Phase::WaitingReady;
+            tracing::info!(context=?run.binding.context, "autoplay: selected turn resumed after manual input; resolving a fresh target");
+        }
+        if matches!(run.phase, Phase::WaitingPacing | Phase::Permitted) {
             return Effect::Observe;
         }
         if now < run.ready_at {
@@ -390,14 +435,10 @@ impl TurnController {
             return run.effect();
         }
         if run.pacing_at.is_none() {
-            let Some(clock) = observation.clock else {
+            let Some(clock) = run.clock else {
                 run.finish(Outcome::Cancelled(CancelReason::UnknownClock));
                 return run.effect();
             };
-            run.deadline = clock.started_at
-                + Duration::from_millis(
-                    u64::from(clock.fixed_ms) + u64::from(clock.bank_at_start_ms.unwrap_or(0)),
-                );
             if now >= run.deadline {
                 run.finish(Outcome::Cancelled(CancelReason::Expired));
                 return run.effect();
@@ -457,18 +498,41 @@ impl TurnController {
             });
         if current {
             run.phase = Phase::Dispatching;
+        } else if run.manual_interruption(facts, now) {
+            run.pause_manual();
         } else {
             run.finish(Outcome::Cancelled(CancelReason::Target));
         }
         current
     }
 
-    pub fn dispatched(&mut self, permit: Permit, sent: bool, now: Instant) -> bool {
+    /// Travel has no mouse-down. A manual interruption can yield the same
+    /// selected action; an unexplained physical failure remains terminal.
+    pub fn approach_failed(&mut self, facts: &Facts, now: Instant) {
+        let Some(run) = &mut self.run else { return };
+        if !matches!(
+            run.phase,
+            Phase::Preparing | Phase::WaitingReady | Phase::WaitingPacing
+        ) {
+            return;
+        }
+        if run.manual_interruption(facts, now) {
+            run.pause_manual();
+        } else {
+            run.finish(Outcome::Cancelled(CancelReason::DispatchUnknown));
+        }
+    }
+
+    pub fn dispatched(&mut self, permit: Permit, sent: bool, facts: &Facts, now: Instant) -> bool {
         let Some(run) = &mut self.run else {
             return false;
         };
         if run.phase == Phase::Permitted && run.permit == Some(permit) && !sent {
-            run.finish(Outcome::Cancelled(CancelReason::DispatchUnknown));
+            if run.manual_interruption(facts, now) {
+                run.pause_manual();
+            } else {
+                run.finish(Outcome::Cancelled(CancelReason::DispatchUnknown));
+            }
             return false;
         }
         if run.id != permit.run || run.phase != Phase::Dispatching || run.permit != Some(permit) {
@@ -508,6 +572,25 @@ impl TurnController {
 }
 
 impl Run {
+    fn manual_interruption(&self, facts: &Facts, now: Instant) -> bool {
+        (facts.manual || facts.owner.manual != self.binding.owner.manual)
+            && facts.enabled
+            && facts.owner.same_scope(self.binding.owner)
+            && facts.context == Some(self.binding.context)
+            && facts.window.as_deref() == Some(self.binding.window.as_str())
+            && facts.input == self.binding.input
+            && now < self.deadline
+    }
+
+    fn pause_manual(&mut self) {
+        if self.phase != Phase::PausedManual {
+            tracing::info!(context=?self.binding.context, "autoplay: selected turn paused for manual input; old permission revoked");
+        }
+        self.phase = Phase::PausedManual;
+        self.permit = None;
+        self.target = None;
+    }
+
     fn finish(&mut self, outcome: Outcome) {
         self.phase = Phase::Finished(outcome);
         self.permit = None;
