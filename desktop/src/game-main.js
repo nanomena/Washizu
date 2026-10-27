@@ -13,15 +13,9 @@
 //   --spout=<file>    the Spout sender (Windows; default: the packaged one)
 // Each can also be given as AKAGI_DATA, AKAGI_CORE, AKAGI_DOCK, AKAGI_CDP_PORT, AKAGI_SPOUT.
 //
-// The game is shown one of two ways, as `view.json` in the data folder says
-// (the settings tab writes it; it takes effect at the next start):
-//   window     the game's page is a view in this window, where the dock's stage is
-//   offscreen  the game's page is drawn offscreen, always at 1280 × 720 CSS
-//              pixels and twice that in pixels; its frames go on the GPU to the
-//              dock, which shows them on its stage and sends the user's mouse
-//              and keyboard back (`relay.js`, `input.js`), and — on Windows,
-//              when asked — to a Spout sender for a streaming program. The
-//              window's size, screen and scale then never touch the game.
+// The game is always drawn offscreen at fixed 1280 × 720 CSS pixels and scale 2.
+// GPU textures go to the dock and, while OBS output is enabled, the Windows
+// Spout sender. Window size and display scaling never change the game's canvas.
 
 import { BaseWindow, BrowserWindow, Menu, WebContentsView, app, clipboard, dialog, ipcMain, screen, sharedTexture } from 'electron'
 import { spawn } from 'node:child_process'
@@ -29,20 +23,17 @@ import fs from 'node:fs'
 import { createServer } from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Board } from './board.js'
 import { Core } from './core.js'
-import { Feed } from './feed.js'
-import { FrameSource } from './frames.js'
 import { TEXT_MAX, toGame } from './input.js'
 import { Journal, chromiumSwitches, hasChromiumLog, prune, runName } from './journal.js'
 import { MIN, conform, gameBounds, handOnGame, onGame, onView, openingSize, restoredBounds, trailBounds } from './layout.js'
 import { registerDockScheme, serveDock } from './dock.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
-import { STREAM_FPS, StreamServer, newToken, streamUrl } from './stream.js'
 import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, WEBGL_CONTEXTS, processLine, worthKeeping } from './watch.js'
 import { keepWorkersRunning } from './workers.js'
 import { contentSize, holdRatio } from './window-frame.js'
 import { ProfileStore, PLATFORMS, homePlatform } from './profiles.js'
+import { readObsPreference, saveObsPreference, spoutSenderName } from './view-preferences.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** The interface's address. A scheme of its own, so the page has an origin and absolute paths. */
@@ -64,14 +55,9 @@ if (homePlatform(DATA) !== PROFILE.platform) throw new Error('档案的平台与
 const CORE = path.resolve(option('core') || (app.isPackaged ? path.join(process.resourcesPath, 'core', CORE_NAME) : path.join(HERE, '..', '..', 'target', 'release', CORE_NAME)))
 const DOCK_FILES = path.resolve(option('dock') || (app.isPackaged ? path.join(process.resourcesPath, 'dock') : path.join(HERE, '..', '..', 'frontend', 'dist')))
 const WINDOW_STATE = path.join(DATA, 'window.json')
-/** The user's own pages for the streaming program, served beside the stream while it is. */
-const STREAM_PAGES = path.join(DATA, 'stream-pages')
-/** How the game is shown (`window` or `offscreen`), and whether a Spout sender is run; the shell's own, kept here. */
-const VIEW_STATE = path.join(DATA, 'view.json')
 const SPOUT = path.resolve(option('spout') || (app.isPackaged ? path.join(process.resourcesPath, 'spout', 'spout-sender.exe') : path.join(HERE, '..', 'native', 'spout', 'build', 'spout-sender.exe')))
 /** The name a streaming program finds the game's frames under. */
-// Existing OBS sources keep their external sender identity across the rename.
-const SPOUT_NAME = 'Akagi'
+const SPOUT_NAME = spoutSenderName(PROFILE)
 /**
  * The game rendered offscreen: its page's size in CSS pixels, how many pixels
  * each is drawn with, and how many frames a second. Mahjong Soul draws its
@@ -79,9 +65,6 @@ const SPOUT_NAME = 'Akagi'
  * pixel of the frame; a streaming program scales that down to its output.
  */
 const OFFSCREEN = Object.freeze({ width: 1280, height: 720, scale: 2, fps: 60 })
-/** The page offscreen comes back after the GPU process is lost this many times in `GPU_LOSS_WINDOW_MS`; after that, the window view is used from the next start. */
-const GPU_LOSSES = 2
-const GPU_LOSS_WINDOW_MS = 10 * 60 * 1000
 /** Where the shell's record and Chromium's go, beside the core's run folders; and this start's name for its files. */
 const LOGS = path.join(DATA, 'logs')
 const RUN = option('run') || runName()
@@ -101,9 +84,6 @@ const freePort = () => new Promise((done, fail) => {
 let window = null
 /** @type {WebContentsView | null} */
 let dock = null
-/** The game's page in this window (the window view). */
-/** @type {WebContentsView | null} */
-let game = null
 /** The game's page drawn offscreen, in a window that is never shown. */
 /** @type {BrowserWindow | null} */
 let offscreenGame = null
@@ -111,9 +91,9 @@ let offscreenGame = null
 let relay = null
 /** @type {SpoutTaker | null} */
 let spout = null
-/** When the GPU process was last lost while the game was drawn offscreen. */
-/** @type {number[]} */
-let gpuLosses = []
+/** A pending reload after a GPU process loss; repeated notifications share it. */
+/** @type {NodeJS.Timeout | undefined} */
+let gpuReload
 /** @type {Core | null} */
 let core = null
 /** Autoplay's pointer, drawn over the game while the option is on. */
@@ -132,38 +112,19 @@ const USER_STILL_MS = 150
 /** @type {import('./layout.js').Rect | null} */
 let gameAt = null
 /**
- * The window's options as the core last saved them, the build's version, and
- * where the stream is served while it is.
+ * The core's monitor preferences and this shell's single OBS output contract.
  * @typedef {{ pointer_trail?: boolean, pointer_lean?: boolean,
  *   quick_confirm?: boolean, auto_win?: boolean, auto_continue?: boolean,
- *   stream_output?: boolean, stream_port?: number, stream_token?: string, stream_url?: string, version?: string,
- *   game_view?: GameView, game_view_now?: GameView, spout_output?: boolean, spout_available?: boolean,
- *   spout_state?: string, spout_name?: string, platform?: 'Majsoul' | 'Tenhou', profile_name?: string }} Options
- * @typedef {'window' | 'offscreen'} GameView
+ *   version?: string, obs_output?: boolean, obs_available?: boolean,
+ *   obs_state?: 'off' | 'starting' | 'sending' | 'failed' | 'stopped',
+ *   obs_name?: string, platform?: 'Majsoul' | 'Tenhou', profile_name?: string }} Options
  */
 /** @type {Options} */
 let options = {}
-/** How the game is to be shown, and whether to send it to a streaming program over Spout, as last chosen. */
-const viewChoice = readView()
-/** How the game is shown in this run: chosen at the start, kept to the end. */
-const GAME_VIEW = viewChoice.game_view
-/** Whether a Spout sender can run here. */
+/** The account's only output preference; the renderer always remains offscreen. */
+let obsEnabled = readObsPreference(DATA)
+/** Whether a Windows Spout2 sender is installed. */
 const SPOUT_AVAILABLE = process.platform === 'win32' && fs.existsSync(SPOUT)
-/** The game offered to a streaming program: served while the option is on, drawn for it while anyone watches. */
-/** @type {StreamServer | null} */
-let stream = null
-/** What the table is doing, kept from the core's snapshots for the stream's `/feed`; nothing about the bot. */
-const feed = new Feed({ readResults: () => running().call('get_history'), log: note })
-/** What the pages beside the stream share; kept while the application runs, through the stream going off and on. */
-const board = new Board()
-/** @type {FrameSource | null} */
-let frames = null
-/** @type {NodeJS.Timeout | undefined} */
-let framesIdle
-/** The stream being served at start: the interface is told the options once it is. */
-let streamStarting = Promise.resolve()
-/** Whether the core has been given the game view: frames are only taken from a view that is set up. */
-let gameOpen = false
 let cdpPort = 0
 let quitting = false
 let stoppingCore = false
@@ -188,41 +149,24 @@ function readJson(/** @type {string} */ file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null }
 }
 
-/** @returns {{ game_view: GameView, spout: boolean }} */
-function readView() {
-  const saved = /** @type {Record<string, unknown> | null} */ (readJson(VIEW_STATE))
-  return { game_view: saved?.game_view === 'offscreen' ? 'offscreen' : 'window', spout: saved?.spout === true }
-}
-
-function saveView() {
-  try { fs.writeFileSync(VIEW_STATE, JSON.stringify(viewChoice)) } catch (error) { note(`view: not saved: ${error instanceof Error ? error.message : error}`) }
-}
-
-/** The options about the game's view, as the interface is told them. */
-function viewOptions() {
+/** The shell-owned output settings; no output address or rendering mode exists. @returns {Options} */
+function obsOptions() {
   return {
-    game_view: viewChoice.game_view, game_view_now: GAME_VIEW, spout_output: viewChoice.spout, spout_available: SPOUT_AVAILABLE,
-    spout_state: GAME_VIEW !== 'offscreen' || !viewChoice.spout ? 'off' : spout?.state ?? 'starting', spout_name: SPOUT_NAME,
+    obs_output: obsEnabled, obs_available: SPOUT_AVAILABLE, obs_name: SPOUT_NAME,
+    obs_state: !obsEnabled ? 'off' : !SPOUT_AVAILABLE ? 'failed' : spout?.state ?? (relay ? 'starting' : 'stopped'),
   }
 }
 
 /** Tell the interface the options again, for a change it did not ask for. */
 function tellOptions() {
-  options = { ...options, ...viewOptions() }
+  options = { ...options, ...obsOptions() }
   dock?.webContents.send('akagi:event', 'monitor-options', options)
 }
 
 /** @param {import('./core.js').Ready} ready */
 function openWindow(ready) {
   if (ready.platform !== PROFILE.platform) throw new Error('core 返回的平台与账号档案不一致。')
-  options = { ...ready.monitor, version: ready.version, ...viewOptions(), platform: PROFILE.platform, profile_name: PROFILE.name }
-  if (options.stream_output) {
-    // Served from the start, at the address the streaming program already has.
-    streamStarting = startStream().catch(error => {
-      note(`stream: not served: ${error instanceof Error ? error.message : error}`)
-      options = { ...options, stream_output: false }
-    })
-  }
+  options = { ...ready.monitor, version: ready.version, ...obsOptions(), platform: PROFILE.platform, profile_name: PROFILE.name }
   const saved = restoredBounds(readJson(WINDOW_STATE), screen.getAllDisplays().map(display => display.workArea))
   const size = saved ?? openingSize(screen.getPrimaryDisplay().workAreaSize)
   const frame = window = new BaseWindow({
@@ -274,35 +218,21 @@ function openWindow(ready) {
     try { fs.writeFileSync(WINDOW_STATE, JSON.stringify({ x, y, ...contentSize(frame) })) } catch { /* where the window was is a convenience */ }
   })
   frame.on('closed', () => {
-    frames?.stop()
-    void stream?.close()
-    feed.close()
-    spout?.stop()
+    clearTimeout(gpuReload)
+    stopSpout()
     // Views outlive the window they were in unless they are closed.
-    game?.webContents.close()
     offscreenGame?.destroy()
     view.webContents.close()
     trail?.destroy()
-    window = dock = game = offscreenGame = trail = null
+    window = dock = offscreenGame = trail = null
     relay = spout = null
     app.quit()
   })
 }
 
-/** The game's page, whichever way it is shown. */
+/** The game's offscreen page. */
 function gamePage() {
-  return game?.webContents ?? offscreenGame?.webContents ?? null
-}
-
-/** The game view: its own session, no way into the shell, and never put to sleep. */
-function createGame() {
-  // `backgroundThrottling: false` keeps the page live — drawing, and taking the
-  // input autoplay sends it — while the window is covered or minimized.
-  const view = new WebContentsView({ webPreferences: { partition: GAME_PARTITION, sandbox: true, contextIsolation: true, backgroundThrottling: false } })
-  view.setBackgroundColor('#000000')
-  guardGame(view.webContents)
-  watchGame(view.webContents, null)
-  return view
+  return offscreenGame?.webContents ?? null
 }
 
 /**
@@ -339,9 +269,9 @@ function createOffscreenGame() {
   return win
 }
 
-/** Run the Spout sender while it is asked for and the game is drawn offscreen, and not otherwise. */
+/** The OBS switch controls the sender only; the offscreen game is independent. */
 function startSpout() {
-  if (!relay || !viewChoice.spout || !SPOUT_AVAILABLE) {
+  if (!relay || !obsEnabled || !SPOUT_AVAILABLE) {
     stopSpout()
     return
   }
@@ -357,7 +287,7 @@ function stopSpout() {
   spout = null
 }
 
-/** What the game's page may do, either way it is shown. @param {Electron.WebContents} page */
+/** What the game's offscreen page may do. @param {Electron.WebContents} page */
 function guardGame(page) {
   const web = (/** @type {string} */ url) => /^https?:\/\//i.test(url)
   page.on('will-navigate', (event, url) => { if (!web(url)) event.preventDefault() })
@@ -466,25 +396,25 @@ async function collectGameGarbage() {
 }
 
 /**
- * A page drawn offscreen draws nothing more once the GPU process has gone,
- * though it runs on; only loading it again brings its frames back (the game
- * then reconnects to a table it was at). If that keeps happening, the window
- * view is used from the next start.
+ * A GPU loss invalidates offscreen textures. Report it and reload the same
+ * offscreen target; never change rendering mode or the account preference.
  * @param {Electron.Details} details
  */
 function gpuGone(details) {
   if (!('type' in details) || details.type !== 'GPU' || !offscreenGame) return
-  const now = Date.now()
-  gpuLosses = [...gpuLosses.filter(at => now - at < GPU_LOSS_WINDOW_MS), now]
-  note(`game: the GPU process went (${details.reason}); loading the game again`)
-  if (gpuLosses.length >= GPU_LOSSES && viewChoice.game_view === 'offscreen') {
-    note('game: the window view is used from the next start')
-    viewChoice.game_view = 'window'
-    saveView()
+  const page = offscreenGame.webContents
+  stopSpout()
+  tellOptions()
+  note(`game: GPU process lost (${details.reason}); rebuilding offscreen rendering`)
+  if (gpuReload) return
+  dialog.showErrorBox('Washizu 图形进程中断', '游戏离屏画面已中断，正在重新加载。请核对游戏连接状态后继续。')
+  gpuReload = setTimeout(() => {
+    gpuReload = undefined
+    if (page.isDestroyed()) return
+    page.reload()
+    startSpout()
     tellOptions()
-  }
-  // A moment for the new GPU process to come up.
-  setTimeout(() => offscreenGame?.webContents.reload(), 1000)
+  }, 1000)
 }
 
 /** @param {Electron.WebContents} page @returns {Promise<string>} the page's DevTools target id */
@@ -499,79 +429,11 @@ async function targetOf(page) {
   }
 }
 
-/** Put the game view where the page says its stage is, or out of sight. */
+/** Keep the dock stage's bounds for input and the pointer trail. */
 function placeGame(/** @type {unknown} */ value) {
   const bounds = gameBounds(value)
-  if (offscreenGame) {
-    // The stage shows the frames; where it is matters only to the trail and the user's hand.
-    gameAt = bounds.visible ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null
-    placeTrail()
-    watchStream()
-    return
-  }
-  if (!game) return
-  game.setVisible(bounds.visible)
-  if (bounds.visible) game.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height })
-  gameAt = bounds.visible ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null
+  gameAt = offscreenGame && bounds.visible ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null
   placeTrail()
-  watchStream()
-}
-
-/**
- * Take frames while anyone watches and the game view is on screen, and not
- * otherwise. Being left is given a moment first, so that the streaming program
- * reloading its page does not stop and start them.
- */
-function watchStream() {
-  clearTimeout(framesIdle)
-  const page = gamePage()
-  if (stream && stream.watchers > 0 && page && gameOpen && gameAt) {
-    frames ??= new FrameSource(page.debugger, { onFrame: jpeg => stream?.push(jpeg), fps: STREAM_FPS, log: note })
-    if (!frames.running) note(`stream: taking frames for ${stream.watchers} watching`)
-    frames.start()
-  } else if (frames?.running) {
-    const stop = () => {
-      note('stream: no more frames taken')
-      frames?.stop()
-    }
-    if (stream?.watchers === 0 && gameAt) framesIdle = setTimeout(stop, 3000)
-    else stop()
-  }
-}
-
-/** The options as the interface is told them: with the stream's address while it is served. */
-function withStream(/** @type {Options} */ saved) {
-  return { ...saved, stream_url: stream && saved.stream_output && saved.stream_token ? streamUrl(stream.port, saved.stream_token) : undefined }
-}
-
-/**
- * Serve the stream at the address kept, or at a new one if there is none or
- * its port has been taken since. The core keeps where it ended up.
- */
-async function startStream() {
-  const token = options.stream_token || newToken()
-  const server = stream ?? new StreamServer({ token, onWatchers: watchStream, feed, board, pages: STREAM_PAGES })
-  const port = await server.listen(options.stream_port ?? 0)
-  stream = server
-  if (!options.stream_output || port !== options.stream_port || token !== options.stream_token) {
-    try {
-      const saved = /** @type {Options} */ (await running().call('set_monitor_stream', { enabled: true, port, token }))
-      options = { ...options, ...saved }
-    } catch (error) {
-      await stopStream()
-      throw error
-    }
-  }
-  options = withStream(options)
-}
-
-async function stopStream() {
-  clearTimeout(framesIdle)
-  frames?.stop()
-  frames = null
-  const server = stream
-  stream = null
-  await server?.close()
 }
 
 /**
@@ -610,7 +472,7 @@ function watchCursor() {
     userActive = active
     // Resting over the game, the user's own mouse left the game's pointer where
     // it is: autoplay goes on from there, not from where it last put it.
-    const at = active ? null : onGame(point, area, offscreenGame ? OFFSCREEN : null)
+    const at = active ? null : onGame(point, area, OFFSCREEN)
     core.call('set_user_pointer', at ? { active, x: at.x, y: at.y } : { active }).catch(() => {})
   }
 }
@@ -657,10 +519,7 @@ const commands = {
   get_monitor: () => running().call('get_monitor'),
   get_hand_events: ({ round }) => running().call('get_hand_events', { round: Number(round) }),
   get_history: () => running().call('get_history'),
-  get_monitor_options: async () => {
-    await streamStarting
-    return options
-  },
+  get_monitor_options: async () => options,
   set_monitor_autoplay: ({ enabled }) => running().call('set_monitor_autoplay', { enabled: enabled === true }),
   async set_monitor_lean({ enabled }) {
     const saved = /** @type {{ pointer_lean: boolean }} */ (await running().call('set_monitor_lean', { enabled: enabled === true }))
@@ -688,69 +547,34 @@ const commands = {
     placeTrail()
     return options
   },
-  async set_monitor_stream({ enabled }) {
-    if (enabled === true) {
-      await startStream()
-      return options
-    }
-    await stopStream()
-    const saved = /** @type {Options} */ (await running().call('set_monitor_stream', { enabled: false, port: options.stream_port ?? 0, token: options.stream_token ?? '' }))
-    options = withStream({ ...options, ...saved })
-    return options
-  },
-  /** How the game is shown from the next start: `window` or `offscreen`. */
-  async set_monitor_game_view({ view: chosen }) {
-    if (chosen !== 'window' && chosen !== 'offscreen') throw new Error('Unknown game view.')
-    viewChoice.game_view = chosen
-    saveView()
-    options = { ...options, ...viewOptions() }
-    return options
-  },
-  /** Whether the game's frames are sent to a streaming program over Spout, while the game is drawn offscreen. */
-  async set_monitor_spout({ enabled }) {
-    viewChoice.spout = enabled === true
-    saveView()
+  async set_obs_output({ enabled }) {
+    if (typeof enabled !== 'boolean') throw new Error('OBS output requires an enabled boolean.')
+    if (enabled && !SPOUT_AVAILABLE) throw new Error('OBS output requires the Windows Spout2 sender.')
+    saveObsPreference(DATA, enabled)
+    obsEnabled = enabled
     startSpout()
-    options = { ...options, ...viewOptions() }
+    tellOptions()
     return options
   },
-  /** How the game's frames are flowing, when it is drawn offscreen. */
+  /** Diagnostics for the fixed offscreen relay. */
   async get_view_stats() {
     if (!relay) return null
-    return { frames: relay.frames, passed: relay.passed, takers: Object.fromEntries(relay.counts), spout: spout ? { state: spout.state, detail: spout.detail } : null }
-  },
-  async copy_stream_url() {
-    if (!options.stream_url) throw new Error('The stream is not on.')
-    clipboard.writeText(options.stream_url)
+    return { frames: relay.frames, passed: relay.passed, takers: Object.fromEntries(relay.counts), obs: spout ? { state: spout.state, detail: spout.detail } : null }
   },
   async resize_monitor_game({ bounds }) {
     placeGame(bounds)
   },
   async open_monitor_game({ bounds }) {
     gameBounds(bounds)
-    if (game || offscreenGame || !window) return
-    /** @type {Electron.WebContents} */
-    let page
-    if (GAME_VIEW === 'offscreen') {
-      offscreenGame = createOffscreenGame()
-      page = offscreenGame.webContents
-    } else {
-      game = createGame()
-      window.contentView.addChildView(game)
-      page = game.webContents
-    }
+    if (offscreenGame || !window) return
+    offscreenGame = createOffscreenGame()
+    const page = offscreenGame.webContents
     placeGame(bounds)
     try {
       // The view starts blank; the core sends it to the game once it is listening.
       await page.loadURL('about:blank')
       await running().call('open_game', { port: cdpPort, target: await targetOf(page) })
-      gameOpen = true
-      watchStream()
     } catch (error) {
-      if (game?.webContents === page) {
-        window?.contentView.removeChildView(game)
-        game = null
-      }
       if (offscreenGame?.webContents === page) {
         stopSpout()
         offscreenGame.destroy()
@@ -861,7 +685,6 @@ async function start() {
     if (name === 'pointer') trail?.webContents.send('trail:mark', offscreenGame && gameAt ? onView(/** @type {{ x: number, y: number }} */ (payload), gameAt, OFFSCREEN) : payload)
     else dock?.webContents.send('akagi:event', name, payload)
     if (name === 'monitor-updated') {
-      feed.update(payload)
       // A game just ended: its page's garbage is collected a moment after.
       const ended = /** @type {{ game_ended?: boolean }} */ (payload)?.game_ended === true
       if (ended && !gameEnded) setTimeout(() => void collectGameGarbage(), COLLECT_AFTER_MS)
@@ -890,6 +713,8 @@ if (!hasChromiumLog(process.argv)) {
   app.relaunch({ args: [...process.argv.slice(1), ...chromiumSwitches(LOGS, RUN), `--run=${RUN}`] })
   app.exit(0)
 } else if (app.requestSingleInstanceLock()) {
+  // Persist the one-way import only after owning this account's home.
+  saveObsPreference(DATA, obsEnabled)
   prune(LOGS)
   note(`shell ${app.getVersion()} started: Electron ${process.versions.electron}, Chromium ${process.versions.chrome}`)
   await prepare()

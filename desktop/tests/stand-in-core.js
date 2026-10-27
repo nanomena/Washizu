@@ -45,11 +45,6 @@ const answers = {
   get_monitor: snapshot,
   get_hand_events: () => [],
   get_history: () => [],
-  set_monitor_stream: ({ enabled, port, token }) => {
-    if (enabled === true && !(Number.isInteger(port) && port > 0 && typeof token === 'string' && token.length >= 16)) throw new Error('invalid stream address')
-    Object.assign(monitor, { stream_output: enabled === true, stream_port: port, stream_token: token })
-    return monitor
-  },
   set_monitor_autoplay: () => null,
   open_game: ({ port, target }) => {
     if (!Number.isInteger(port) || typeof target !== 'string' || !target) throw new Error('invalid params')

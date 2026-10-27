@@ -127,59 +127,26 @@ try {
   if (game) {
     const attached = await send('Target.attachToTarget', { targetId: game.targetId, flatten: true })
     const size = (await send('Runtime.evaluate', { expression: '[innerWidth, innerHeight]', returnByValue: true }, attached.sessionId)).result.value
-    check('the game view is the size of the stage', seen.stage && Math.abs(size[0] - seen.stage[0]) <= 1 && Math.abs(size[1] - seen.stage[1]) <= 1, `${size.join('×')} on a stage of ${seen.stage?.join('×')}`)
+    check('the game uses fixed offscreen CSS dimensions', size[0] === 1280 && size[1] === 720, size.join('×'))
+    const scale = (await send('Runtime.evaluate', { expression: 'devicePixelRatio', returnByValue: true }, attached.sessionId)).result.value
+    check('the offscreen game draws at scale two independently of the desktop', scale === 2, String(scale))
   }
 
-  // The game offered to a streaming program: an address under a secret, and
-  // frames of exactly what the view shows, taken without changing anything
-  // about the game's page.
-  if (game) {
-    const attached = await send('Target.attachToTarget', { targetId: game.targetId, flatten: true })
-    await send('Runtime.evaluate', { expression: "window.__resized = 0; addEventListener('resize', () => window.__resized++)" }, attached.sessionId)
-    const metrics = async () => (await send('Runtime.evaluate', { expression: '[innerWidth, innerHeight, devicePixelRatio, window.__resized]', returnByValue: true }, attached.sessionId)).result.value
-    const before = await metrics()
-    const options = await evaluate(`window.akagi.invoke('set_monitor_stream', { enabled: true })`)
-    const url = String(options.stream_url ?? '')
-    check('switching the stream on gives an address on this machine under a secret', /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{24}\/$/.test(url), url)
-    if (url) {
-      const page = await fetch(url)
-      check("the address serves the stream's page", page.ok && /viewer\.js/.test(await page.text()), String(page.status))
-      check('the address without its secret serves nothing', (await fetch(new URL('/', url))).status === 404)
-      const watching = new AbortController()
-      const reply = await fetch(new URL('stream.mjpg', url), { signal: watching.signal })
-      const reader = /** @type {ReadableStreamDefaultReader<Uint8Array>} */ (reply.body?.getReader())
-      /** @type {Buffer} */
-      let got = Buffer.alloc(0)
-      /** @type {number[] | null} */
-      let size = null
-      const end = Date.now() + 15000
-      while (!size && Date.now() < end) {
-        const { value, done } = await Promise.race([reader.read(), sleep(15000).then(() => ({ value: undefined, done: true }))])
-        if (done || !value) break
-        got = Buffer.concat([got, value])
-        // The width and height in the first frame's start-of-frame marker.
-        const start = got.indexOf(Buffer.from([0xff, 0xd8]))
-        for (let i = start + 2; start >= 0 && i + 9 < got.length;) {
-          if (got[i] !== 0xff) break
-          const marker = got[i + 1]
-          if (marker >= 0xc0 && marker <= 0xc3) { size = [got.readUInt16BE(i + 7), got.readUInt16BE(i + 5)]; break }
-          i += 2 + got.readUInt16BE(i + 2)
-        }
-      }
-      const during = await metrics()
-      const pixels = [Math.round(before[0] * SCREEN_SCALE), Math.round(before[1] * SCREEN_SCALE)]
-      check("frames are the view's own size in screen pixels", size && Math.abs(size[0] - pixels[0]) <= 1 && Math.abs(size[1] - pixels[1]) <= 1, `${size?.join('×') ?? 'no frame'} for ${pixels.join('×')}`)
-      const same = (/** @type {number[]} */ a) => a.every((v, i) => v === before[i])
-      check("the game's page is left exactly as it is while it is streamed", before[2] === SCREEN_SCALE && same(during), `${before.join(' ')} → ${during.join(' ')}`)
-      watching.abort()
-      await sleep(4000)
-      const after = await metrics()
-      check('and after nobody watches any more', same(after), `${after.join(' ')}`)
-      const off = await evaluate(`window.akagi.invoke('set_monitor_stream', { enabled: false })`)
-      check('switching the stream off takes the address away', !off.stream_url && off.stream_output === false && off.stream_token === options.stream_token)
-      const gone = await fetch(url).then(() => 'served', () => 'refused')
-      check('nothing is served once it is off', gone === 'refused', gone)
-    }
+  const before = await evaluate(`window.akagi.invoke('get_monitor_options')`)
+  check('OBS output exposes its name and availability without an HTTP address',
+    typeof before.obs_available === 'boolean' && typeof before.obs_name === 'string' && !Object.keys(before).some(key => /^(stream_|game_view|spout_)/.test(key)))
+  const off = await evaluate(`window.akagi.invoke('set_obs_output', { enabled: false })`)
+  check('the single OBS switch turns the sender off', off.obs_output === false && off.obs_state === 'off')
+  check('the output preference is a single boolean', JSON.stringify(JSON.parse(fs.readFileSync(path.join(work, 'data', 'obs.json'), 'utf8'))) === '{"enabled":false}')
+  const still = await evaluate(`(await window.akagi.invoke('get_monitor')).capture.state`)
+  check('turning OBS output off leaves the game and capture running', still === 'running')
+  if (!before.obs_available) {
+    const refused = await evaluate(`window.akagi.invoke('set_obs_output', { enabled: true }).then(() => '', error => String(error))`)
+    check('unsupported OBS output fails explicitly', refused.includes('Windows Spout2'))
+  }
+  for (const command of ['set_monitor_game_view', 'set_monitor_spout', 'set_monitor_stream', 'copy_stream_url']) {
+    const refused = await evaluate(`window.akagi.invoke('${command}', {}).then(() => '', error => String(error))`)
+    check(`removed command ${command} is rejected`, refused === `Unknown command: ${command}`)
   }
 
   const problems = events.filter(event => event.sessionId === sessionId)
