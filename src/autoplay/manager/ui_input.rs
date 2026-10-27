@@ -82,6 +82,7 @@ impl AutoplayManager {
         let machine = self.ui.clone();
         let monitor = self.monitor.clone();
         let control = control.clone();
+        let before = self.ui.lock().unwrap().phase();
         let pressed = self.hand.press_when("Web UI effect", point, target.viewport,
             Touch { hover_ms, hold_ms, jiggle: false }, move |page| async move {
                 // PointerController holds this page's lease through mouse-up.
@@ -107,6 +108,11 @@ impl AutoplayManager {
                 }
                 allowed
             }).await;
+        let (after, reason) = {
+            let machine = self.ui.lock().unwrap();
+            (machine.phase(), machine.waiting_reason())
+        };
+        self.report_ui_transition(before, after, "Web final mouse permission", reason);
         // The effect slot records whether final permission was consumed. A
         // transport failure after permission is ambiguous and stops the FSM;
         // a refusal before mouse-down cannot be mistaken for an accepted click.
