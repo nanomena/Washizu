@@ -98,6 +98,12 @@ both were seen; the kyoku frame only fills in when it was not
 
 ### Player count
 
+The shared `TenhouState` also publishes `go_type: Option<u32>` and
+`lobby: Option<u32>` directly from this flow's stored GO fields. These are
+protocol facts available to a consumer remembering the next-game target;
+missing values remain `None`. Publishing them adds no MJAI event or UI stage
+and does not alter window clearing, reconnect or capture-session behavior.
+
 `start_game.aka_flag` comes from known `GO.type & 0x02` (set means no red
 fives); absent GO leaves it unknown. East/East-South is `GO.type & 0x08`,
 stored as `game_meta.match_mode` 1/2. A complete UN roster supplies our raw

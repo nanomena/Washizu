@@ -99,6 +99,8 @@ impl TenhouBridge {
         };
         *guard = Some(TenhouState {
             seat: self.state.seat,
+            go_type: self.state.go_type,
+            lobby: self.state.lobby,
             hand: self.state.hand.clone(),
             melds: self.state.melds.clone(),
             is_tsumo: self.state.is_tsumo,
@@ -1248,8 +1250,12 @@ mod tests {
     /// paifu id.
     #[test]
     fn go_un_taikyoku_metadata_reaches_start_game() {
-        let mut b = TenhouBridge::new(None, None);
-        parse_one(&mut b, r#"{"tag":"GO","type":"169","lobby":"0"}"#);
+        let shared = crate::autoplay::tenhou_state::new_shared();
+        let mut b = TenhouBridge::new(None, None).with_shared_state(Some(shared.clone()));
+        assert!(parse_one(&mut b, r#"{"tag":"GO","type":"169","lobby":"0"}"#).is_empty());
+        let published = shared.read().unwrap().clone().expect("GO published");
+        assert_eq!(published.go_type, Some(169));
+        assert_eq!(published.lobby, Some(0));
         // n0 is *us* (wire-relative); "%E3%81%82" decodes to "あ".
         parse_one(
             &mut b,
@@ -2012,8 +2018,21 @@ mod tests {
             ),
             (serde_json::json!({"tag":"GO","type":65537,"lobby":0}), None),
         ] {
-            let mut b = TenhouBridge::new(None, None);
-            b.dispatch(&go);
+            let shared = crate::autoplay::tenhou_state::new_shared();
+            let mut b = TenhouBridge::new(None, None).with_shared_state(Some(shared.clone()));
+            assert!(b
+                .parse(Direction::Down, go.to_string().as_bytes())
+                .events
+                .is_empty());
+            let published = shared.read().unwrap().clone().expect("GO published");
+            assert_eq!(
+                published.go_type,
+                go["type"].as_u64().map(|value| value as u32)
+            );
+            assert_eq!(
+                published.lobby,
+                go["lobby"].as_u64().map(|value| value as u32)
+            );
             b.state.open_window(0);
             assert_eq!(b.state.window.unwrap().clock, expected, "{go}");
         }
@@ -2546,6 +2565,8 @@ mod tests {
         assert_eq!(published.seat, 0);
         assert_eq!(published.hand.len(), 10);
         assert_eq!(published.melds.len(), 1);
+        assert_eq!(published.go_type, None, "REINIT does not invent GO rules");
+        assert_eq!(published.lobby, None, "REINIT does not invent a lobby");
 
         // 11 concealed tiles + one pon = it is our turn, draw in hand.
         let reinit = format!(

@@ -128,6 +128,10 @@ pub const TURN_BANK_MS: u32 = 10_000;
 pub struct TenhouState {
     /// Our mjai-absolute seat.
     pub seat: u8,
+    /// Raw `<GO type>` from this flow; unknown until actually received.
+    pub go_type: Option<u32>,
+    /// Raw `<GO lobby>` from this flow; absent stays unknown.
+    pub lobby: Option<u32>,
     /// Concealed hand as Tenhou tile indices. The tile drawn this turn, when
     /// there is one, is the tail.
     pub hand: Vec<u32>,
