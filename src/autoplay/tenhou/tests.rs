@@ -187,3 +187,137 @@ fn native_clock_is_stable_and_bank_is_the_actual_grant_at_that_window_start() {
         facts.started_at
     );
 }
+
+#[test]
+fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_is_gone() {
+    use crate::autoplay::context::CanvasRect;
+    use crate::autoplay::transaction::{
+        Binding, Effect, Facts, Owner, Phase as TurnPhase, Settings, TurnController,
+    };
+    use crate::autoplay::verify::{InputKind, InputWatch};
+    let now = Instant::now();
+    let mut state = state(&[0, 17, 19]);
+    let shared = Arc::new(AutoplayContext::new());
+    let adapter = TenhouAutoplay::new(shared);
+    let action = MjaiEvent::Reach {
+        actor: 0,
+        pai: Some("5m".into()),
+        tsumogiri: Some(false),
+    };
+    let input = |window: &str| {
+        serde_json::from_value::<client::InputSnapshot>(serde_json::json!({
+        "client":"web3","ready":true,"window":window,"hand":[0,17,19],
+        "viewport":{"x":0,"y":0,"width":900,"height":600},"tiles":[],"offers":[],"nextDraw":null,"rest":null,
+        "clock":{"elapsedMs":0,"fixedMs":5000,"grantedBankMs":6000,"remainingBaseMs":5000,"remainingBankMs":6000}
+    })).unwrap()
+    };
+    let raw = input("native-before-declaration");
+    let mut observation = adapter.facts(&state, &raw, &action, now);
+    assert!(observation.continuation.is_none());
+    let rect = CanvasRect {
+        x: 100.0,
+        y: 400.0,
+        width: 60.0,
+        height: 40.0,
+    };
+    observation.target = Some(InputTarget {
+        identity: TargetIdentity {
+            window: raw.window.clone().unwrap(),
+            hand: raw.hand.iter().map(u32::to_string).collect(),
+            control: "native-reach-button".into(),
+        },
+        bounds: rect,
+        viewport: raw.viewport,
+    });
+    observation.ready = true;
+    let watch = InputWatch::default();
+    let context = crate::monitor::DecisionContext {
+        game: 1,
+        round: 1,
+        event_seq: 7,
+    };
+    let owner = Owner {
+        session: 1,
+        table: 1,
+        settings: 1,
+        manual: 0,
+    };
+    let proof =
+        window_identity(crate::bot::control::InputWindow::Tenhou(state.window.unwrap()).proof());
+    let binding = Binding {
+        context,
+        owner,
+        window: proof.clone(),
+        input: watch.ticket(),
+    };
+    let mut facts = Facts {
+        context: Some(context),
+        owner,
+        window: Some(proof),
+        enabled: true,
+        manual: false,
+        input: watch.ticket(),
+        command: false,
+        latest: None,
+    };
+    let mut controller = TurnController::default();
+    assert!(controller.begin(
+        binding,
+        action.clone(),
+        plan(&action, &state, false),
+        Settings {
+            retries: 0,
+            verify_ms: 100,
+            gap_ms: 0,
+            ready_ms: 8000,
+            reload_after: 0
+        },
+        now
+    ));
+    assert!(matches!(
+        controller.next(&facts, Some(&observation), now),
+        Effect::Pace { .. }
+    ));
+    assert!(controller.paced(now));
+    let Effect::Press { permit, .. } = controller.next(&facts, Some(&observation), now) else {
+        panic!("declaration target must be permitted");
+    };
+    assert!(controller.consume(permit, &facts, &observation, (125.0, 420.0), 100, now));
+    assert!(controller.dispatched(permit, true, now));
+    assert_eq!(controller.phase(), Some(TurnPhase::WaitingDeclaration));
+    assert_eq!(controller.intent().unwrap().role, PressRole::Declaration);
+    // Real own REACH, not an invented follow-up event; no declaration button
+    // remains in the new native input window.
+    watch.note_sent(InputKind::Reach);
+    state.in_riichi = true;
+    state.window.as_mut().unwrap().ops = 0;
+    state.window.as_mut().unwrap().opened_at += Duration::from_nanos(1);
+    let echoed = crate::monitor::DecisionContext {
+        event_seq: 8,
+        ..context
+    };
+    let next = input("native-after-declaration");
+    let observation = adapter.facts(&state, &next, &controller.intent().unwrap().action, now);
+    assert!(observation.target.is_none());
+    assert!(observation.continuation.is_some());
+    facts.context = Some(echoed);
+    facts.input = watch.ticket();
+    facts.command = true;
+    facts.window = Some(window_identity(
+        crate::bot::control::InputWindow::Tenhou(state.window.unwrap()).proof(),
+    ));
+    facts.latest = Some((
+        echoed,
+        MjaiEvent::Reach {
+            actor: 0,
+            pai: None,
+            tsumogiri: None,
+        },
+    ));
+    assert!(matches!(
+        controller.next(&facts, Some(&observation), now),
+        Effect::Observe
+    ));
+    assert_eq!(controller.intent().unwrap().role, PressRole::Discard);
+    assert_ne!(controller.phase(), Some(TurnPhase::WaitingDeclaration));
+}

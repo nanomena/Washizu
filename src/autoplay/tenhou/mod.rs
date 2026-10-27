@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub(crate) mod client;
-pub(crate) mod input;
 pub mod web3_rewrite;
 
 pub struct TenhouAutoplay {
@@ -50,6 +49,47 @@ impl TenhouAutoplay {
         };
         *clock = Some((key.to_owned(), facts));
         Some(facts)
+    }
+    fn facts(
+        &self,
+        state: &TenhouState,
+        input: &client::InputSnapshot,
+        action: &MjaiEvent,
+        observed_at: Instant,
+    ) -> SiteObservation {
+        let mut observation = SiteObservation {
+            ready: false,
+            target_kind: TargetKind::Commit,
+            target: None,
+            layout: layout(input),
+            clock: None,
+            continuation: None,
+        };
+        if !input.ready || !same_hand(input, state) {
+            return observation;
+        }
+        let (Some(protocol_window), Some(native_window)) = (state.window, input.window.as_ref())
+        else {
+            return observation;
+        };
+        let proof =
+            window_identity(crate::bot::control::InputWindow::Tenhou(protocol_window).proof());
+        let key = format!("{proof}:{native_window}");
+        observation.clock = input
+            .clock
+            .as_ref()
+            .and_then(|raw| self.clock(&key, raw, observed_at));
+        if matches!(action, MjaiEvent::Reach { .. })
+            && state.in_riichi
+            && state.is_tsumo
+            && protocol_window.ops == 0
+        {
+            observation.continuation = Some(DeclarationFacts {
+                window: proof,
+                hand: input.hand.iter().map(u32::to_string).collect(),
+            });
+        }
+        observation
     }
 }
 
@@ -176,20 +216,14 @@ impl SiteAdapter for TenhouAutoplay {
         page: &Page,
         ctx: &ActionContext<'_>,
         intent: &PressIntent,
+        point: Option<(f64, f64)>,
     ) -> Result<SiteObservation> {
         let state = self
             .state()
             .ok_or_else(|| anyhow!("Tenhou bridge state unavailable"))?;
         let input = client::read_input(page).await?;
         let observed_at = Instant::now();
-        let mut observation = SiteObservation {
-            ready: false,
-            target_kind: TargetKind::Commit,
-            target: None,
-            layout: layout(&input),
-            clock: None,
-            continuation: None,
-        };
+        let mut observation = self.facts(&state, &input, &intent.action, observed_at);
         if !input.ready || !same_hand(&input, &state) || intent.action != *ctx.action {
             return Ok(observation);
         }
@@ -197,26 +231,9 @@ impl SiteAdapter for TenhouAutoplay {
             .window
             .as_ref()
             .ok_or_else(|| anyhow!("ready Tenhou input lacks a window"))?;
-        let Some(protocol_window) = state.window else {
+        let Some(_) = state.window else {
             return Ok(observation);
         };
-        let proof =
-            window_identity(crate::bot::control::InputWindow::Tenhou(protocol_window).proof());
-        let clock_key = format!("{proof}:{window}");
-        observation.clock = input
-            .clock
-            .as_ref()
-            .and_then(|raw| self.clock(&clock_key, raw, observed_at));
-        if matches!(intent.action, MjaiEvent::Reach { .. })
-            && state.in_riichi
-            && state.is_tsumo
-            && protocol_window.ops == 0
-        {
-            observation.continuation = Some(DeclarationFacts {
-                window: proof.clone(),
-                hand: input.hand.iter().map(u32::to_string).collect(),
-            });
-        }
         let request = if intent.role == PressRole::Discard {
             let Some((tile, tsumogiri)) = discard_tile(&intent.action, &state) else {
                 return Ok(observation);
@@ -240,9 +257,23 @@ impl SiteAdapter for TenhouAutoplay {
             }
         };
         let probe = client::probe_target(page, &request).await?;
-        let Some(target) = probe.target else {
+        let Some(mut target) = probe.target else {
             return Ok(observation);
         };
+        if let Some(point) = point {
+            let checked = client::validate_target(page, &request, &target.identity, point).await?;
+            let Some(validated) = checked.target else {
+                return Ok(observation);
+            };
+            if validated.identity != target.identity
+                || validated.kind != target.kind
+                || validated.bounds != target.bounds
+                || validated.viewport != target.viewport
+            {
+                return Ok(observation);
+            }
+            target = validated;
+        }
         observation.target_kind = if target.kind == client::TargetKind::Reveal {
             TargetKind::Reveal
         } else {
@@ -250,9 +281,9 @@ impl SiteAdapter for TenhouAutoplay {
         };
         observation.target = Some(InputTarget {
             identity: TargetIdentity {
-                window: proof,
+                window: window.clone(),
                 hand: input.hand.iter().map(u32::to_string).collect(),
-                control: format!("{window}:{}", target.identity),
+                control: target.identity,
             },
             bounds: target.bounds,
             viewport: target.viewport,

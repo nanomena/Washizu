@@ -115,6 +115,48 @@ async fn read_view(page: &Page) -> Result<Option<ClientView>> {
     Ok(Some(serde_json::from_value(value.clone())?))
 }
 
+// Mirrors the client's read-only hit queries at the actual cursor position.
+// It never calls onMouseDown, selection, discard, or operation handlers.
+const VALIDATE_POINT: &str = r#"(request=>{
+ const d=window.view?.DesktopMgr?.Inst,me=d?.mainrole,c=document.querySelector('canvas'),u=window.uiscript;
+ const mouse=window.Laya?.MouseManager?.instance,p=request.point;
+ if(!d?.gameing||!me||!c||!mouse||document.elementFromPoint(p[0],p[1])!==c)return false;
+ if(Math.abs(mouse.mouseX-p[0])>1||Math.abs(mouse.mouseY-p[1])>1)return false;
+ const raw=[...me.hand];if(me.last_tile&&!raw.includes(me.last_tile))raw.push(me.last_tile);
+ const hand=raw.map(t=>`${t.val?.toString(false)}:${t===me.last_tile}`);
+ if(JSON.stringify(hand)!==JSON.stringify(request.hand))return false;
+ if(request.slot!==null){
+  if(me.can_discard!==true||typeof me.needCheckMouse!=='function'||!me.needCheckMouse()||typeof me.getMouseInfo!=='function')return false;
+  const info=me.getMouseInfo();return info?.pai===raw[request.slot]&&info.pai.valid===true&&!info.pai.val.baida;
+ }
+ const visible=n=>{for(let a=n;a;a=a.parent)if(a.visible===false||a.destroyed||Number.isFinite(a.alpha)&&a.alpha<0.95)return false;return n?.visible===true;};
+ const r=c.getBoundingClientRect(),stage=Laya.stage,x=(p[0]-r.x)*stage.width/r.width,y=(p[1]-r.y)*stage.height/r.height;
+ let nodes=[];
+ for(const panel of [u?.UI_ChiPengHu?.Inst,u?.UI_LiQiZiMo?.Inst]){
+  if(panel?.enable!==true)continue;
+  if(request.control.startsWith('candidate:')){
+   const n=panel.container_Detail?.getChildByName('container_chooses')?.getChildByName(request.control.slice(10));if(n)nodes.push(n);
+  }else{const n=request.control==='btn_cancel'?panel.btn_cancel:panel.container_btns?.getChildByName(request.control);if(n)nodes.push(n);}
+ }
+ nodes=nodes.filter(n=>visible(n)&&typeof n.hitTestPoint==='function'&&n.hitTestPoint(x,y));
+ return nodes.length===1&&(mouse._target===nodes[0]||typeof nodes[0].contains==='function'&&nodes[0].contains(mouse._target));
+})"#;
+
+async fn validate_point(
+    page: &Page,
+    view: &ClientView,
+    control: &str,
+    slot: Option<usize>,
+    point: (f64, f64),
+) -> Result<bool> {
+    let request = serde_json::json!({"point":point,"control":control,"slot":slot,
+        "hand":view.tiles.iter().map(|t|format!("{}:{}",t.tile,t.drawn)).collect::<Vec<_>>()});
+    let result = page
+        .evaluate(format!("({VALIDATE_POINT})({request})"))
+        .await?;
+    Ok(result.value().and_then(serde_json::Value::as_bool) == Some(true))
+}
+
 fn normalize_tile(raw: &str) -> Option<String> {
     match raw {
         "1z" => Some("E".into()),
@@ -289,6 +331,7 @@ impl SiteAdapter for MajsoulAutoplay {
         page: &Page,
         ctx: &ActionContext<'_>,
         intent: &PressIntent,
+        actual_point: Option<(f64, f64)>,
     ) -> Result<SiteObservation> {
         let budget = *self
             .context
@@ -375,6 +418,35 @@ impl SiteAdapter for MajsoulAutoplay {
             }
         };
         let window = window_identity(crate::bot::control::InputWindow::Majsoul(budget).proof());
+        if let Some(actual) = actual_point {
+            if !bounds.contains(actual.0, actual.1) {
+                return Ok(observation);
+            }
+            let slot = if intent.role == PressRole::Discard {
+                let Some(slot) = observation
+                    .layout
+                    .as_ref()
+                    .and_then(|l| l.tiles.iter().position(|t| t.bounds == bounds))
+                else {
+                    return Ok(observation);
+                };
+                Some(slot)
+            } else {
+                None
+            };
+            if !validate_point(page, &view, &control, slot, actual).await? {
+                return Ok(observation);
+            }
+        }
+        if *self
+            .context
+            .time_budget
+            .read()
+            .map_err(|_| anyhow!("Majsoul window lock poisoned"))?
+            != Some(budget)
+        {
+            return Ok(observation);
+        }
         observation.target = Some(InputTarget {
             identity: TargetIdentity {
                 window,
@@ -607,7 +679,6 @@ fn mapped_targets(ctx: &ActionContext) -> TargetMapping {
 pub fn discard_point(pai: &str, ctx: &ActionContext) -> Option<(f64, f64)> {
     match plan_dahai_click(pai, Whence::Unsaid, ctx)? {
         MappedClick { x_norm, y_norm } => Some((x_norm, y_norm)),
-        _ => None,
     }
 }
 
@@ -1373,7 +1444,6 @@ mod tests {
                     "expected tsumohai at {expected}, got {x_norm}"
                 );
             }
-            _ => panic!("expected a click target"),
         }
     }
 
@@ -1439,7 +1509,6 @@ mod tests {
         // The plan reads the choice off the event itself.
         match &mapped_targets(&ctx).targets[0] {
             MappedClick { x_norm, .. } => assert!((*x_norm - drawn).abs() < 1e-9),
-            other => panic!("expected a click, got {other:?}"),
         }
     }
 
@@ -1659,7 +1728,6 @@ mod tests {
                 assert_eq!(*x_norm, 8.637_5);
                 assert_eq!(*y_norm, 7.0);
             }
-            _ => panic!("expected a click target"),
         }
     }
 
@@ -1688,7 +1756,6 @@ mod tests {
                 assert_eq!(*x_norm, 10.875);
                 assert_eq!(*y_norm, 7.0);
             }
-            _ => panic!("expected a click target"),
         }
     }
 
@@ -1731,7 +1798,6 @@ mod tests {
                 assert_eq!(*x_norm, 10.875);
                 assert_eq!(*y_norm, 7.0);
             }
-            _ => panic!("expected a click on the X button"),
         }
     }
 
@@ -1798,7 +1864,6 @@ mod tests {
                 assert_eq!(*x_norm, 10.875);
                 assert_eq!(*y_norm, 7.0);
             }
-            _ => panic!("expected a click on the X button"),
         }
     }
 
@@ -1840,7 +1905,6 @@ mod tests {
             let ctx = ctx_for(&act, &snap, &legal, Some("1m"), Some("5p"), false);
             match mapped_targets(&ctx).targets[1] {
                 MappedClick { x_norm, .. } => x_norm,
-                ref other => panic!("the fourth step should press the tile: {other:?}"),
             }
         };
         let drawn = TILES[13].0 + TSUMO_SPACE;
@@ -1897,7 +1961,6 @@ mod tests {
                 assert_eq!(*x_norm, 10.875);
                 assert_eq!(*y_norm, 7.0);
             }
-            _ => panic!("expected click"),
         }
     }
 
@@ -1967,7 +2030,6 @@ mod tests {
                     "expected raw TILES[13] (no TSUMO_SPACE), got {x_norm}"
                 );
             }
-            _ => panic!("expected click"),
         }
     }
 
@@ -2079,7 +2141,6 @@ mod tests {
                 let expected = TILES[13].0 + TSUMO_SPACE;
                 assert!((*x_norm - expected).abs() < 1e-9);
             }
-            _ => panic!("expected click"),
         }
     }
 
@@ -2202,7 +2263,6 @@ mod tests {
                     TILES[13].0,
                 );
             }
-            other => panic!("expected click, got {other:?}"),
         }
     }
 
@@ -2247,7 +2307,6 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 MappedClick { x_norm, y_norm } => Some((*x_norm, *y_norm)),
-                _ => None,
             })
             .collect()
     }
@@ -2347,7 +2406,6 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 MappedClick { x_norm, y_norm } => Some((*x_norm, *y_norm)),
-                _ => None,
             })
             .collect();
         assert_eq!(clicks.len(), 2);
