@@ -59,6 +59,27 @@ pub struct DecisionWindow {
     /// window's identity: if the slot no longer holds the same instant, the
     /// window we planned against has been replaced.
     pub opened_at: Instant,
+    /// Known standard table clock; None for unknown/private custom rules.
+    /// The bank is its initial cap, not an observed remaining balance.
+    pub clock: Option<TurnClock>,
+}
+
+/// Published per-decision base time and per-hand initial reserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnClock {
+    pub fixed_ms: u32,
+    pub bank_ms: u32,
+}
+
+impl TurnClock {
+    pub const NORMAL: Self = Self {
+        fixed_ms: 5_000,
+        bank_ms: 10_000,
+    };
+    pub const FAST: Self = Self {
+        fixed_ms: 3_000,
+        bank_ms: 5_000,
+    };
 }
 
 impl DecisionWindow {
@@ -114,6 +135,8 @@ pub struct TenhouState {
     pub melds: Vec<Meld>,
     /// True between our tsumo and our dahai.
     pub is_tsumo: bool,
+    /// Confirmed/declaration riichi state from this flow's public events.
+    pub in_riichi: bool,
     /// Currently open decision window for our seat, if any.
     pub window: Option<DecisionWindow>,
 }
@@ -145,6 +168,7 @@ mod tests {
         DecisionWindow {
             ops,
             opened_at: Instant::now(),
+            clock: Some(TurnClock::NORMAL),
         }
     }
 

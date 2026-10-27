@@ -83,6 +83,9 @@ pub enum MatchInfo {
         go_type: Option<u32>,
         #[serde(default)]
         lobby: Option<u32>,
+        /// Our raw rank index from the first entry of the full `<UN dan=…>` roster.
+        #[serde(default)]
+        dan: Option<u32>,
     },
     /// Riichi City. `stage_type` / `game_play` / `classify_id` come from
     /// `cmd_enter_room.options` and identify the matchmaking room;
@@ -346,6 +349,7 @@ mod tests {
                 log_id: Some("2026082300gm-00a9-0000-deadbeef".into()),
                 go_type: Some(169),
                 lobby: Some(0),
+                dan: Some(16),
             },
             MatchInfo::RiichiCity {
                 room_id: Some("tabletoken0001".into()),
@@ -378,7 +382,8 @@ mod tests {
             MatchInfo::Tenhou {
                 log_id: None,
                 go_type: None,
-                lobby: None
+                lobby: None,
+                dan: None,
             }
         );
     }

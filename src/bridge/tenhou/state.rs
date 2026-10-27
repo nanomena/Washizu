@@ -72,12 +72,16 @@ pub struct State {
     pub go_type: Option<u32>,
     /// `<GO lobby=…/>` lobby number, stashed like `go_type`.
     pub lobby: Option<u32>,
+    /// Standard table clock derived only from a known public GO rule set.
+    pub clock: Option<crate::autoplay::tenhou_state::TurnClock>,
     /// `<TAIKYOKU log=…/>` paifu id; reassigned by every `<TAIKYOKU/>`.
     pub log_id: Option<String>,
     /// `<UN/>` roster names, percent-decoded, in wire-*relative* order
     /// (index 0 = us). `<UN/>` arrives before `<TAIKYOKU/>` resolves our
     /// seat, so the remap to wire-absolute happens at `start_game` emission.
     pub un_names: Option<[String; 4]>,
+    /// Our raw `<UN dan>` entry 0. Consumed with the full roster at start_game.
+    pub dan: Option<u32>,
     /// Decision window currently open for *our* seat, if any. Only consumed by
     /// autoplay (see [`crate::autoplay::tenhou_state`]); parsing keeps it up to
     /// date unconditionally because it is cheap and a stale window is worse
@@ -104,8 +108,10 @@ impl Default for State {
             rejoined_mid_game: false,
             go_type: None,
             lobby: None,
+            clock: None,
             log_id: None,
             un_names: None,
+            dan: None,
             window: None,
         }
     }
@@ -217,6 +223,7 @@ impl State {
         self.window = Some(crate::autoplay::tenhou_state::DecisionWindow {
             ops,
             opened_at: std::time::Instant::now(),
+            clock: self.clock,
         });
     }
 }

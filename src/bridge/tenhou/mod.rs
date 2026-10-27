@@ -7,16 +7,15 @@
 //!
 //! Faithful Rust port of the observation half of the original Akagi Python
 //! Tenhou bridge. AkagiV3 uses the bridge in
-//! observe-only mode: only `Direction::Down` (server → client) is parsed,
-//! `Direction::Up` and [`build`](Bridge::build) are no-ops. The rationale is
-//! that all game state we need to feed analysis / bots arrives on server
-//! frames; client frames are user input and contribute no new information.
+//! observation mode. Gameplay comes from `Direction::Down`; the one observed
+//! client boundary is `NEXTREADY`, which completes a pending AGARI group.
 //!
 //! Tenhou tile encoding lives in [`tile`]; meld bitfield decoding lives in
 //! [`meld`]; per-flow state in [`state`].
 
 pub mod encode;
 pub mod meld;
+mod settlement;
 pub mod state;
 pub mod tile;
 
@@ -44,6 +43,7 @@ const REINIT_RIICHI_MARK: u32 = 255;
 /// Per-flow Tenhou state. One bridge instance per WebSocket connection.
 pub struct TenhouBridge {
     state: State,
+    pending_wins: settlement::Wins,
     #[allow(dead_code)]
     flow_log: Option<Arc<FlowLogger>>,
     session: Option<Arc<Session>>,
@@ -61,6 +61,7 @@ impl TenhouBridge {
     pub fn new(flow_log: Option<Arc<FlowLogger>>, session: Option<Arc<Session>>) -> Self {
         Self {
             state: State::default(),
+            pending_wins: settlement::Wins::default(),
             flow_log,
             session,
             mjai_log: None,
@@ -101,6 +102,7 @@ impl TenhouBridge {
             hand: self.state.hand.clone(),
             melds: self.state.melds.clone(),
             is_tsumo: self.state.is_tsumo,
+            in_riichi: self.state.in_riichi,
             window: self.state.window,
         });
     }
@@ -163,7 +165,17 @@ impl TenhouBridge {
             _ => {}
         }
 
-        let mut events = self.dispatch_tag(tag, msg);
+        // Commit the previous result before INIT changes seats or starts a
+        // new hand. REINIT is an incomplete snapshot, not a replay boundary.
+        let mut events = if tag == "INIT" || tag == "TAIKYOKU" {
+            self.finish_wins()
+        } else {
+            Vec::new()
+        };
+        if tag == "REINIT" {
+            self.pending_wins = settlement::Wins::default();
+        }
+        events.extend(self.dispatch_tag(tag, msg));
 
         // A flow that attached mid-kyoku (`<REINIT/>`) has no history for the
         // hand in progress, so its events would land on whatever the tracker
@@ -198,6 +210,15 @@ impl TenhouBridge {
             MjaiEvent::terminated_game()
         } else {
             MjaiEvent::end_game()
+        }
+    }
+
+    fn finish_wins(&mut self) -> Vec<MjaiEvent> {
+        let events = self.pending_wins.finish();
+        if self.state.suspended {
+            Vec::new()
+        } else {
+            events
         }
     }
 
@@ -251,6 +272,25 @@ impl TenhouBridge {
     fn on_go(&mut self, msg: &JsonValue) -> Vec<MjaiEvent> {
         self.state.go_type = parse_u32(msg, "type");
         self.state.lobby = parse_u32(msg, "lobby");
+        // The public lobby publishes normal/fast clocks. GO may carry a
+        // custom csrule (including clock overrides); private/unknown rules
+        // must not inherit a guessed standard allowance.
+        self.state.clock = match (self.state.go_type, self.state.lobby) {
+            (Some(rules), Some(0))
+                if rules & !0xff == 0
+                    && msg
+                        .get("csrule")
+                        .is_none_or(|value| value.as_str() == Some("")) =>
+            {
+                use crate::autoplay::tenhou_state::TurnClock;
+                Some(if rules & 0x40 == 0 {
+                    TurnClock::NORMAL
+                } else {
+                    TurnClock::FAST
+                })
+            }
+            _ => None,
+        };
         if let Some(three) = self.state.three_players_hint() {
             self.state.set_three_players(three);
         }
@@ -277,6 +317,10 @@ impl TenhouBridge {
         let n2 = name("n2").unwrap_or_default();
         let n3 = name("n3").unwrap_or_default();
         self.state.un_names = Some([n0, n1, n2, n3]);
+        self.state.dan = msg
+            .get("dan")
+            .and_then(JsonValue::as_str)
+            .and_then(|ranks| ranks.split(',').next()?.trim().parse().ok());
         if let Some(three) = self.state.three_players_hint() {
             self.state.set_three_players(three);
         }
@@ -489,16 +533,20 @@ impl TenhouBridge {
                 log_id: self.state.log_id.clone(),
                 go_type: self.state.go_type,
                 lobby: self.state.lobby,
+                dan: self.state.dan.take(),
             };
             events.push(MjaiEvent::StartGame {
                 names,
                 kyoku_first: None,
-                aka_flag: None,
+                aka_flag: self.state.go_type.map(|rules| rules & 0x02 == 0),
                 id: Some(self.state.seat as Actor),
                 num_players: self.state.num_players,
                 game_meta: Some(GameMeta {
                     game_id: None,
-                    match_mode: None,
+                    match_mode: self
+                        .state
+                        .go_type
+                        .map(|rules| if rules & 0x08 == 0 { 1 } else { 2 }),
                     match_info: Some(match_info),
                     our_level: None,
                 }),
@@ -915,77 +963,36 @@ impl TenhouBridge {
 
     /// `<AGARI .../>` — win.
     fn on_agari(&mut self, msg: &JsonValue) -> Vec<MjaiEvent> {
-        let actor_rel = parse_u8(msg, "who").unwrap_or(0);
-        let from_rel = parse_u8(msg, "fromWho").unwrap_or(actor_rel);
-        if actor_rel >= 4 || from_rel >= 4 {
-            return Vec::new();
-        }
-        let actor = self.state.rel_to_abs(actor_rel);
-        let target = self.state.rel_to_abs(from_rel);
-        if self.state.is_ghost_abs(actor) || self.state.is_ghost_abs(target) {
-            warn!(target: "akagi::bridge::tenhou", "agari involves sanma ghost slot, dropped");
-            return Vec::new();
-        }
-        // The kyoku is over; nothing is owed and nothing may be claimed.
         self.state.window = None;
-
-        // sc field is "before0,delta0,before1,delta1,..." in wire-rel order
-        // (rel 0 = us). Always carries 4 pairs even in sanma; skip the pair
-        // whose wire-abs is the ghost slot before placing into mjai-abs.
-        let sc = parse_csv_i32(msg, "sc");
-        let mut deltas_abs = vec![0i32; self.state.num_players as usize];
-        for (rel, chunk) in sc.chunks(2).take(4).enumerate() {
-            let abs = self.state.rel_to_abs(rel as u8);
-            if self.state.is_ghost_abs(abs) {
-                continue;
-            }
-            let d = if chunk.len() == 2 { chunk[1] * 100 } else { 0 };
-            deltas_abs[abs as usize] = d;
+        if let Err(error) = self.pending_wins.push(msg, &self.state) {
+            warn!(target: "akagi::bridge::tenhou", "AGARI rejected: {error:#}");
+            return Vec::new();
         }
-
-        // Ura dora markers are space-separated tile indices in `dorahaiUra`.
-        let ura_markers = msg.get("doraHaiUra").and_then(parse_tile_csv);
-
-        let mut events = vec![MjaiEvent::Hora {
-            score: None,
-            actor,
-            target,
-            deltas: Some(deltas_abs),
-            ura_markers,
-            pai: None,
-            tehai: None,
-            scores: None,
-        }];
-        events.push(MjaiEvent::EndKyoku);
         if msg.get("owari").is_some() {
+            let mut events = self.finish_wins();
             events.push(self.end_game_event());
+            events
+        } else {
+            Vec::new()
         }
-        events
     }
 
     /// `<RYUUKYOKU .../>` — exhaustive draw.
     fn on_ryukyoku(&mut self, msg: &JsonValue) -> Vec<MjaiEvent> {
         self.state.window = None;
-        let sc = parse_csv_i32(msg, "sc");
-        let mut deltas_abs = vec![0i32; self.state.num_players as usize];
-        for (rel, chunk) in sc.chunks(2).take(4).enumerate() {
-            let abs = self.state.rel_to_abs(rel as u8);
-            if self.state.is_ghost_abs(abs) {
-                continue;
-            }
-            let d = if chunk.len() == 2 { chunk[1] * 100 } else { 0 };
-            deltas_abs[abs as usize] = d;
+        if self.pending_wins.is_pending() {
+            warn!(target: "akagi::bridge::tenhou", "RYUUKYOKU contradicts pending AGARI");
+            self.pending_wins = settlement::Wins::default();
+            return Vec::new();
         }
-
-        let mut events = vec![
-            MjaiEvent::Ryukyoku {
-                deltas: Some(deltas_abs),
-                tehais: None,
-                scores: None,
-                reason: None,
-            },
-            MjaiEvent::EndKyoku,
-        ];
+        let result = match settlement::draw(msg, &self.state) {
+            Ok(result) => result,
+            Err(error) => {
+                warn!(target: "akagi::bridge::tenhou", "RYUUKYOKU rejected: {error:#}");
+                return Vec::new();
+            }
+        };
+        let mut events = vec![result, MjaiEvent::EndKyoku];
         if msg.get("owari").is_some() {
             events.push(self.end_game_event());
         }
@@ -996,10 +1003,25 @@ impl TenhouBridge {
 impl Bridge for TenhouBridge {
     fn parse(&mut self, direction: Direction, content: &[u8]) -> ParseResult {
         use crate::schema::ParsedFrame;
-        // Per design decision: Tenhou observation only consumes server frames.
-        // Client frames carry no information our analysis pipeline needs.
+        // NEXTREADY acknowledges the complete result queue in the official
+        // client. Other uplink input remains outside the observation stream.
         if direction == Direction::Up {
-            return ParseResult::empty();
+            let Ok(msg) = serde_json::from_slice::<JsonValue>(content) else {
+                return ParseResult::empty();
+            };
+            if msg.get("tag").and_then(JsonValue::as_str) != Some("NEXTREADY") {
+                return ParseResult::empty();
+            }
+            let events = self.finish_wins();
+            self.write_mjai(&events);
+            return ParseResult {
+                events,
+                window: None,
+                parsed: Some(ParsedFrame {
+                    method: "NEXTREADY".into(),
+                    args: msg,
+                }),
+            };
         }
         if content == HEARTBEAT {
             // Surface heartbeats in the inspector with a stable synthetic
@@ -1132,7 +1154,7 @@ fn parse_u8(msg: &JsonValue, key: &str) -> Option<u8> {
     msg.get(key).and_then(|v| {
         v.as_str()
             .and_then(|s| s.parse::<u8>().ok())
-            .or_else(|| v.as_u64().map(|n| n as u8))
+            .or_else(|| v.as_u64().and_then(|n| u8::try_from(n).ok()))
     })
 }
 
@@ -1140,7 +1162,7 @@ fn parse_u32(msg: &JsonValue, key: &str) -> Option<u32> {
     msg.get(key).and_then(|v| {
         v.as_str()
             .and_then(|s| s.parse::<u32>().ok())
-            .or_else(|| v.as_u64().map(|n| n as u32))
+            .or_else(|| v.as_u64().and_then(|n| u32::try_from(n).ok()))
     })
 }
 
@@ -1164,21 +1186,6 @@ fn parse_csv_u32(msg: &JsonValue, key: &str) -> Vec<u32> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// `dorahaiUra` is a CSV of tile indices. Returns the corresponding mjai tiles.
-fn parse_tile_csv(v: &JsonValue) -> Option<Vec<String>> {
-    let s = v.as_str()?;
-    let tiles: Vec<String> = s
-        .split(',')
-        .filter_map(|t| t.trim().parse::<u32>().ok())
-        .map(tenhou_to_mjai_one)
-        .collect();
-    if tiles.is_empty() {
-        None
-    } else {
-        Some(tiles)
-    }
 }
 
 #[cfg(test)]
@@ -1279,10 +1286,12 @@ mod tests {
                         log_id,
                         go_type,
                         lobby,
+                        dan,
                     }) => {
                         assert_eq!(log_id.as_deref(), Some("2026082300gm-00a9-0000-deadbeef"));
                         assert_eq!(*go_type, Some(169));
                         assert_eq!(*lobby, Some(0));
+                        assert_eq!(*dan, Some(16));
                     }
                     other => panic!("expected Tenhou match_info, got {other:?}"),
                 }
@@ -1810,8 +1819,13 @@ mod tests {
         // Tsumo win: who=0, fromWho=0; sc deltas distribute points.
         let events = parse_one(
             &mut b,
-            r#"{"tag":"AGARI","who":"0","fromWho":"0","sc":"250,40,250,-10,250,-10,250,-20"}"#,
+            r#"{"tag":"AGARI","who":"0","fromWho":"0","machi":"109","hai":"0,1,2,36,37,38,72,73,74,128,129,130,108,109","sc":"250,40,250,-10,250,-10,250,-20"}"#,
         );
+        assert!(
+            events.is_empty(),
+            "a nonfinal win waits for a real boundary"
+        );
+        let events = b.parse(Direction::Up, br#"{"tag":"NEXTREADY"}"#).events;
         assert_eq!(events.len(), 2);
         match &events[0] {
             MjaiEvent::Hora {
@@ -1865,10 +1879,147 @@ mod tests {
         );
         let events = parse_one(
             &mut b,
-            r#"{"tag":"AGARI","who":"0","fromWho":"0","sc":"250,40,250,-10,250,-10,250,-20","owari":"290,30,240,-10,240,-10,230,-20"}"#,
+            r#"{"tag":"AGARI","who":"0","fromWho":"0","machi":"109","hai":"0,1,2,36,37,38,72,73,74,128,129,130,108,109","sc":"250,40,250,-10,250,-10,250,-20","owari":"290,30,240,-10,240,-10,230,-20"}"#,
         );
         assert_eq!(events.len(), 3);
         assert!(matches!(events[2], MjaiEvent::EndGame { .. }));
+    }
+
+    #[test]
+    fn consecutive_agari_wait_for_nextready_and_close_the_hand_once() {
+        let mut b = TenhouBridge::new(None, None);
+        b.state.seat = 1;
+        let first = r#"{"tag":"AGARI","who":"3","fromWho":"2","machi":"52","hai":"0,7,10,24,27,47,49,52,63,64,68","sc":"382,0,120,0,88,-77,400,87"}"#;
+        let second = r#"{"tag":"AGARI","who":"0","fromWho":"2","machi":"52","hai":"6,8,12,48,51,52,58,61,85,91,93","sc":"382,39,120,0,11,-39,487,0"}"#;
+        b.state.open_window(8);
+        assert!(parse_one(&mut b, first).is_empty());
+        assert!(b.state.window.is_none());
+        assert!(b.parse(Direction::Down, HEARTBEAT).events.is_empty());
+        assert!(b
+            .parse(Direction::Up, br#"{"tag":"D","p":52}"#)
+            .events
+            .is_empty());
+        assert!(parse_one(&mut b, second).is_empty());
+        let events = b.parse(Direction::Up, br#"{"tag":"NEXTREADY"}"#).events;
+        assert!(matches!(
+            events.as_slice(),
+            [
+                MjaiEvent::Hora { actor: 0, .. },
+                MjaiEvent::Hora { actor: 1, .. },
+                MjaiEvent::EndKyoku
+            ]
+        ));
+        for event in &events[..2] {
+            assert!(matches!(event, MjaiEvent::Hora { scores: Some(scores), .. }
+                if scores == &[48700,42100,12000,-2800]));
+        }
+        assert!(b
+            .parse(Direction::Up, br#"{"tag":"NEXTREADY"}"#)
+            .events
+            .is_empty());
+    }
+
+    #[test]
+    fn init_flushes_a_pending_win_before_the_next_opening() {
+        let mut b = TenhouBridge::new(None, None);
+        b.state.pending_start_game = false;
+        assert!(parse_one(&mut b,
+            r#"{"tag":"AGARI","who":"0","fromWho":"0","machi":"109","hai":"0,1,2,36,37,38,72,73,74,128,129,130,108,109","sc":"250,40,250,-10,250,-10,250,-20"}"#).is_empty());
+        let events = parse_one(
+            &mut b,
+            r#"{"tag":"INIT","seed":"1,0,0,1,2,4","ten":"290,240,240,230","oya":"1","hai":"0,4,8,36,40,44,72,76,80,108,112,116,120"}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                MjaiEvent::Hora { .. },
+                MjaiEvent::EndKyoku,
+                MjaiEvent::StartKyoku { .. }
+            ]
+        ));
+        assert!(b
+            .parse(Direction::Up, br#"{"tag":"NEXTREADY"}"#)
+            .events
+            .is_empty());
+    }
+
+    #[test]
+    fn go_rules_and_un_rank_are_explicit_and_unknown_values_stay_unknown() {
+        for (go, aka, mode) in [
+            (None, None, None),
+            (Some(1), Some(true), Some(1)),
+            (Some(3), Some(false), Some(1)),
+            (Some(169), Some(true), Some(2)),
+        ] {
+            let mut b = TenhouBridge::new(None, None);
+            if let Some(go) = go {
+                b.dispatch(&serde_json::json!({"tag":"GO","type":go,"lobby":0}));
+            }
+            b.dispatch(&serde_json::json!({"tag":"UN","n0":"me","n1":"a","n2":"b","n3":"c","dan":"16,15,14,13"}));
+            // A reconnect notice for another player must not replace our rank.
+            b.dispatch(&serde_json::json!({"tag":"UN","n1":"a","dan":"1"}));
+            let events = parse_one(
+                &mut b,
+                r#"{"tag":"INIT","seed":"0,0,0,1,2,4","ten":"250,250,250,250","oya":"1","hai":"0,4,8,36,40,44,72,76,80,108,112,116,120"}"#,
+            );
+            let MjaiEvent::StartGame {
+                aka_flag,
+                game_meta: Some(meta),
+                ..
+            } = &events[0]
+            else {
+                panic!()
+            };
+            assert_eq!(*aka_flag, aka);
+            assert_eq!(meta.match_mode, mode);
+            assert!(matches!(
+                meta.match_info,
+                Some(MatchInfo::Tenhou { dan: Some(16), .. })
+            ));
+            assert!(
+                b.state.dan.is_none(),
+                "a roster must not leak into another game"
+            );
+        }
+        for rank in [None, Some("bad,16,17,18"), Some(",16,17,18")] {
+            let mut b = TenhouBridge::new(None, None);
+            let mut roster = serde_json::json!({"tag":"UN","n0":"me","n1":"a","n2":"b","n3":"c"});
+            if let Some(rank) = rank {
+                roster["dan"] = serde_json::json!(rank);
+            }
+            b.dispatch(&roster);
+            assert!(b.state.dan.is_none());
+        }
+    }
+
+    #[test]
+    fn windows_carry_the_known_table_clock_without_guessing_custom_rules() {
+        use crate::autoplay::tenhou_state::TurnClock;
+        for (go, expected) in [
+            (
+                serde_json::json!({"tag":"GO","type":1,"lobby":0}),
+                Some(TurnClock::NORMAL),
+            ),
+            (
+                serde_json::json!({"tag":"GO","type":65,"lobby":0}),
+                Some(TurnClock::FAST),
+            ),
+            (serde_json::json!({"tag":"GO","type":65,"lobby":123}), None),
+            (serde_json::json!({"tag":"GO","type":65}), None),
+            (
+                serde_json::json!({"tag":"GO","type":65,"lobby":0,"csrule":"0,0,0,0"}),
+                None,
+            ),
+            (serde_json::json!({"tag":"GO","type":65537,"lobby":0}), None),
+        ] {
+            let mut b = TenhouBridge::new(None, None);
+            b.dispatch(&go);
+            b.state.open_window(0);
+            assert_eq!(b.state.window.unwrap().clock, expected, "{go}");
+        }
+        let mut state = State::default();
+        state.open_window(0);
+        assert_eq!(state.window.unwrap().clock, None);
     }
 
     /// Regression: Tenhou's WebSocket JSON spells the discarder seat `fromWho`
@@ -1888,7 +2039,8 @@ mod tests {
             r#"{"tag":"INIT","seed":"0,2,0,3,4,71","ten":"360,280,280,280","oya":"0","hai":"133,56,14,44,103,10,42,0,122,124,70,117,61"}"#,
         );
         let frame = r#"{"tag":"AGARI","ba":"2,1","doraHai":"71","doraHaiUra":"45","fromWho":"2","hai":"10,14,16,39,42,44,53,56,61,100,101,103,132,133","machi":"16","sc":"350,136,280,0,280,-126,280,0","ten":"40,12000,1","who":"0","yaku":"1,1,2,1,52,1,54,1,53,0"}"#;
-        let events = parse_one(&mut b, frame);
+        assert!(parse_one(&mut b, frame).is_empty());
+        let events = b.parse(Direction::Up, br#"{"tag":"NEXTREADY"}"#).events;
         let hora = events
             .iter()
             .find_map(|e| match e {
@@ -2216,7 +2368,7 @@ mod tests {
         assert!(b.state.window.is_some(), "autoplay still sees the window");
         assert!(parse_one(&mut b, r#"{"tag":"D60"}"#).is_empty());
         assert_eq!(b.state.hand.len(), 13);
-        let agari = r#"{"tag":"AGARI","who":"2","fromWho":"1","sc":"230,0,260,-20,250,20,260,0","ba":"1,0"}"#;
+        let agari = r#"{"tag":"AGARI","who":"2","fromWho":"1","machi":"109","hai":"0,1,2,36,37,38,72,73,74,128,129,130,108,109","sc":"230,0,260,-20,250,20,260,0","ba":"1,0"}"#;
         assert!(
             parse_one(&mut b, agari).is_empty(),
             "the hand's end is withheld too"
@@ -2603,7 +2755,7 @@ mod tests {
         assert!(b.state.rejoined_mid_game);
         let events = parse_one(
             &mut b,
-            r#"{"tag":"AGARI","who":"0","fromWho":"1","sc":"250,80,250,-80,250,0,250,0","ba":"0,0","owari":"1"}"#,
+            r#"{"tag":"AGARI","who":"0","fromWho":"1","machi":"109","hai":"0,1,2,36,37,38,72,73,74,128,129,130,108,109","sc":"250,80,250,-80,250,0,250,0","ba":"0,0","owari":"1"}"#,
         );
         assert_eq!(events.len(), 3, "{events:?}");
         assert!(matches!(
@@ -2627,7 +2779,7 @@ mod tests {
         assert_eq!(b.state.seat, 3);
         parse_one(
             &mut b,
-            r#"{"tag":"AGARI","who":"0","fromWho":"0","sc":"250,120,250,-40,250,-40,250,-40","ba":"0,0","owari":"1"}"#,
+            r#"{"tag":"AGARI","who":"0","fromWho":"0","machi":"109","hai":"0,1,2,36,37,38,72,73,74,128,129,130,108,109","sc":"250,120,250,-40,250,-40,250,-40","ba":"0,0","owari":"1"}"#,
         );
         // Next game, different seat, no TAIKYOKU: E1 dealer at rel 3 → seat 1.
         let init = format!(
@@ -2742,7 +2894,7 @@ mod tests {
         // with the roster from the rejoin's <UN/>.
         assert!(parse_one(
             &mut b,
-            r#"{"tag":"AGARI","who":"0","fromWho":"1","sc":"240,77,250,-77,250,0,250,0","ba":"0,1"}"#
+            r#"{"tag":"AGARI","who":"0","fromWho":"1","machi":"109","hai":"0,1,2,36,37,38,72,73,74,128,129,130,108,109","sc":"240,77,250,-77,250,0,250,0","ba":"0,1"}"#
         )
         .is_empty());
         let events = parse_one(

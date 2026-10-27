@@ -127,6 +127,18 @@ fn game_description(num_players: u8, meta: Option<&GameMeta>) -> Option<serde_js
                 .as_ref()
                 .map(|level| serde_json::json!({ "id": level.id, "score": level.score })),
         })),
+        MatchInfo::Tenhou {
+            go_type,
+            lobby,
+            dan,
+            ..
+        } => Some(serde_json::json!({
+            "platform": "tenhou",
+            "num_players": num_players,
+            "go_type": go_type,
+            "lobby": lobby,
+            "dan": dan,
+        })),
         _ => None,
     }
 }
@@ -1605,7 +1617,7 @@ mod tests {
     }
 
     #[test]
-    fn a_game_the_bridge_said_nothing_of_is_not_described() {
+    fn descriptions_require_platform_metadata_and_preserve_tenhou_values() {
         assert_eq!(game_description(4, None), None);
         assert_eq!(game_description(4, Some(&GameMeta::default())), None);
         let tenhou = GameMeta {
@@ -1613,10 +1625,31 @@ mod tests {
                 log_id: None,
                 go_type: Some(0x89),
                 lobby: Some(0),
+                dan: Some(15),
             }),
             ..GameMeta::default()
         };
-        assert_eq!(game_description(4, Some(&tenhou)), None);
+        assert_eq!(
+            game_description(4, Some(&tenhou)),
+            Some(serde_json::json!({
+                "platform": "tenhou", "num_players": 4, "go_type": 0x89, "lobby": 0, "dan": 15
+            }))
+        );
+        let unknown = GameMeta {
+            match_info: Some(MatchInfo::Tenhou {
+                log_id: None,
+                go_type: None,
+                lobby: None,
+                dan: None,
+            }),
+            ..GameMeta::default()
+        };
+        assert_eq!(
+            game_description(4, Some(&unknown)),
+            Some(serde_json::json!({
+                "platform": "tenhou", "num_players": 4, "go_type": null, "lobby": null, "dan": null
+            }))
+        );
     }
 
     #[tokio::test]
@@ -2068,6 +2101,7 @@ mod tests {
         let window = InputWindow::Tenhou(crate::autoplay::tenhou_state::DecisionWindow {
             ops: 32,
             opened_at: Instant::now(),
+            clock: Some(crate::autoplay::tenhou_state::TurnClock::NORMAL),
         });
         mgr.handle_tracked(TrackedEvent {
             event: our_tsumo(),

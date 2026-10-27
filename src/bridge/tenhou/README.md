@@ -3,9 +3,10 @@
 Translates Tenhou (天鳳) WebSocket frames into the mjai event stream the rest
 of AkagiV3 consumes, and back again for autoplay.
 
-Only server → client frames are **parsed**: all game state analysis and the
-bots need arrives on them, and client frames are user input that contributes no
-new information. `Bridge::build` goes the other way — it encodes a bot's chosen
+Gameplay comes from server → client frames. The sole observed client boundary
+is `NEXTREADY`, the official client's acknowledgement of its complete result
+queue; it flushes a pending win group. Other client input is ignored.
+`Bridge::build` goes the other way — it encodes a bot's chosen
 action as the client frame that performs it (see `encode.rs`). Autoplay does
 **not** use it: the Tenhou client owns its board state and freezes if a discard
 reaches the server without going through its own handler, so `autoplay::tenhou`
@@ -37,8 +38,9 @@ out any deliberate divergence.
 | `REACH step=1` | declare riichi | `reach` |
 | `REACH step=2` | riichi accepted | `reach_accepted` |
 | `DORA` | new dora indicator | `dora` |
-| `AGARI` (no `owari`) | win | `hora` + `end_kyoku` |
-| `AGARI` (with `owari`) | win at game end | `hora` + `end_kyoku` + `end_game` |
+| `AGARI` (no `owari`) | win | buffer until the result boundary |
+| uplink `NEXTREADY` / next `INIT` | complete win group | all `hora`, then one `end_kyoku`, before any new opening |
+| `AGARI` (with `owari`) | win at game end | flush all pending `hora` + one `end_kyoku` + `end_game` |
 | `RYUUKYOKU` (no `owari`) | exhaustive draw | `ryukyoku` + `end_kyoku` |
 | `RYUUKYOKU` (with `owari`) | draw at game end | `ryukyoku` + `end_kyoku` + `end_game` |
 
@@ -47,6 +49,31 @@ compare the tile against our last draw instead (`on_dahai`), which also
 covers the digit-less own-discard echo (a `D`/`d` tag with no tile index).
 
 ### Tile encoding
+
+`AGARI.machi` is the physical winning tile; `hai` includes it. The bridge
+removes exactly that ID once to emit `hora.tehai`, preserving ordinary/red
+five identities and duplicate tile kinds. Missing/invalid IDs and malformed
+score vectors reject the group. All seats, hands and score vectors rotate
+from wire-relative to MJAI-absolute order, omitting only the sanma ghost.
+
+`sc` contains four interleaved before/delta pairs in units of 100 points.
+In a double ron, the second baseline includes the first winner's settlement.
+The bridge validates that chain and gives both `hora` events the same final
+`scores`; each keeps its own partial `deltas`, so history adds each payment
+once. Duplicate winners, different winning tiles/sources and contradictory
+baselines invalidate the whole pending group. There is no timing heuristic.
+
+`RYUUKYOKU.hai0..hai3` reveal only the supplied hands, with `null` for other
+seats. Its explicit `type` maps `nm/yao9/kaze4/reach4/ron3/kan4` to
+`nagashi/kyuushu/four_winds/four_riichis/three_rons/four_kans`; absent `type`
+means exhaustive. Unknown types fail. The actual `sc` totals settle the hand
+immediately. No hidden opponent hand is supplied and training rules stay put.
+
+The live boundary is verified against the [official client](https://tenhou.net/4/latest.js)
+(`R.c6`, `Xb.hj`, `Nb.AGARI`); sequential double-ron payments are also covered
+by the original decoder's [public raw fixture](https://github.com/kobalab/tenhou-log/blob/03fc4a38cbd10f64ea8a883cffd2a4f0c204ba83/test/convlog.js).
+Public official XML replays can be read at `https://tenhou.net/0/log/?<log-id>`;
+they require rotation/hiding for a chosen viewer before live-bridge use.
 
 Tenhou tiles are integer indices `0..=135`. `index / 4` gives tile type
 (`0..=33`); `index % 4` is the variant. Red 5s live at exactly `16`, `52`, `88`
@@ -70,6 +97,51 @@ both were seen; the kyoku frame only fills in when it was not
 (`State::seat_resolved`).
 
 ### Player count
+
+`start_game.aka_flag` comes from known `GO.type & 0x02` (set means no red
+fives); absent GO leaves it unknown. East/East-South is `GO.type & 0x08`,
+stored as `game_meta.match_mode` 1/2. A complete UN roster supplies our raw
+`dan` entry 0 regardless of our absolute seat. It is consumed with that
+roster; partial reconnect names and missing/bad rank entries supply no rank.
+`MatchInfo::Tenhou` persists optional `dan`; the bot's game description is
+exactly `{platform:"tenhou", num_players, go_type, lobby, dan}`, using JSON
+nulls for unknown metadata. No player name, replay ID or inferred rank enters
+that description.
+
+`DecisionWindow.clock: Option<TurnClock>` carries the known standard clock:
+`TurnClock { fixed_ms, bank_ms }`. Public GO lobby 0, known standard flags and
+no custom `csrule` yield normal 5000/10000 or fast (0x40) 3000/5000 ms, as in
+the [official manual](https://tenhou.net/man/) and client's GO handler.
+Private/custom/unknown rules yield `None`. `bank_ms` is the initial reserve
+cap, not a measured remaining balance; consumers must not assume it is still
+available. Parent integration owns inference-deadline and delay consumption.
+
+### Offline qualification (2026-10-27)
+
+The isolated owner harness uses integration base `05d48f3` plus these owned
+bridge/schema/game-description/window changes; other owners' unfinished input
+implementation is excluded. Baseline test literals receive explicit unknown
+clock / non-riichi fields in that generated harness only. Results: 92 Tenhou
+bridge tests, 5 shared-window tests, 7 history-schema tests and 34 bot-manager
+tests passed (**138 total**). The canonical combined build remains the parent
+session's integration check; this qualification does not claim that check.
+
+The public official game
+[`2016031822gm-0009-10011-896da481`](https://tenhou.net/0/log/?2016031822gm-0009-10011-896da481)
+was converted into four private live views, retaining only each viewer's own
+hand/draws and actual public reveals. All 5864 protocol frames went through
+the actual Rust bridge; all **5912 MJAI events / 52 viewer-hands / 693 own
+draws** replayed through the native NGK single-seat Tracker without desync.
+Every explicit terminal score matched the provider's settlement. No hidden
+wall or opponent hand was passed to inference, and no model weights changed.
+
+Local untracked reproduction inputs/drivers are `.qa/tenhou-public-frames.jsonl`,
+`.qa/replay_tenhou.rs`, `.qa/qualify_tenhou_public.py`, and the aggregate
+`.qa/tenhou-public-qualification.json`. The named harness artifacts are
+`design/staged/core-harness/tests/tenhou-contract-tests.exe` and
+`design/staged/core-harness/tests/qa_tenhou.exe`. They are offline tools, not a
+production deployment. Live result timing, GUI input and real-account play
+were not tested here.
 
 `start_game` must say 3 or 4, and only the E1H0 `<INIT/>` proves it (a 0 in
 `ten` at the very first deal is the absent seat; nobody starts a real game on
