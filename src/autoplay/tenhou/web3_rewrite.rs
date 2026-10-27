@@ -1,0 +1,664 @@
+//! Instrument only the Web3 client's verified native closures.
+//!
+//! Protocol tags, payload shapes and DOM names anchor every recovered name.
+//! A changed main client is a contract error; helper scripts are NotClient.
+//! No downloaded client bytes, compressed names or 4K path are bundled here.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+const PRODUCER: &str = include_str!("web3.js");
+const MARKER: &str = "/*washizu-web3-bridge*/";
+const EPOCH: &str = "__washizuWeb3Epoch";
+const UI_EPOCH: &str = "__washizuWeb3UiEpoch";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RewriteError {
+    NotClient,
+    Contract(String),
+}
+
+impl fmt::Display for RewriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotClient => write!(f, "not the Tenhou Web3 main client"),
+            Self::Contract(reason) => write!(f, "Tenhou Web3 contract: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for RewriteError {}
+
+fn contract(reason: impl Into<String>) -> RewriteError {
+    RewriteError::Contract(reason.into())
+}
+
+#[derive(Debug)]
+struct Token<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+    identifier: bool,
+}
+
+fn ident(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
+// This scanner preserves source offsets, skipping strings/comments/regexes
+// as units so braces in a regular expression cannot become scope boundaries.
+fn tokens(src: &str) -> Result<Vec<Token<'_>>, RewriteError> {
+    let bytes = src.as_bytes();
+    let mut out: Vec<Token<'_>> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i..].starts_with(b"/*") {
+            let Some(length) = src[i + 2..].find("*/") else {
+                return Err(contract("unclosed comment"));
+            };
+            i += length + 4;
+            continue;
+        }
+        let start = i;
+        let identifier = bytes[i].is_ascii_alphabetic() || matches!(bytes[i], b'_' | b'$');
+        if ident(bytes[i]) {
+            i += 1;
+            while i < bytes.len() && ident(bytes[i]) {
+                i += 1;
+            }
+        } else if matches!(bytes[i], b'\'' | b'"') {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i >= bytes.len() {
+                return Err(contract("unclosed string"));
+            }
+            i += 1;
+        } else if bytes[i] == b'`' {
+            return Err(contract(
+                "template literals need a reviewed scanner contract",
+            ));
+        } else if bytes[i] == b'/'
+            && out.last().is_none_or(|last| {
+                matches!(
+                    last.text,
+                    "(" | "["
+                        | "{"
+                        | "="
+                        | ":"
+                        | ","
+                        | ";"
+                        | "!"
+                        | "?"
+                        | "&"
+                        | "|"
+                        | "~"
+                        | "return"
+                        | "case"
+                        | "throw"
+                )
+            })
+        {
+            i += 1;
+            let mut bracket = false;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i += 2,
+                    b'[' => {
+                        bracket = true;
+                        i += 1;
+                    }
+                    b']' => {
+                        bracket = false;
+                        i += 1;
+                    }
+                    b'/' if !bracket => break,
+                    _ => i += 1,
+                }
+            }
+            if i >= bytes.len() {
+                return Err(contract("unclosed regex"));
+            }
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+        } else {
+            i += src[i..]
+                .chars()
+                .next()
+                .ok_or_else(|| contract("invalid source offset"))?
+                .len_utf8();
+        }
+        out.push(Token {
+            text: &src[start..i],
+            start,
+            end: i,
+            identifier,
+        });
+    }
+    Ok(out)
+}
+
+struct Source<'a> {
+    code: &'a str,
+    tokens: Vec<Token<'a>>,
+    pairs: BTreeMap<usize, usize>,
+    names: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy)]
+struct Scope {
+    open: usize,
+    close: usize,
+}
+
+#[derive(Clone)]
+struct Method {
+    name: String,
+    body: Scope,
+}
+
+impl<'a> Source<'a> {
+    fn new(code: &'a str) -> Result<Self, RewriteError> {
+        let tokens = tokens(code)?;
+        let mut pairs = BTreeMap::new();
+        let mut stack = Vec::new();
+        for (i, token) in tokens.iter().enumerate() {
+            match token.text {
+                "(" | "[" | "{" => stack.push(i),
+                ")" | "]" | "}" => {
+                    let open = stack
+                        .pop()
+                        .ok_or_else(|| contract("unbalanced delimiters"))?;
+                    let expected = match tokens[open].text {
+                        "(" => ")",
+                        "[" => "]",
+                        _ => "}",
+                    };
+                    if token.text != expected {
+                        return Err(contract("mismatched delimiters"));
+                    }
+                    pairs.insert(open, i);
+                }
+                _ => {}
+            }
+        }
+        if !stack.is_empty() {
+            return Err(contract("unclosed delimiters"));
+        }
+        Ok(Self {
+            code,
+            tokens,
+            pairs,
+            names: BTreeMap::new(),
+        })
+    }
+
+    fn unique(&mut self, label: &str, pattern: &str) -> Result<usize, RewriteError> {
+        let pattern = tokens(pattern)?;
+        let mut matches = Vec::new();
+        if pattern.len() > self.tokens.len() {
+            return Err(contract(format!(
+                "{label}: source is shorter than the required shape"
+            )));
+        }
+        for start in 0..=self.tokens.len().saturating_sub(pattern.len()) {
+            // Reject the token shape without allocating captures. A main
+            // script has tens of thousands of possible starts; cloning all
+            // previously bound names at each one would block interception.
+            if !pattern
+                .iter()
+                .zip(&self.tokens[start..])
+                .all(|(expected, actual)| {
+                    if expected.identifier && expected.text.starts_with("__") {
+                        actual.identifier
+                            && self
+                                .names
+                                .get(expected.text)
+                                .is_none_or(|value| value == actual.text)
+                    } else {
+                        expected.text == actual.text
+                    }
+                })
+            {
+                continue;
+            }
+            let mut names = self.names.clone();
+            let mut valid = true;
+            for (expected, actual) in pattern.iter().zip(&self.tokens[start..]) {
+                if expected.identifier && expected.text.starts_with("__") {
+                    if !actual.identifier {
+                        valid = false;
+                        break;
+                    }
+                    if let Some(value) = names.get(expected.text) {
+                        if value != actual.text {
+                            valid = false;
+                            break;
+                        }
+                    } else {
+                        names.insert(expected.text.to_owned(), actual.text.to_owned());
+                    }
+                } else if expected.text != actual.text {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                matches.push((start, names));
+            }
+        }
+        if matches.len() != 1 {
+            return Err(contract(format!(
+                "{label}: expected one shape, found {}",
+                matches.len()
+            )));
+        }
+        let (start, names) = matches.pop().expect("one shape");
+        self.names = names;
+        Ok(start)
+    }
+
+    fn name(&self, key: &str) -> &str {
+        &self.names[key]
+    }
+
+    fn pair(&self, open: usize) -> Result<usize, RewriteError> {
+        self.pairs
+            .get(&open)
+            .copied()
+            .ok_or_else(|| contract("missing scope boundary"))
+    }
+
+    fn enclosing_function(&self, at: usize) -> Result<Scope, RewriteError> {
+        let mut found = None;
+        for i in 0..at {
+            if self.tokens[i].text != "function" {
+                continue;
+            }
+            let args = i + if self.tokens.get(i + 1).is_some_and(|t| t.identifier) {
+                2
+            } else {
+                1
+            };
+            if self.tokens.get(args).is_none_or(|t| t.text != "(") {
+                continue;
+            }
+            let open = self.pair(args)? + 1;
+            if self.tokens.get(open).is_some_and(|t| t.text == "{") {
+                let close = self.pair(open)?;
+                if open < at && at < close {
+                    found = Some(Scope { open, close });
+                }
+            }
+        }
+        found.ok_or_else(|| contract("anchor has no enclosing native closure"))
+    }
+
+    fn return_object(&self, function: Scope, containing: usize) -> Result<Scope, RewriteError> {
+        let mut found = Vec::new();
+        for i in function.open + 1..function.close {
+            if self.tokens[i].text == "return" && self.tokens[i + 1].text == "{" {
+                let close = self.pair(i + 1)?;
+                if i < containing && containing < close && close < function.close {
+                    found.push(Scope { open: i + 1, close });
+                }
+            }
+        }
+        if found.len() != 1 {
+            return Err(contract("native capability is not in one returned object"));
+        }
+        Ok(found[0])
+    }
+
+    fn methods(&self, object: Scope) -> Result<Vec<Method>, RewriteError> {
+        let mut methods = Vec::new();
+        let mut i = object.open + 1;
+        while i < object.close {
+            if self.tokens.get(i + 1).is_some_and(|t| t.text == ":")
+                && self.tokens.get(i + 2).is_some_and(|t| t.text == "function")
+            {
+                let open = self.pair(i + 3)? + 1;
+                let close = self.pair(open)?;
+                methods.push(Method {
+                    name: self.tokens[i].text.trim_matches('"').to_owned(),
+                    body: Scope { open, close },
+                });
+                i = close + 1;
+            } else if matches!(self.tokens[i].text, "(" | "[" | "{") {
+                i = self.pair(i)? + 1;
+            } else {
+                i += 1;
+            }
+        }
+        Ok(methods)
+    }
+
+    fn method_at(&self, object: Scope, at: usize) -> Result<Method, RewriteError> {
+        self.methods(object)?
+            .into_iter()
+            .find(|method| method.body.open < at && at < method.body.close)
+            .ok_or_else(|| contract("anchor has no native method"))
+    }
+
+    fn returned_by(&self, object: Scope, value: &str) -> Result<String, RewriteError> {
+        let found: Vec<_> = self
+            .methods(object)?
+            .into_iter()
+            .filter(|method| {
+                let body: Vec<_> = self.tokens[method.body.open + 1..method.body.close]
+                    .iter()
+                    .map(|t| t.text)
+                    .collect();
+                body == ["return", value] || body == ["return", value, ";"]
+            })
+            .collect();
+        if found.len() != 1 {
+            return Err(contract("native target getter changed"));
+        }
+        Ok(found[0].name.clone())
+    }
+
+    fn assigned_owner(&self, scope: Scope) -> Result<String, RewriteError> {
+        if scope.open < 4
+            || self.tokens[scope.open - 3].text != "function"
+            || self.tokens[scope.open - 4].text != "="
+        {
+            return Err(contract("native module assignment changed"));
+        }
+        let owner = &self.tokens[scope.open - 5];
+        if !owner.identifier {
+            return Err(contract("native module owner is not an identifier"));
+        }
+        Ok(owner.text.to_owned())
+    }
+
+    fn assignment(&self, object: Scope, code: String) -> (usize, String) {
+        // Insert before the return keyword, so this assignment retains the
+        // module's private variables without publishing an arbitrary registry.
+        (self.tokens[object.open - 1].start, code)
+    }
+
+    fn expand(&self, text: &str) -> String {
+        let mut out = text.to_owned();
+        let mut keys: Vec<_> = self.names.keys().collect();
+        keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
+        for key in keys {
+            out = out.replace(key, &self.names[key]);
+        }
+        out
+    }
+}
+
+/// Rewrite the current Web3 client, or report exactly which native capability
+/// could not be established. The caller alone chooses notification policy.
+pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
+    if src.contains(MARKER) {
+        return if src.matches(MARKER).count() == 1 && src.contains(PRODUCER) {
+            Ok(src.to_owned())
+        } else {
+            Err(contract("partial or duplicate Web3 instrumentation"))
+        };
+    }
+    let protocol_tags = ["\"NEXTREADY\"", "\"RYUUKYOKU\"", "\"GO\""]
+        .iter()
+        .filter(|tag| src.contains(**tag))
+        .count();
+    if protocol_tags < 2 && !(src.contains("\"[name=ok]\"") && src.contains("\"LOBBY\"")) {
+        return Err(RewriteError::NotClient);
+    }
+    if src.contains("__washizuWeb3") {
+        return Err(contract("producer namespace already exists"));
+    }
+    let mut s = Source::new(src)?;
+    let discard = s.unique("physical discard", r#"function __discard(__tileArg,__forcedArg){var __message={tag:"D",p:__tileArg};if(1==__state.__mode){if(!__forcedArg&&(__forcedArg=__clock.__mounted(),__clear(),!__forcedArg))return;__wire.__send(__message)}else 4==__state.__mode&&(__clear(),__popup.__training(__message));__message[0]=__tileArg;__wire.__apply(__message)}"#)?;
+    let input_scope = s.enclosing_function(discard)?;
+    let slot = s.unique("discard hand and actor", r#"__slotMethod:function(__slotArg,__slotForced){var __physical=__lastTile;__hand[64]||(__physical=__hand[32|__actor][__slotArg]);__discard(__physical,__slotForced)}"#)?;
+    let input_object = s.return_object(input_scope, slot)?;
+    s.unique("legal discard marks", r#"function __clear(__event){if(1==__state.__mode||4==__state.__mode)if(!__popup.__element||__popup.__element.style.display){var __marks=[0,0,0,0,0,0,0,0,0,0,0,0,0,0];if(__event)if("REACH"==__event.tag)for(var __waits=__rules.__waitMethod(),__markSlot=0;__markSlot<__hand[32].length;++__markSlot){var __wait=__waits[__hand[32][__markSlot]>>2];__marks[__markSlot]|=__wait&&__wait.length?__flags.__legal:__flags.__blocked}"#)?;
+    s.unique("native card input guard", r#"else if(__focus instanceof __card)__bits=__cards[1024|__focus.__slotKey].__cardFlags,(__menu[2360326].parentNode.style.visibility||__menu[2360326].parentNode.style.display)&&__bits&__flags.__legal&&__focus.__present&&(__state.__slotMethod(__focus.__slotKey),__select());else if"#)?;
+
+    let menu = s.unique("native offered action", r#"__chooseMethod:function(__code){if(4==__state.__mode)__clear(),__popup.__training(__offers[__code]);else if(__offers[__code]){var __wasReady=__clock.__mounted();__clear();if(!__wasReady)return;__wire.__send(__offers[__code])}__offers={}}"#)?;
+    let menu_scope = s.enclosing_function(menu)?;
+    let menu_object = s.return_object(menu_scope, menu)?;
+    let menu_owner = s.assigned_owner(menu_scope)?;
+    s.unique("native claim and pass offers", r#"__claimMethod:function(__claimMask){if(1==__state.__mode||4==__state.__mode)__offers={2360326:{tag:"N"}},__claimMask&__operationBits.__operationEnum.__ronBit&&(__offers[2360328]={tag:"N",type:6})"#)?;
+    let clock = s.unique(
+        "native mounted clock",
+        r#"__mounted:function(){return!!__clockElement.parentNode}"#,
+    )?;
+    let clock_scope = s.enclosing_function(clock)?;
+    let clock_object = s.return_object(clock_scope, clock)?;
+    if s.assigned_owner(clock_scope)? != s.name("__clock") {
+        return Err(contract("clock owner mismatch"));
+    }
+    let clock_open = s.unique("clock opening", r#"__openClock:function(__duration,__clockTarget,__clockMove){__clockElement.firstChild.innerHTML="";__clockTarget||(__clockTarget=__query("[name=ok]"));__clock.__positionClock(__clockTarget,__clockMove);1==__state.__mode&&"#)?;
+    let clock_close = s.unique(
+        "clock withdrawal",
+        r#"__target=void 0;__clockRemaining=-1;delete __ticks().count"#,
+    )?;
+    let target_getter = s.returned_by(clock_object, s.name("__target"))?;
+    let close_method = s.method_at(clock_object, clock_close)?;
+    let open_method = s
+        .methods(clock_object)?
+        .into_iter()
+        .find(|m| m.name == s.name("__openClock"))
+        .ok_or_else(|| contract("clock opening method is outside clock module"))?;
+    if !(clock_object.open < clock_open && clock_open < clock_object.close) {
+        return Err(contract("clock opening scope changed"));
+    }
+
+    let modal = s.unique(
+        "modal overlay",
+        r#"__hasModal:function(){return!!__modalElement}"#,
+    )?;
+    let modal_scope = s.enclosing_function(modal)?;
+    let modal_owner = s.assigned_owner(modal_scope)?;
+    let modal_object = s.return_object(modal_scope, modal)?;
+    if !s
+        .methods(modal_object)?
+        .iter()
+        .any(|m| m.name == s.name("__hasModal"))
+    {
+        return Err(contract("modal getter changed"));
+    }
+
+    let popup = s.unique("popup queue", r#""AGARI"==__currentPopup.tag&&"AGARI"==__popupEvent.tag?__popupQueue.push(__popupEvent):__popup.__replacePopup(__popupEvent,__popupCallback);else{__currentPopup=__popupEvent;__popupEvent=__popup.__element="#)?;
+    let popup_method_scope = s.enclosing_function(popup)?;
+    let popup_scope = s.enclosing_function(popup_method_scope.open)?;
+    let popup_object = s.return_object(popup_scope, popup)?;
+    let popup_show = s.method_at(popup_object, popup)?;
+    let popup_replace = s
+        .methods(popup_object)?
+        .into_iter()
+        .find(|m| m.name == s.name("__replacePopup"))
+        .ok_or_else(|| contract("popup withdrawal changed"))?;
+    if !s.methods(popup_object)?.iter().any(|m| m.name == "ok") {
+        return Err(contract("native OK handler is missing"));
+    }
+    let popup_new = s.unique(
+        "popup instantiation",
+        r#"__currentPopup=__popupEvent;__popupEvent=__popup.__element="#,
+    )?;
+
+    let selected = s.unique("selected lobby rules", r#"function __selected(){return(""+(__storage[__storageKeys.__ruleKey]||__defaultRules)).split(",")}"#)?;
+    let lobby_scope = s.enclosing_function(selected)?;
+    let join = s.unique("lobby reservation send", r#"__dom.cancel.style.display="";__dom.logout.style.display="none";__wire.__send({tag:"JOIN",t:__lobby+","+__joinMode});__reservations[__joinMode]=1"#)?;
+    let lobby_object = s.return_object(lobby_scope, join)?;
+    s.unique("lobby asset readiness", r#"function __loaded(__loadWarn){if(__images[4096]&&__images[4096].complete&&__images[4196]&&__images[4196].complete&&__images[4296]&&__images[4296].complete&&__images[4396]&&__images[4396].complete&&__images[4496]&&__images[4496].complete)return!0;__loadWarn&&"#)?;
+    if !s.methods(lobby_object)?.iter().any(|m| m.name == "join") {
+        return Err(contract("native join handler is missing"));
+    }
+
+    let mut edits: Vec<(usize, String)> = Vec::new();
+    let first_fn = s
+        .tokens
+        .iter()
+        .position(|t| t.text == "function")
+        .ok_or_else(|| contract("missing outer IIFE"))?;
+    if s.tokens[first_fn + 1].text != "(" {
+        return Err(contract("outer IIFE has a name"));
+    }
+    let outer_open = s.pair(first_fn + 1)? + 1;
+    let outer_close = s.pair(outer_open)?;
+    if s.tokens[outer_open].text != "{"
+        || outer_close + 4 >= s.tokens.len()
+        || s.tokens[outer_close + 1..outer_close + 5]
+            .iter()
+            .map(|t| t.text)
+            .collect::<Vec<_>>()
+            != [")", "(", ")", ";"]
+    {
+        return Err(contract("outer IIFE boundary changed"));
+    }
+    edits.push((s.tokens[outer_open].end, format!("var {EPOCH}=0,{UI_EPOCH}=0,__washizuWeb3PhaseReady=false,__washizuWeb3Closing=false,__washizuWeb3Input,__washizuWeb3Menu,__washizuWeb3Popup,__washizuWeb3Lobby;")));
+
+    let native_input = s.expand(r#"__washizuWeb3Input={mode:function(){return __state.__mode},phaseReady:function(){return __washizuWeb3PhaseReady},hand:function(){return __hand[32]},actor:function(){return __actor},isCard:function(v){return v instanceof __card},targetSlot:function(v){return v.__slotKey},slot:function(i){var c=__cards[1024|i];return c&&{target:c,present:!!c.__present,legal:!!(c.__cardFlags&__flags.__legal),blocked:!!(c.__cardFlags&__flags.__blocked)}},discard:function(tile){__discard(tile)}};"#);
+    edits.push(s.assignment(input_object, native_input));
+    edits.push(s.assignment(menu_object, s.expand(&format!("__washizuWeb3Menu={{offers:function(){{return __offers}},responseTarget:function(){{return __menu[2360326]}},choose:function(code){{{menu_owner}.__chooseMethod(code)}}}};"))));
+    edits.push(s.assignment(popup_object, s.expand("__washizuWeb3Popup={read:function(){return{element:__popup.__element,tag:__currentPopup&&__currentPopup.tag,queued:__popupQueue.length,closing:__washizuWeb3Closing}},ok:function(){__popup.ok()}};")));
+    edits.push(s.assignment(lobby_object, s.expand("__washizuWeb3Lobby={read:function(){return{lobby:__lobby,selected:__selected(),reservationRequested:!!Object.keys(__reservations).length,loaded:__loaded(false)}},join:function(button){__popup.join(button)}};")));
+
+    // Native lifecycle calls invalidate identities even if nobody polls during
+    // a close/reopen cycle, or if the client reuses every tile/clock DOM node.
+    // Raw end-of-hand frames retire a retained clock before delayed result
+    // animation starts. Only an actual native clock opening restores readiness.
+    for method in s.methods(input_object)? {
+        let invalidate = if matches!(
+            method.name.as_str(),
+            "T" | "D" | "N" | "REACH" | "AGARI" | "RYUUKYOKU" | "GO" | "TAIKYOKU" | "INIT"
+        ) {
+            "__washizuWeb3PhaseReady=false;"
+        } else {
+            ""
+        };
+        edits.push((
+            s.tokens[method.body.open].end,
+            format!("++{EPOCH};{invalidate}"),
+        ));
+    }
+    for method in s.methods(menu_object)? {
+        let body = &s.tokens[method.body.open + 1..method.body.close];
+        let rebuilds = body.windows(3).any(|tokens| {
+            tokens[0].text == s.name("__offers") && tokens[1].text == "=" && tokens[2].text == "{"
+        });
+        let invalidate = if rebuilds || method.name == s.name("__chooseMethod") {
+            "__washizuWeb3PhaseReady=false;"
+        } else {
+            ""
+        };
+        edits.push((
+            s.tokens[method.body.open].end,
+            format!("++{EPOCH};{invalidate}"),
+        ));
+    }
+    for (method, ready) in [(open_method, true), (close_method, false)] {
+        edits.push((
+            s.tokens[method.body.open].end,
+            format!("++{EPOCH};__washizuWeb3PhaseReady={ready};"),
+        ));
+    }
+    edits.push((
+        s.tokens[popup_show.body.open].end,
+        format!("++{UI_EPOCH};++{EPOCH};__washizuWeb3PhaseReady=false;"),
+    ));
+    edits.push((
+        s.tokens[popup_replace.body.open].end,
+        format!("__washizuWeb3Closing=true;++{UI_EPOCH};++{EPOCH};__washizuWeb3PhaseReady=false;"),
+    ));
+    edits.push((
+        s.tokens[popup_new].start,
+        "__washizuWeb3Closing=false;".into(),
+    ));
+    for method in s.methods(lobby_object)? {
+        let bump = match method.name.as_str() {
+            "join" | "cancel" | "rule" => format!("++{UI_EPOCH};"),
+            "#rule0" => format!("if(arguments.length)++{UI_EPOCH};"),
+            _ => continue,
+        };
+        edits.push((s.tokens[method.body.open].end, bump));
+    }
+    let native = s.expand(&format!("{{epoch:function(){{return {EPOCH}}},uiEpoch:function(){{return {UI_EPOCH}}},input:__washizuWeb3Input,menu:__washizuWeb3Menu,popup:__washizuWeb3Popup,lobby:__washizuWeb3Lobby,clock:{{mounted:function(){{return __clock.__mounted()}},target:function(){{return __clock.{target_getter}()}}}},modal:function(){{return {modal_owner}.__hasModal()}}}}"));
+    edits.push((
+        s.tokens[outer_close].start,
+        format!(";{MARKER}window.__akagiTenhou=({PRODUCER})({native});\n"),
+    ));
+    edits.sort_by_key(|(position, _)| *position);
+    if edits.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(contract("instrumentation scopes overlap"));
+    }
+    let mut out = String::with_capacity(src.len() + PRODUCER.len() + 4096);
+    let mut previous = 0;
+    for (position, insertion) in edits {
+        out.push_str(&s.code[previous..position]);
+        out.push_str(&insertion);
+        previous = position;
+    }
+    out.push_str(&s.code[previous..]);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers_are_not_main_clients() {
+        assert_eq!(
+            rewrite_client("window.inflate=function(){}"),
+            Err(RewriteError::NotClient)
+        );
+    }
+
+    #[test]
+    fn main_client_with_missing_capabilities_is_a_contract_error() {
+        assert!(matches!(
+            rewrite_client("(function(){var a=[\"GO\",\"RYUUKYOKU\",\"NEXTREADY\"]})();"),
+            Err(RewriteError::Contract(_))
+        ));
+        assert!(matches!(
+            rewrite_client("(function(){var a=[\"BROKEN_GO\",\"RYUUKYOKU\",\"NEXTREADY\"]})();"),
+            Err(RewriteError::Contract(_))
+        ));
+    }
+
+    #[test]
+    fn scanner_keeps_regex_braces_out_of_scope_pairs() {
+        let source =
+            Source::new("(function(){var x=/[{}]\\/[a-z]+/g;return {a:function(){return x}}})();")
+                .unwrap();
+        assert_eq!(source.tokens.iter().filter(|t| t.text == "{").count(), 3);
+    }
+
+    #[test]
+    fn unique_shapes_bind_names_and_refuse_ambiguity() {
+        let mut source =
+            Source::new("function Ab(t){return t.x}function Cd(t){return t.x}").unwrap();
+        assert!(source
+            .unique("ambiguous", "function __f(__a){return __a.__p}")
+            .is_err());
+        let mut source = Source::new("function Renamed(tile){return tile.flags}").unwrap();
+        source
+            .unique("renamed", "function __f(__a){return __a.__p}")
+            .unwrap();
+        assert_eq!(source.name("__f"), "Renamed");
+        assert_eq!(source.name("__p"), "flags");
+    }
+}
