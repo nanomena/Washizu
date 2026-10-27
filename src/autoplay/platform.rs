@@ -5,11 +5,99 @@
 //! later (DOM-based clicks or direct WS inject) without touching the
 //! manager's bus subscription / timing logic.
 
-use crate::autoplay::delay::{BudgetSnapshot, DecisionProbs};
-use crate::config::{DelayModelConfig, MajsoulAutoplayConfig};
+use crate::autoplay::context::CanvasRect;
+use crate::autoplay::pointer::PointerLayout;
 use crate::game_state::snapshot::GameStateSnapshot;
+use crate::monitor::DecisionContext;
 use crate::schema::MjaiEvent;
+use chromiumoxide::page::Page;
 use riichienv_core::action::Action;
+use std::time::Instant;
+
+/// A physical control's complete identity, supplied by the actual client.
+/// Window and hand are distinct from the coordinator's protocol window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetIdentity {
+    pub window: String,
+    pub hand: Vec<String>,
+    pub control: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputTarget {
+    pub identity: TargetIdentity,
+    /// Actual target bounds and containing play surface in viewport CSS pixels.
+    pub bounds: CanvasRect,
+    pub viewport: CanvasRect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressRole {
+    Action,
+    Declaration,
+    Discard,
+    Candidate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirmation {
+    /// A dispatched physical input only permits waiting for the next target.
+    Dispatch,
+    ClientCommand,
+    /// A real declaration echo opens one precisely bound continuation.
+    DeclarationEcho,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PressIntent {
+    pub role: PressRole,
+    pub action: MjaiEvent,
+    pub confirmation: Confirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TurnPlan {
+    pub presses: Vec<PressIntent>,
+    pub dealt: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnClockFacts {
+    pub started_at: Instant,
+    pub fixed_ms: u32,
+    /// Unknown is kept unknown, never replaced with the initial bank cap.
+    pub remaining_bank_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclarationFacts {
+    pub context: DecisionContext,
+    /// Lossless opaque projection of the actual protocol-window proof.
+    pub window: String,
+    pub action: MjaiEvent,
+    pub hand: Vec<String>,
+}
+
+pub struct SiteObservation {
+    pub ready: bool,
+    pub target: Option<InputTarget>,
+    pub layout: Option<PointerLayout>,
+    pub clock: Option<TurnClockFacts>,
+    pub continuation: Option<DeclarationFacts>,
+}
+
+/// Read-only normalization and exact physical target matching. Transaction
+/// state, pacing, retries, and all mouse input belong to the common runtime.
+#[async_trait::async_trait]
+pub trait SiteAdapter: Send + Sync {
+    fn plan(&self, context: &ActionContext<'_>) -> TurnPlan;
+    async fn observe(
+        &self,
+        page: &Page,
+        context: &ActionContext<'_>,
+        intent: &PressIntent,
+    ) -> anyhow::Result<SiteObservation>;
+}
 
 /// One step in the click sequence the manager will execute.
 ///
@@ -81,28 +169,6 @@ pub struct ActionContext<'a> {
     pub self_riichi_accepted: bool,
     /// 3 (sanma) or 4 (yonma).
     pub num_players: u8,
-    /// Per-platform config knobs (delays, mouse-move emission, ...).
-    pub cfg: &'a MajsoulAutoplayConfig,
-    /// Delay-model parameters (see `autoplay::delay`). Owned: it is a
-    /// small parameter block cloned per bot response, which keeps test
-    /// construction free of an extra borrow.
-    pub delay_cfg: DelayModelConfig,
-    /// Server time budget for the current decision window, if known.
-    /// `None` off-Majsoul or before the first operation list arrives.
-    pub budget: Option<BudgetSnapshot>,
-    /// Normalized bot confidence for this decision, if the bot's meta
-    /// could be interpreted (see `autoplay::delay::probs`).
-    pub probs: Option<DecisionProbs>,
-    /// Table facts and a second opinion on this decision (see
-    /// `autoplay::delay::Reading`). For the delay model only.
-    pub reading: crate::autoplay::delay::Reading,
-    /// User Lua delay policy, when loaded. Consulted by the delay model;
-    /// on any script failure the built-in policy runs instead.
-    pub delay_script: Option<&'a crate::autoplay::delay::DelayScript>,
-    /// Tenhou only: the bridge's hand at Tenhou tile-index resolution plus
-    /// the current decision window. `None` on other platforms, and on
-    /// Tenhou before the first parsed frame.
-    pub tenhou: Option<&'a crate::autoplay::tenhou_state::TenhouState>,
     /// Where the pointer is as the plan is made, as a normalised 16:9 point,
     /// when that is known. A discard of a tile the pointer is already on
     /// presses that copy rather than its twin.
