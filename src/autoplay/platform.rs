@@ -3,7 +3,6 @@
 use crate::autoplay::context::CanvasRect;
 use crate::autoplay::pointer::PointerLayout;
 use crate::game_state::snapshot::GameStateSnapshot;
-use crate::monitor::DecisionContext;
 use crate::schema::MjaiEvent;
 use chromiumoxide::page::Page;
 use riichienv_core::action::Action;
@@ -66,11 +65,15 @@ pub struct TurnClockFacts {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclarationFacts {
-    pub context: DecisionContext,
     /// Lossless opaque projection of the actual protocol-window proof.
     pub window: String,
-    pub action: MjaiEvent,
     pub hand: Vec<String>,
+}
+
+/// A lossless projection of the producer-owned proof, shared by adapters and
+/// session orchestration. It creates no new window or generation.
+pub fn window_identity(proof: crate::bot::control::WindowProof) -> String {
+    serde_json::to_string(&proof).expect("window proof serialization is infallible")
 }
 
 pub struct SiteObservation {
