@@ -391,10 +391,10 @@ export function decisionView(s: MonitorSnapshot | null): DecisionView {
       return { ...base, phase: 'thinking', tone: 'busy', status: tr('推理中'), message: tr('已向模型发出请求'), action: null, steps: ['active', 'todo', 'todo'] }
     case 'awaiting': {
       const live = decisionSound(s)
-      return { ...base, phase: 'awaiting', tone: 'wait', status: tr('待确认'), message: tr('等待雀魂的实际动作'), live, steps: ['done', 'done', 'active'] }
+      return { ...base, phase: 'awaiting', tone: 'wait', status: tr('待确认'), message: tr('等待客户端的实际动作'), live, steps: ['done', 'done', 'active'] }
     }
     case 'confirmed':
-      return { ...base, phase: 'confirmed', tone: 'done', status: tr('已确认'), message: tr('雀魂动作与建议一致'), actual: describeAction(move?.event, t), steps: ['done', 'done', 'done'] }
+      return { ...base, phase: 'confirmed', tone: 'done', status: tr('已确认'), message: tr('客户端动作与建议一致'), actual: describeAction(move?.event, t), steps: ['done', 'done', 'done'] }
     case 'declined': {
       const live = decisionSound(s)
       return { ...base, phase: 'declined', tone: 'idle', status: tr('不操作'), message: tr('建议过牌，无需确认'), live, steps: ['done', 'done', 'void'] }
@@ -407,7 +407,7 @@ export function decisionView(s: MonitorSnapshot | null): DecisionView {
       // The backend only attaches an error to an expiry when the game answered
       // this very decision with a different move.
       if (d.error && d.response) {
-        return { ...base, phase: 'mismatch', tone: 'bad', status: tr('不一致'), message: tr('雀魂动作与建议不同'), actual: describeAction(move?.event, t), instead: move?.event ?? null, steps: ['done', 'done', 'bad'] }
+        return { ...base, phase: 'mismatch', tone: 'bad', status: tr('不一致'), message: tr('客户端动作与建议不同'), actual: describeAction(move?.event, t), instead: move?.event ?? null, steps: ['done', 'done', 'bad'] }
       }
       return { ...base, phase: 'expired', tone: 'idle', status: tr('已失效'), message: staleReason(s), steps: ['done', d.response ? 'done' : 'void', 'void'] }
   }

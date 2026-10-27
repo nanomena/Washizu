@@ -2,7 +2,8 @@ import { localized, tr } from '@/lib/i18n'
 // The games on record (`get_history`) and what the statistics tab works out
 // from them. The core stores one line a game: how it ended for us, a block of
 // counters for the hands in it, and — from the builds that keep them — what it
-// did to our rank points and which yaku our wins had.
+// did to reported rank points and which yaku our wins had. Tenhou's per-game
+// pt award is calculated from the recorded GO/UN and final placement below.
 
 /** A game as the core recorded it. Only what the tab reads is named. */
 export type GameRecord = {
@@ -15,7 +16,11 @@ export type GameRecord = {
   our_rank: number | null
   /** Per-hand counters, from our seat: `round`, `agari`, `houjuu`, `riichi`, … */
   stats: Record<string, number>
-  match_info?: { platform: string; mode_id?: number; room_id?: number; contest_uid?: number } | null
+  match_info?:
+    | { platform: 'majsoul'; mode_id?: number; room_id?: number; contest_uid?: number }
+    | { platform: 'tenhou'; go_type?: number; lobby?: number; dan?: number; log_id?: string }
+    | { platform: 'riichi_city'; stage_type?: number; game_play?: number }
+    | null
   /** `null` or missing on records from before it was kept. */
   our_rank_points?: number | null
   /** Yaku id → how many of our winning hands this game had it. */
@@ -26,21 +31,93 @@ export type GameRecord = {
 
 /** Mahjong Soul's ranked match modes by room, from the game's own table:
  *  three four-player modes a room below Throne, two three-player ones. */
-const TIER_OF_MODE: Record<number, Room> = {
+type MajsoulRoom = 'bronze' | 'silver' | 'gold' | 'jade' | 'throne' | 'other'
+type TenhouTier = 'ippan' | 'joukyu' | 'tokujou' | 'houou'
+type TenhouLength = 'east' | 'south'
+export type Room = MajsoulRoom | `tenhou:${TenhouTier}:${TenhouLength}:${3 | 4}` | 'tenhou:private' | 'unrecorded' | 'unsupported'
+const TIER_OF_MODE: Record<number, MajsoulRoom> = {
   1: 'bronze', 2: 'bronze', 3: 'bronze', 4: 'silver', 5: 'silver', 6: 'silver', 7: 'gold', 8: 'gold', 9: 'gold',
   10: 'jade', 11: 'jade', 12: 'jade', 15: 'throne', 16: 'throne',
   17: 'bronze', 18: 'bronze', 19: 'silver', 20: 'silver', 21: 'gold', 22: 'gold', 23: 'jade', 24: 'jade', 25: 'throne', 26: 'throne',
 }
-export type Room = 'bronze' | 'silver' | 'gold' | 'jade' | 'throne' | 'other'
-export const ROOMS: Room[] = ['bronze', 'silver', 'gold', 'jade', 'throne', 'other']
-export const ROOM_NAME: Record<Room, string> = localized({ bronze: '铜之间', silver: '银之间', gold: '金之间', jade: '玉之间', throne: '王座之间', other: '友人场及其他' })
+const TENHOU_TIERS = ['ippan', 'joukyu', 'tokujou', 'houou'] as const
+const TENHOU_TIER = localized({ ippan: '一般', joukyu: '上级', tokujou: '特上', houou: '凤凰' })
+const TENHOU_LENGTH = localized({ east: '东风', south: '东南' })
+const OTHER_ROOM_NAMES = localized({ bronze: '铜之间', silver: '银之间', gold: '金之间', jade: '玉之间', throne: '王座之间', other: '友人场及其他', 'tenhou:private': '天凤个室', unrecorded: '未记录房间', unsupported: '其他房间' })
+export const ROOMS: Room[] = [
+  'bronze', 'silver', 'gold', 'jade', 'throne', 'other',
+  ...TENHOU_TIERS.flatMap(tier => ([4, 3] as const).flatMap(players => (['east', 'south'] as const).map(length => `tenhou:${tier}:${length}:${players}` as Room))),
+  'tenhou:private', 'unrecorded', 'unsupported',
+]
 
-/** The room a game was played in. Anything that is not a ranked room this
- *  table knows — a friends' table, a contest, an event, another platform — is
- *  `other`: better one honest heap than a wrong name. */
+export function roomName(room: Room): string {
+  if (room in OTHER_ROOM_NAMES) return OTHER_ROOM_NAMES[room as keyof typeof OTHER_ROOM_NAMES]
+  const [, tier, length, players] = room.split(':') as ['tenhou', TenhouTier, TenhouLength, '3' | '4']
+  const name = tr('{0}·{1}', TENHOU_TIER[tier], TENHOU_LENGTH[length])
+  return players === '3' ? tr('三麻{0}', name) : name
+}
+
+type TenhouRoom =
+  | { kind: 'unrecorded' | 'unsupported' | 'private' | 'unranked' }
+  | { kind: 'ranked'; tierIndex: 0 | 1 | 2 | 3; tier: TenhouTier; length: TenhouLength; players: 3 | 4; dan: number | null }
+
+/** One normalization of the recorded native room; neither labels nor pt math
+ *  infer missing GO/UN fields from final scores or an overtime wind. */
+function tenhouRoom(r: GameRecord): TenhouRoom {
+  const info = r.match_info
+  if (r.platform !== 'tenhou' || info?.platform !== 'tenhou') return { kind: 'unsupported' }
+  if (info.lobby == null) return { kind: 'unrecorded' }
+  if (!Number.isInteger(info.lobby) || info.lobby < 0 || info.lobby > 0xffffffff) return { kind: 'unsupported' }
+  if (info.lobby !== 0) return { kind: 'private' }
+  const rules = info.go_type
+  if (rules == null) return { kind: 'unrecorded' }
+  if (!Number.isInteger(rules) || rules < 0 || rules > 0xff) return { kind: 'unsupported' }
+  const players = (rules & 0x10) !== 0 ? 3 : 4
+  if (players !== r.num_players) return { kind: 'unsupported' }
+  if ((rules & 1) === 0) return { kind: 'unranked' }
+  // Official client's room index, also used by the serving adapter's pt table.
+  const tierIndex = (((rules & 0x20) >> 4) | ((rules & 0x80) >> 7)) as 0 | 1 | 2 | 3
+  const dan = info.dan != null && Number.isInteger(info.dan) && info.dan >= 0 && info.dan <= 20 ? info.dan : null
+  return { kind: 'ranked', tierIndex, tier: TENHOU_TIERS[tierIndex], length: (rules & 0x08) !== 0 ? 'south' : 'east', players, dan }
+}
+
+/** Classify only the platform's recorded declaration. Tenhou GO bit 0x08 is
+ *  the scheduled length: an east game that extends into South is still east.
+ *  Unknown or absent metadata never becomes a Mahjong Soul friendly room. */
 export function roomOf(r: GameRecord): Room {
-  const mode = r.match_info?.platform === 'majsoul' ? r.match_info.mode_id : undefined
-  return (mode != null && TIER_OF_MODE[mode]) || 'other'
+  const info = r.match_info
+  if (!info) return 'unrecorded'
+  if (info.platform !== r.platform) return 'unsupported'
+  if (info.platform === 'majsoul') {
+    if (info.mode_id != null) return TIER_OF_MODE[info.mode_id] ?? 'other'
+    return info.room_id != null || info.contest_uid != null ? 'other' : 'unrecorded'
+  }
+  if (info.platform !== 'tenhou') return 'unsupported'
+  const room = tenhouRoom(r)
+  switch (room.kind) {
+    case 'ranked': return `tenhou:${room.tier}:${room.length}:${room.players}`
+    case 'private': return 'tenhou:private'
+    case 'unranked': return 'unsupported'
+    default: return room.kind
+  }
+}
+
+/** Per-game pt award under Tenhou's published ladder table, verified 2026-10-27:
+ *  https://tenhou.net/man/ (段級位制). This is a rule calculation, not a change
+ *  in the account's displayed balance after promotion/demotion resets.
+ *  get_history contains finalized Confirmed games; its recorder discards
+ *  Terminated games. A missing own placement or UN rank remains uncomputed. */
+export function rankPointChange(r: GameRecord): number | null {
+  if (r.platform !== 'tenhou') return r.our_rank_points != null && Number.isFinite(r.our_rank_points) ? r.our_rank_points : null
+  if ((r.num_players !== 3 && r.num_players !== 4) || r.our_rank == null || !Number.isInteger(r.our_rank) || r.our_rank < 1 || r.our_rank > r.num_players) return null
+  const room = tenhouRoom(r)
+  if (room.kind === 'private' || room.kind === 'unranked') return 0
+  if (room.kind !== 'ranked' || room.dan == null || room.dan === 20) return null // no published Tenhoui pt table
+  const first = (room.players === 4 ? [20, 40, 50, 60] : [30, 50, 70, 90])[room.tierIndex]
+  const second = room.players === 4 ? [10, 10, 20, 30][room.tierIndex] : 0
+  const last = room.dan > 7 ? -(room.dan - 7) * 10 : 0
+  const awards = room.players === 4 ? [first, second, 0, last] : [first, second, last]
+  return awards[r.our_rank - 1] * (room.length === 'south' ? 1.5 : 1)
 }
 
 // ------------------------------------------------------------------ yaku ----
@@ -65,9 +142,9 @@ export type Totals = {
   /** Games finished in each place, first to last. */
   places: number[]
   averagePlace: number | null
-  /** Rank points after each game that reported them, oldest first, summed as they go. */
+  /** Cumulative per-game pt changes, oldest first; excludes ladder balance resets. */
   points: number[]
-  /** Games that reported rank points. */
+  /** Games with a reported or fully computable per-game pt change. */
   pointGames: number
   /** The counters of every game added up. */
   sum: Record<string, number>
@@ -88,7 +165,8 @@ export function totalsOf(records: GameRecord[]): Totals {
   for (const r of records) {
     for (const [key, value] of Object.entries(r.stats)) sum[key] = (sum[key] ?? 0) + value
     if (r.our_rank != null && r.our_rank >= 1 && r.our_rank <= players) { places[r.our_rank - 1] += 1; placed += 1; placeSum += r.our_rank }
-    if (r.our_rank_points != null) points.push((points.at(-1) ?? 0) + r.our_rank_points)
+    const change = rankPointChange(r)
+    if (change != null) points.push((points.at(-1) ?? 0) + change)
     const had = Object.entries(r.yaku ?? {})
     if (had.length > 0) scoredWins += r.stats.agari ?? 0
     for (const [id, wins] of had) yaku.set(Number(id), (yaku.get(Number(id)) ?? 0) + wins)

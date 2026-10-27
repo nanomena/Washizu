@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { invoke } from '@/lib/host'
-import { ROOMS, ROOM_NAME, figuresOf, roomOf, totalsOf, yakuName, type GameRecord, type Room } from '@/lib/history'
+import { ROOMS, roomName, figuresOf, roomOf, totalsOf, yakuName, type GameRecord, type Room } from '@/lib/history'
 import { rungOf, type AccountLevels } from '@/lib/ladder'
-import { signed } from '@/lib/monitor'
+import { signed, type MonitorConfig } from '@/lib/monitor'
 import { tr } from '@/lib/i18n'
 
 /** Rank points game by game, summed as they go: one line, and where zero is. */
-function Spark({ points }: { points: number[] }) {
+function Spark({ points, label }: { points: number[]; label: string }) {
   const w = 120, h = 40
   if (points.length === 0) return <svg className="mstat-spark" viewBox={`0 0 ${w} ${h}`} aria-hidden />
   const all = [0, ...points]
   const lo = Math.min(...all), hi = Math.max(...all)
   const y = (v: number) => (hi === lo ? h / 2 : 2 + (h - 4) * (hi - v) / (hi - lo))
   const x = (i: number) => (all.length === 1 ? 0 : w * i / (all.length - 1))
-  return <svg className="mstat-spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label={tr('段位分走势')}>
+  return <svg className="mstat-spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label={label}>
     <line x1={0} x2={w} y1={y(0)} y2={y(0)} />
     <polyline points={all.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')} />
   </svg>
@@ -31,7 +31,7 @@ function Ladder({ account, players }: { account: AccountLevels | null; players: 
   const rung = level ? rungOf(level) : null
   const when = account ? new Date(account.at).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }) : ''
   const ceiling = rung?.ceiling ?? null
-  return <span className="mstat-ladder" title={rung ? tr('雀魂在 {0} 报告的段位，每场结束后更新', when) : tr('登录雀魂后显示当前段位')}>
+  return <span className="mstat-ladder" title={rung ? tr('客户端在 {0} 报告的段位，每场结束后更新', when) : tr('尚未收到客户端段位数据')}>
     <strong>{rung?.name ?? '—'}</strong>
     <span>{rung ? (ceiling != null ? `${points(rung.score)} / ${points(ceiling)}` : points(rung.score)) : ''}</span>
     <i data-empty={ceiling == null || undefined} style={{ '--share': rung && ceiling ? Math.max(0, Math.min(1, rung.score / ceiling)) : 0 } as CSSProperties} />
@@ -50,7 +50,7 @@ function Ladder({ account, players }: { account: AccountLevels | null; players: 
  *  stand — at login, and some twenty seconds after each game, by when that
  *  game is on file. Where the platform says nothing of ranks, the games are
  *  read again when one starts or ends (`game`). */
-export function Statistics({ game, account }: { game: string; account: AccountLevels | null }) {
+export function Statistics({ game, account, platform }: { game: string; account: AccountLevels | null; platform: MonitorConfig['platform'] }) {
   const [loaded, setLoaded] = useState<{ records: GameRecord[]; account: AccountLevels | null } | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
   const [picked, setPicked] = useState<Room | 'all' | null>(null)
@@ -83,21 +83,23 @@ export function Statistics({ game, account }: { game: string; account: AccountLe
   const waiting = failed ? tr('读不到对局记录：{0}', failed) : records == null ? tr('正在读取对局记录') : null
 
   return <div className="md-page mstats">
-    <section className="mstat mstat-rank" aria-label={tr('段位分与顺位')}>
+    <section className="mstat mstat-rank" aria-label={platform === 'Tenhou' ? tr('段位pt与顺位') : tr('段位分与顺位')}>
       <header className="msec-head">
         <Ladder account={loaded?.account ?? null} players={latest?.num_players ?? 4} />
         <select className="mselect" aria-label={tr('统计范围')} value={room} onChange={e => setPicked(e.target.value as Room | 'all')}>
           <option value="all">{tr('全部场次')}</option>
-          {rooms.map(key => <option key={key} value={key}>{ROOM_NAME[key]}</option>)}
+          {rooms.map(key => <option key={key} value={key}>{roomName(key)}</option>)}
         </select>
       </header>
       <div className="mstat-points">
         <p>
-          <strong>{t.pointGames > 0 ? signed(t.points.at(-1)!) : '—'}</strong>
-          <small>{waiting ?? (t.pointGames > 0 ? tr('{0} 场的段位分变化', t.pointGames) : tr('还没有记录到段位分'))}</small>
+          <strong title={platform === 'Tenhou' ? tr('所选记录的累计规则pt变化') : undefined}>{t.pointGames > 0 ? signed(t.points.at(-1)!) : '—'}</strong>
+          <small title={platform === 'Tenhou' ? tr('按天凤规则计算') : undefined}>{waiting ?? (platform === 'Tenhou'
+            ? t.pointGames > 0 ? tr('规则pt · {0} 场', t.pointGames) : tr('还没有记录到段位pt')
+            : t.pointGames > 0 ? tr('{0} 场的段位分变化', t.pointGames) : tr('还没有记录到段位分'))}</small>
         </p>
         <p className="mstat-sum"><span>{tr('平均顺位')} <b>{t.averagePlace != null ? t.averagePlace.toFixed(2) : '—'}</b></span><span>{tr('{0} 场', t.games)}</span></p>
-        <Spark points={t.points} />
+        <Spark points={t.points} label={platform === 'Tenhou' ? tr('段位pt走势') : tr('段位分走势')} />
       </div>
       <ol className="mstat-places">
         {t.places.map((n, i) => <li key={i}>

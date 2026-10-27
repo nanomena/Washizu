@@ -42,7 +42,7 @@ type CardProps = {
 }
 
 /** The one thing the window exists for: what the model said, and whether
- *  Mahjong Soul then actually did it. Every state fills the same four rows —
+ *  the client then actually did it. Every state fills the same four rows —
  *  heading, action, progress, note — so nothing around the card ever moves. */
 export function DecisionCard({ view, decision: d, elapsed, past, control }: CardProps) {
   const thinking = view.phase === 'thinking'
@@ -60,7 +60,7 @@ export function DecisionCard({ view, decision: d, elapsed, past, control }: Card
       {versus ? <div className="mvs">
         <div className="mvs-side"><small>{tr('模型建议')}</small><ActionLine action={view.action!} size="versus" /></div>
         <span className="mvs-sep" aria-hidden>≠</span>
-        <div className="mvs-side mvs-side--actual"><small>{tr('雀魂实际')}</small><ActionLine action={view.actual!} size="versus" /></div>
+        <div className="mvs-side mvs-side--actual"><small>{tr('客户端实际')}</small><ActionLine action={view.actual!} size="versus" /></div>
       </div>
         : view.action ? <ActionLine action={view.action} size="hero" />
         : thinking ? <div className="mact mact--hero mact--pending">
@@ -116,7 +116,7 @@ export function CandidateList({ rows, state, empty, loading, caption, hint }: Li
         <span className="mcand-rank">{i + 1}</span>
         <span className="mcand-verb">{row.verb}</span>
         <span className="mcand-faces"><Faces faces={row.faces} />{row.note && <small className="mcand-note">{row.note}</small>}</span>
-        <span className="mcand-mark">{row.chosen ? (state === 'done' ? tr('已执行') : tr('模型选择')) : row.taken ? tr('雀魂实际') : ''}</span>
+        <span className="mcand-mark">{row.chosen ? (state === 'done' ? tr('已执行') : tr('模型选择')) : row.taken ? tr('客户端实际') : ''}</span>
         <span className="mcand-val">{row.value}</span>
       </li>)}
     </ol>

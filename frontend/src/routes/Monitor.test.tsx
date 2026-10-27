@@ -284,7 +284,7 @@ describe('monitor user states', () => {
     s.decision = { ...s.decision!, state: 'expired', error: 'The game confirmed a different action.' }
     render(<Monitor />)
     expect(screen.getByRole('status').textContent).toBe('不一致')
-    const actual = screen.getByText('雀魂实际').parentElement!
+    const actual = screen.getByText('客户端实际').parentElement!
     expect(within(actual).getByText('1索')).toBeTruthy()
     // What the model weighed stays as a record, marked void — not as a live suggestion.
     expect(candidates()).toHaveLength(2)
@@ -297,7 +297,7 @@ describe('monitor user states', () => {
     s.events = [{ seq: 11, ts_ms: Date.now(), event: { type: 'dahai', actor: 0, pai: '5pr', tsumogiri: false } }]
     s.decision = { ...s.decision!, state: 'expired', error: 'The game confirmed a different action.' }
     render(<Monitor />)
-    expect(candidates().map(li => li.textContent)).toEqual(['1打模型选择60.0%', '2打雀魂实际25.0%'])
+    expect(candidates().map(li => li.textContent)).toEqual(['1打模型选择60.0%', '2打客户端实际25.0%'])
   })
 
   it('keeps the decision in place on every tab of the dock', () => {
@@ -523,6 +523,43 @@ describe('the record', () => {
     fireEvent.click(screen.getByRole('tab', { name: '统计' }))
     expect(await screen.findByText('2 场的段位分变化')).toBeTruthy()
     expect(scope().value).toBe('gold')
+  })
+
+  it('uses the recorded Tenhou table and scheduled length instead of Mahjong Soul rooms', async () => {
+    fixture.options = { platform: 'Tenhou' }
+    fixture.history = [
+      { ...game(1, null, 0, { round: 5 }), id: 'east-overtime', platform: 'tenhou', kyoku_mode: 'east_south', match_info: { platform: 'tenhou', go_type: 1, lobby: 0 } },
+      { ...game(2, null, 0, { round: 4 }), id: 'east', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0 } },
+      { ...game(3, null, 0, { round: 8 }), id: 'south', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 9, lobby: 0 } },
+    ]
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('还没有记录到段位pt')).toBeTruthy()
+    const scope = screen.getByRole('combobox', { name: '统计范围' }) as HTMLSelectElement
+    expect(scope.value).toBe('tenhou:ippan:south:4')
+    expect(within(scope).queryByText('友人场及其他')).toBeNull()
+    expect(within(scope).getByText('一般·东风')).toBeTruthy()
+    expect(within(scope).getByText('一般·东南')).toBeTruthy()
+    fireEvent.change(scope, { target: { value: 'tenhou:ippan:east:4' } })
+    expect(document.querySelector('.mstat-sum')!.textContent).toContain('2 场')
+    expect(screen.getByText('平均顺位').textContent).toBe('平均顺位 1.50')
+    expect(document.querySelector('.mstat-ladder')!.getAttribute('title')).toBe('尚未收到客户端段位数据')
+  })
+
+  it('shows cumulative Tenhou rule pt from the recorded start rank and placement', async () => {
+    fixture.options = { platform: 'Tenhou' }
+    fixture.history = [
+      { ...game(1, null, 0, { round: 4 }), id: 'first', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0, dan: 8 } },
+      { ...game(4, null, 0, { round: 4 }), id: 'fourth', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0, dan: 8 } },
+      { ...game(1, null, 0, { round: 4 }), id: 'missing-dan', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0 } },
+    ]
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('规则pt · 2 场')).toBeTruthy()
+    expect(screen.getByTitle('按天凤规则计算')).toBeTruthy()
+    expect(screen.getByTitle('所选记录的累计规则pt变化').textContent).toBe('+10')
+    expect(screen.getByRole('img', { name: '段位pt走势' }).querySelector('polyline')).toBeTruthy()
+    expect(document.querySelector('.mstat-sum')!.textContent).toContain('3 场')
   })
 
   it('names the rank the platform last said, with its points toward the next star', async () => {
