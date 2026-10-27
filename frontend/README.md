@@ -16,6 +16,12 @@ mjai actions, and nothing about any bot: what a bot wants shown about itself
 arrives as words in the snapshot (see "What a bot says about itself" in
 `src/bot/README.md`).
 
+An inference/sync fault replaces the fixed decision-status card on every tab.
+`sync_error` invalidates the current hand; `sync_fault` keeps the unresolved
+fault visible across deals and reconnects. A new deal or a `none` reply is not
+proof of recovery: only a fresh actionable reply or displayed model PASS in a valid hand clears the
+latched fault. The autoplay setting remains visible beside it.
+
 ```text
 src/
   main.tsx                 mounts the one page

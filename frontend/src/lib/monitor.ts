@@ -71,6 +71,7 @@ export type MonitorSnapshot = {
   game: GameStateSnapshot | null; view: MahgenView | null; round_ended: boolean; game_ended: boolean
   capture: CaptureStatus; bot: BotStatus; service: string; service_error: string | null; server: ServerStatus
   sync_error: string | null
+  sync_fault: string | null
   brand: string; facts: Fact[]; autoplay_enabled: boolean
   /** The player's own ranks as the platform last said them; absent until it has. */
   account?: AccountLevels | null
@@ -391,6 +392,7 @@ export function healthOf(s: MonitorSnapshot | null): Health[] {
   const bot: BotStatus = s?.bot ?? { state: 'idle' }
   const service = s?.service ?? 'unknown'
   const server: ServerStatus = s?.server ?? { state: 'none' }
+  const syncFault = s?.sync_fault || s?.sync_error
   return [
     { key: 'capture', name: tr('采集'), detail: capture.state === 'error' ? capture.error : null,
       ...({ running: { tone: 'ok', state: tr('运行中') }, stopped: { tone: 'idle', state: tr('未运行') }, error: { tone: 'bad', state: tr('异常') } } as const)[capture.state] },
@@ -407,8 +409,8 @@ export function healthOf(s: MonitorSnapshot | null): Health[] {
         : server.state === 'ready' ? { tone: 'ok', state: tr('就绪') } as const
         : { tone: 'idle', state: tr('待确认') } as const) },
     // Whether the tracked table still matches the game: a gap or a desync voids every suggestion.
-    { key: 'sync', name: tr('同步'), detail: s?.sync_error ?? null,
-      ...(s?.sync_error ? { tone: 'bad', state: tr('异常') } as const : s?.game && !s.game_ended ? { tone: 'ok', state: tr('正常') } as const : { tone: 'idle', state: tr('无对局') } as const) },
+    { key: 'sync', name: tr('同步'), detail: syncFault ?? null,
+      ...(syncFault ? { tone: 'bad', state: tr('异常') } as const : s?.game && !s.game_ended ? { tone: 'ok', state: tr('正常') } as const : { tone: 'idle', state: tr('无对局') } as const) },
   ]
 }
 
@@ -439,7 +441,7 @@ export function alertsOf(s: MonitorSnapshot | null, local: { ui: string | null; 
   if (s.bot.state === 'error') out.push({ key: 'bot', title: tr('Bot 进程异常'), message: s.bot.error })
   if (s.server.state === 'failed') out.push({ key: 'server', title: tr('模型服务未运行'), message: s.server.error, hint: tr('应用会自动重新启动它。') })
   else if (s.service === 'error') out.push({ key: 'service', title: tr('模型服务断开'), message: s.service_error ?? tr('模型服务没有应答。') })
-  if (s.sync_error) out.push({ key: 'sync', title: tr('牌局同步异常'), message: s.sync_error, hint: tr('当前建议已作废，下一局开始后恢复。') })
+  if (s.sync_fault || s.sync_error) out.push({ key: 'sync', title: tr('牌局同步异常'), message: s.sync_fault || s.sync_error!, hint: tr('自动操作等待模型恢复；确认有效建议后，此故障状态才会消失。') })
   return out
 }
 

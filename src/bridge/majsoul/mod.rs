@@ -166,6 +166,10 @@ pub struct MajsoulBridge {
     /// next action is `ActionHule` — a ron on the declaration tile voids
     /// the riichi.
     pending_reach_accepted: Option<Actor>,
+    /// The synthetic opening draw, only when it has no identical copy in
+    /// our first thirteen tiles. Majsoul's opening fourteen are one deal:
+    /// its first `moqie=false` discard can consume this tile too.
+    opening_only_tile: Option<String>,
     /// 3 (sanma) or 4 (yonma). Resolved from `seat_list.len()` on the
     /// `authGame` response. Defaults to 4 so per-flow code that runs before
     /// auth (none today, but be defensive) sees a sane value.
@@ -212,6 +216,7 @@ impl MajsoulBridge {
             deferred_doras: Vec::new(),
             last_revealed_tile_actor: None,
             pending_reach_accepted: None,
+            opening_only_tile: None,
             num_players: 4,
             time_budget: None,
             replaying: false,
@@ -627,6 +632,18 @@ impl MajsoulBridge {
             self.pending_reach_accepted.take()
         };
 
+        // Only the initial discard belongs to the undivided opening deal.
+        // A kan/kita followed by a real replacement draw must use wire moqie.
+        let ends_opening = matches!(
+            action_name,
+            ACTION_DEAL_TILE
+                | ACTION_AN_GANG_ADD_GANG
+                | ACTION_CHI_PENG_GANG
+                | ACTION_BA_BEI
+                | ACTION_NO_TILE
+                | ACTION_LIU_JU
+                | ACTION_HULE
+        );
         let result = match action_name {
             ACTION_NEW_ROUND => self.build_start_kyoku(action_data),
             ACTION_DEAL_TILE => self.build_tsumo(action_data),
@@ -640,7 +657,12 @@ impl MajsoulBridge {
             _ => return Vec::new(),
         };
         let events = match result {
-            Ok(events) => events,
+            Ok(events) => {
+                if ends_opening {
+                    self.opening_only_tile = None;
+                }
+                events
+            }
             Err(e) => {
                 warn!(
                     target: "akagi::bridge::majsoul",
@@ -724,7 +746,7 @@ impl MajsoulBridge {
     }
 
     /// `ActionDiscardTile` → mjai `dahai`. `moqie` (default false) maps
-    /// directly to `tsumogiri`. `seat` defaults to 0 — Majsoul omits it
+    /// to `tsumogiri` after the opening deal is normalized. `seat` defaults to 0 — Majsoul omits it
     /// for the dealer's first discard.
     ///
     /// Kan dora (後乗り): after a kakan/daiminkan the live server reveals
@@ -749,10 +771,16 @@ impl MajsoulBridge {
             bail!("ActionDiscardTile.tile is empty");
         }
         let pai = ms_to_mjai(tile_raw)?.to_string();
-        let tsumogiri = data
+        let wire_tsumogiri = data
             .get("moqie")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false);
+        // The 14th dealt tile is synthetic MJAI tsumo, not a separate
+        // Majsoul draw. If it is absent from the 13-tile head, discarding it
+        // can only consume that synthetic draw. Preserve wire moqie when
+        // a hand copy exists, including ordinary versus red five identity.
+        let tsumogiri = wire_tsumogiri
+            || (Some(actor) == self.seat && self.opening_only_tile.as_deref() == Some(&pai));
         let is_riichi = data
             .get("is_liqi")
             .and_then(JsonValue::as_bool)
@@ -785,6 +813,7 @@ impl MajsoulBridge {
             self.pending_reach_accepted = Some(actor);
         }
         self.last_revealed_tile_actor = Some(actor);
+        self.opening_only_tile = None;
         Ok(events)
     }
 
@@ -1379,6 +1408,13 @@ impl MajsoulBridge {
         self.deferred_doras.clear();
         self.last_revealed_tile_actor = None;
         self.pending_reach_accepted = None;
+        self.opening_only_tile = if my_tiles.len() == TSUMO_TEHAI_SIZE
+            && !my_tiles[..TEHAI_SIZE].contains(&my_tiles[TEHAI_SIZE])
+        {
+            Some(my_tiles[TEHAI_SIZE].clone())
+        } else {
+            None
+        };
 
         Ok(vec![
             MjaiEvent::StartKyoku {
@@ -3141,6 +3177,158 @@ mod tests {
             method_name: Arc::from(METHOD_ACTION_PROTOTYPE),
             payload: json!({ "step": 1, "name": name, "data": data }),
         }
+    }
+
+    fn opening_dealer(last: &str, hand_five: &str) -> MajsoulBridge {
+        let mut bridge = MajsoulBridge::new(None, None);
+        bridge.seat = Some(1);
+        let opening = bridge.dispatch(&new_round_msg(json!({
+            "ju": 1, "doras": ["9p"], "scores": [25000,25000,25000,25000],
+            "tiles": ["1m","1m","2m","3m","4m",hand_five,"6m",
+                      "1p","2p","3p","4s","5s","6s",last]
+        })));
+        assert_eq!(opening.len(), 2);
+        bridge
+    }
+
+    #[test]
+    fn opening_deal_normalizes_only_a_tile_absent_from_the_head() {
+        for (last, five, discard, wire, expected) in [
+            ("3z", "5m", "3z", false, true),
+            ("4z", "5m", "4z", false, true),
+            ("8s", "5m", "8s", false, true),
+            ("1m", "5m", "1m", false, false), // real hand copy
+            ("0m", "5m", "0m", false, true),  // red is not ordinary
+            ("5m", "0m", "5m", false, true),
+            ("5m", "5m", "5m", false, false),
+            ("4z", "5m", "1m", false, false),
+            ("4z", "5m", "4z", true, true),
+        ] {
+            let mut bridge = opening_dealer(last, five);
+            let events = bridge.dispatch(&action_msg(
+                ACTION_DISCARD_TILE,
+                json!({
+                    "seat": 1, "tile": discard, "moqie": wire
+                }),
+            ));
+            assert!(
+                matches!(&events[..], [MjaiEvent::Dahai { tsumogiri, .. }] if *tsumogiri == expected),
+                "last={last} five={five} discard={discard}: {events:?}"
+            );
+            assert!(bridge.opening_only_tile.is_none());
+            // No second discard, even of that tile, inherits the opening rule.
+            let next = bridge.dispatch(&action_msg(
+                ACTION_DISCARD_TILE,
+                json!({
+                    "seat": 1, "tile": discard, "moqie": false
+                }),
+            ));
+            assert!(matches!(
+                &next[..],
+                [MjaiEvent::Dahai {
+                    tsumogiri: false,
+                    ..
+                }]
+            ));
+        }
+    }
+
+    #[test]
+    fn opening_normalization_ends_at_draw_kan_kita_or_hand_end() {
+        for (name, data) in [
+            (ACTION_DEAL_TILE, json!({"seat": 1, "tile": "7s"})),
+            (
+                ACTION_AN_GANG_ADD_GANG,
+                json!({"seat": 1, "type": 3, "tiles": "1m"}),
+            ),
+            (ACTION_BA_BEI, json!({"seat": 1})),
+            (ACTION_HULE, json!({"hules": [{"seat": 1, "zimo": true}]})),
+            (ACTION_NO_TILE, json!({})),
+            (ACTION_LIU_JU, json!({"type": 1, "seat": 1})),
+        ] {
+            let mut bridge = opening_dealer("4z", "5m");
+            assert!(
+                !bridge.dispatch(&action_msg(name, data)).is_empty(),
+                "{name}"
+            );
+            assert!(bridge.opening_only_tile.is_none(), "{name}");
+        }
+        let mut bridge = opening_dealer("4z", "5m");
+        bridge.dispatch(&new_round_msg(json!({
+            "ju": 2, "doras": ["9p"], "scores": [25000,25000,25000,25000],
+            "tiles": ["1m","1m","2m","3m","4m","5m","6m",
+                      "1p","2p","3p","4s","5s","6s"]
+        })));
+        assert!(bridge.opening_only_tile.is_none());
+    }
+
+    #[test]
+    fn opening_riichi_keeps_one_discard_and_acceptance_order() {
+        let mut bridge = opening_dealer("4z", "5m");
+        let events = bridge.dispatch(&action_msg(
+            ACTION_DISCARD_TILE,
+            json!({
+                "seat": 1, "tile": "4z", "moqie": false, "is_wliqi": true
+            }),
+        ));
+        assert!(matches!(
+            &events[..],
+            [
+                MjaiEvent::Reach { actor: 1, .. },
+                MjaiEvent::Dahai {
+                    actor: 1,
+                    tsumogiri: true,
+                    ..
+                }
+            ]
+        ));
+        let next = bridge.dispatch(&action_msg(ACTION_DEAL_TILE, json!({"seat": 2})));
+        assert!(matches!(
+            &next[..],
+            [
+                MjaiEvent::ReachAccepted { actor: 1 },
+                MjaiEvent::Tsumo { actor: 2, .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn restored_opening_uses_the_same_normalization_as_live_actions() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use prost::Message;
+
+        let encode = |name: &str, data: JsonValue| {
+            let desc = parser::POOL
+                .get_message_by_name(&format!("lq.{name}"))
+                .unwrap();
+            let text = data.to_string();
+            let message = prost_reflect::DynamicMessage::deserialize(
+                desc,
+                &mut serde_json::Deserializer::from_str(&text),
+            )
+            .unwrap();
+            STANDARD.encode(message.encode_to_vec())
+        };
+        let mut bridge = opening_dealer("4z", "5m");
+        let opening = json!({
+            "ju": 1, "doras": ["9p"], "scores": [25000,25000,25000,25000],
+            "tiles": ["1m","1m","2m","3m","4m","5m","6m",
+                      "1p","2p","3p","4s","5s","6s","3z"]
+        });
+        let events = bridge.dispatch(&resp(METHOD_SYNC_GAME, json!({
+            "game_restore": {"actions": [
+                {"name": ACTION_NEW_ROUND, "data": encode(ACTION_NEW_ROUND, opening), "step": 1},
+                {"name": ACTION_DISCARD_TILE, "data": encode(ACTION_DISCARD_TILE,
+                    json!({"seat": 1, "tile": "3z", "moqie": false})), "step": 2},
+                {"name": ACTION_DEAL_TILE, "data": encode(ACTION_DEAL_TILE,
+                    json!({"seat": 2})), "step": 3}
+            ]}, "step": 4, "is_end": false
+        })));
+        assert!(matches!(&events[..], [MjaiEvent::StartKyoku { .. },
+            MjaiEvent::Tsumo { actor: 1, pai },
+            MjaiEvent::Dahai { actor: 1, tsumogiri: true, .. },
+            MjaiEvent::Tsumo { actor: 2, .. }] if pai == "W"));
+        assert!(bridge.opening_only_tile.is_none());
     }
 
     /// Other player's draw — server omits the tile field. We must emit

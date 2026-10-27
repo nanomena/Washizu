@@ -43,7 +43,7 @@ function state(): MonitorSnapshot {
     revision: 1, context, names: [], red_fives: true,
     game: null, view: null, round_ended: false, game_ended: false,
     capture: { state: 'running', descriptor: 'test' },
-    bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null,
+    bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null, sync_fault: null,
     brand: 'Demo', facts: [], autoplay_enabled: true,
     previous_decision: null, result: null, previous_result: null, hands: [], events: [], last_event_ms: null,
     decision: { id: 41, number: 1, context, started_ms: Date.now(), completed_ms: Date.now(),
@@ -80,6 +80,26 @@ describe('monitor user states', () => {
     expect(fixture.calls.some(([cmd]) => cmd === 'set_monitor_autoplay')).toBe(false)
   })
 
+  it('keeps an unresolved sync fault visible on every tab until recovery is confirmed', () => {
+    fixture.snapshot!.sync_fault = 'The viewer cannot play action 30.'
+    fixture.snapshot!.sync_error = 'The viewer cannot play action 30.'
+    const { rerender } = render(<Monitor />)
+    for (const name of ['决策', '本局', '对局', '统计', '设置']) {
+      fireEvent.click(screen.getByRole('tab', { name }))
+      const alert = screen.getByRole('alert')
+      expect(alert.textContent).toContain('牌局同步异常')
+      expect(alert.textContent).toContain('自动操作等待模型恢复')
+      expect(screen.queryByRole('status')).toBeNull()
+    }
+    // A new deal clears the current-hand gate, not the unresolved fault.
+    fixture.snapshot = { ...fixture.snapshot!, sync_error: null, context: { game: 1, round: 2, event_seq: 20 } }
+    rerender(<Monitor />)
+    expect(screen.getByRole('alert').textContent).toContain('cannot play action 30')
+    fixture.snapshot = { ...fixture.snapshot, sync_fault: null }
+    rerender(<Monitor />)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('shows a suggestion the game has not answered yet as pending, never as done', () => {
     render(<Monitor />)
     expect(screen.getByRole('status').textContent).toBe('待确认')
@@ -112,9 +132,8 @@ describe('monitor user states', () => {
     expect(links.querySelector('.mdot')?.getAttribute('data-tone')).toBe('bad')
     expect(links.title).toBe('连接：模型断开')
     expect(screen.getByRole('alert').textContent).toContain('模型服务断开')
-    // The action stays as history; its candidates do not stay as current ones.
-    expect(screen.getByRole('status').textContent).toBe('已失效')
-    expect(within(decision()).getByText('9万')).toBeTruthy()
+    // The permanent status slot explains the fault on every tab.
+    expect(screen.queryByRole('status')).toBeNull()
     expect(candidates()).toHaveLength(0)
   })
 

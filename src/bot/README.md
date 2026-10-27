@@ -3,6 +3,22 @@
 Runs mjai-protocol AI bots and routes `MjaiEvent`s from the platform
 bridge to them. 
 
+## Unavailable decisions
+
+A reply with `meta.unavailable` set to a reason string means the model cannot
+decide, for example after synchronization loss or a transport failure. The
+manager records it for inspection/monitoring but never publishes it to the
+autoplay response bus, including before any riichi follow-up. The marker is
+part of the reply, so gating does not race the independent stderr notification
+pump. The bot must mark every unavailable reply until it can decide again;
+notifications still describe the fault to the user.
+
+An ordinary `none` continues to mean a considered decline when asked at a
+decision window; a `none` with `meta.show` is a displayed model PASS. Neither
+is suppressed by this contract. Hand-boundary `none` remains withheld as before.
+The monitor retains unresolved sync faults across new deals/reconnects; an
+actionable model reply or displayed PASS in a valid hand confirms recovery.
+
 ## Submodules
 
 - `types` — `BotResponse`. Wire shape matches mjai.app: an mjai action

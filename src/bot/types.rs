@@ -3,9 +3,10 @@
 //! Wire shape matches the mjai.app convention: an mjai action object with an
 //! optional `meta` sibling for HUD-grade recommendation data.
 //!
-//! `meta` is intentionally untyped — it is a free-form JSON object emitted by
-//! the bot for the frontend to render. Akagi forwards it verbatim and never
-//! interprets the contents. Bots that have nothing to add omit it.
+//! `meta` is a free-form JSON object. The core reads the documented display
+//! fields and `unavailable` (a reason string): that reply is recorded but
+//! withheld from autoplay. Other fields are forwarded as written. Bots that
+//! have nothing to add omit it.
 //!
 //! Example wire JSON:
 //! ```text
@@ -22,15 +23,23 @@ use serde::{Deserialize, Serialize};
 /// action this turn" (see `src/schema/mjai/mod.rs`). Consumers can match
 /// on the variant to decide whether to render or skip.
 ///
-/// `meta` is whatever JSON object the bot chose to emit alongside its
-/// action. Backend treats it as opaque; the frontend renders it however
-/// it wants.
+/// `meta` carries the bot's display data and optional `unavailable` reason.
+/// A model that cannot decide must mark its reply unavailable; an ordinary
+/// `none` remains a legitimate decline in a decision window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotResponse {
     #[serde(flatten)]
     pub action: MjaiEvent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
+}
+
+impl BotResponse {
+    /// An unavailable model is not choosing PASS. This travels in the reply
+    /// itself; an asynchronous stderr warning cannot gate its input reliably.
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        self.meta.as_ref()?.get("unavailable")?.as_str()
+    }
 }
 
 #[cfg(test)]

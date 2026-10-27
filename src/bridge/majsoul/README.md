@@ -97,6 +97,22 @@ Tile mapping uses `tile::ms_to_mjai` (`0m/0p/0s` → `5mr/5pr/5sr`,
 `1z..7z` → `E S W N P F C`). Unknown tile strings error and the event is
 skipped instead of corrupting the mjai stream.
 
+The dealer's fourteen tiles are one Majsoul opening deal, not a distinct
+thirteen-tile head plus a live draw. The official client `ViewPlayer_Me.NewGame`
+sorts the deal; its first `ActionDiscardTile.moqie=false` can therefore discard
+the tile this bridge chose as synthetic `tsumo`. If that exact tile has no
+copy in the first thirteen, the bridge emits `dahai.tsumogiri=true`, the only
+valid MJAI identity for that discard. With a matching hand copy it preserves
+wire `moqie`; ordinary and red fives are distinct. No tile is moved, invented,
+removed twice, or inferred from an opponent's hand. Non-dealer and subsequent
+discards retain their wire flags. A real draw, kan, kita or hand end retires
+the opening context; double-riichi and GameRestore use the same conversion.
+
+This normalization is platform semantics, independent of room/rank/reward
+settings. The single-seat inference rules continue to reject impossible hand
+discards. In particular, loosening native legal-action checks would hide this
+bridge error rather than fix it.
+
 ## Meld actions → chi / pon / daiminkan / ankan / kakan
 
 `.lq.ActionPrototype` Notify with one of:

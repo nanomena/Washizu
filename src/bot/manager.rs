@@ -349,6 +349,7 @@ impl BotManager {
                 return Err(e).context("bot react failed");
             }
         };
+        let available = resp.unavailable_reason().is_none();
 
         // Autoplay reach follow-up (#257). A bot that declares riichi as
         // plain mjai — `reach` with no `pai` — leaves the declaring discard
@@ -367,7 +368,7 @@ impl BotManager {
         // from the runner's view (`drop_next_own_reach`) so it isn't a second
         // reach.
         let mut did_reach_followup = false;
-        if autoplay_enabled {
+        if autoplay_enabled && available {
             if let MjaiEvent::Reach { pai: None, .. } = &resp.action {
                 if let Some(seat) = our_seat {
                     let reach_ev = MjaiEvent::Reach {
@@ -430,6 +431,8 @@ impl BotManager {
                 });
             }
         }
+        // A reply marked unavailable is recorded above but never reaches
+        // autoplay: its none means no model decision, not a chosen PASS.
         // MjaiEvent::None still goes on the bus — downstream consumers
         // decide whether to render. Centralizes the "skip" decision.
         // Except at a boundary: that batch is how the bot learns the hand or
@@ -444,7 +447,7 @@ impl BotManager {
                 | MjaiEvent::EndKyoku
                 | MjaiEvent::EndGame { .. }
         );
-        if !(boundary && matches!(resp.action, MjaiEvent::None)) {
+        if available && !(boundary && matches!(resp.action, MjaiEvent::None)) {
             let _ = self.out_tx.send(resp);
         }
 
@@ -1189,6 +1192,42 @@ mod tests {
         assert!(
             resp_rx.try_recv().is_err(),
             "a boundary's none stays off the bus"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_reply_never_becomes_pass_but_normal_declines_still_do() {
+        let plain: BotResponse = serde_json::from_str(r#"{"type":"none"}"#).unwrap();
+        let fault: BotResponse = serde_json::from_str(
+            r#"{"type":"none","meta":{"unavailable":"Model synchronization is lost for this hand."}}"#,
+        ).unwrap();
+        let decline: BotResponse =
+            serde_json::from_str(r#"{"type":"none","meta":{"show":{"items":[]}}}"#).unwrap();
+        let (mut mgr, calls, mut responses, _, _) = manager_with_mock(vec![
+            plain.clone(),
+            fault.clone(),
+            fault,
+            decline.clone(),
+            plain.clone(),
+        ]);
+        // No stderr notification is sent: the reply must gate itself, even
+        // if the notification pump runs after stdout has delivered it.
+        for expected in [Some(plain.clone()), None, None, Some(decline), Some(plain)] {
+            mgr.handle_tracked(tracked(dahai(0), Some(true)))
+                .await
+                .unwrap();
+            match expected {
+                Some(reply) => assert_eq!(responses.try_recv().unwrap(), reply),
+                None => assert!(
+                    responses.try_recv().is_err(),
+                    "no autoplay input for unavailable model"
+                ),
+            }
+        }
+        assert_eq!(
+            calls.lock().await.len(),
+            5,
+            "all real event batches still reach the same runner"
         );
     }
 

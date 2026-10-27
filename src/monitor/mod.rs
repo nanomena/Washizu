@@ -143,6 +143,9 @@ pub struct MonitorSnapshot {
     /// not whether the bot has reached it.
     pub server: ServiceStatus,
     pub sync_error: Option<String>,
+    /// Last unresolved sync fault. Unlike the current hand's `sync_error`,
+    /// this survives deals/reconnects until a fresh actionable model reply.
+    pub sync_fault: Option<String>,
     /// The name the window goes by: the active bot's display name.
     pub brand: String,
     /// What the bot's latest reply said about itself (`meta.facts`).
@@ -184,6 +187,7 @@ impl Default for MonitorSnapshot {
             service_error: None,
             server: ServiceStatus::None,
             sync_error: None,
+            sync_fault: None,
             brand: "Washizu".into(),
             facts: vec![],
             autoplay_enabled: false,
@@ -345,7 +349,8 @@ impl MonitorHandle {
             s.view = game.as_ref().map(MahgenView::from_snapshot);
             s.game = game;
             if let Some(error) = error {
-                s.sync_error = Some(error);
+                s.sync_error = Some(error.clone());
+                s.sync_fault = Some(error);
                 expire(&mut s.decision);
             }
             match event {
@@ -534,8 +539,11 @@ impl MonitorHandle {
             d.completed_ms = Some(chrono::Local::now().timestamp_millis());
             d.reaction_ms = Some(reaction_ms);
             d.response = Some(response.clone());
+            d.error = response.unavailable_reason().map(String::from);
             d.state = if s.round_ended || s.sync_error.is_some() {
                 "expired"
+            } else if response.unavailable_reason().is_some() {
+                "unavailable"
             } else if matches!(response.action, MjaiEvent::None) {
                 if response
                     .meta
@@ -560,6 +568,9 @@ impl MonitorHandle {
                     s.service_error = None;
                 }
             }
+            if matches!(d.state.as_str(), "awaiting" | "declined") && s.service != "error" {
+                s.sync_fault = None;
+            }
             confirm(s);
         });
     }
@@ -577,7 +588,8 @@ impl MonitorHandle {
 
     pub fn gap(&self, detail: String) {
         self.update(|i| {
-            i.snapshot.sync_error = Some(detail);
+            i.snapshot.sync_error = Some(detail.clone());
+            i.snapshot.sync_fault = Some(detail);
             expire(&mut i.snapshot.decision);
         });
     }
@@ -640,7 +652,9 @@ impl MonitorHandle {
                     expire(&mut s.decision);
                 }
             } else if fault && ["desync", "unsupported", "error"].contains(&suffix) {
-                s.sync_error = Some(notice.body.clone().unwrap_or_else(|| notice.title.clone()));
+                let detail = notice.body.clone().unwrap_or_else(|| notice.title.clone());
+                s.sync_error = Some(detail.clone());
+                s.sync_fault = Some(detail);
                 expire(&mut s.decision);
             }
         });
@@ -1087,6 +1101,57 @@ mod tests {
         m.complete(id, &response(r#"{"type":"none"}"#), 4000);
         assert_eq!(m.snapshot().service, "error");
         assert_eq!(m.snapshot().decision.unwrap().state, "unavailable");
+    }
+
+    #[test]
+    fn sync_fault_survives_deals_until_an_actionable_reply_confirms_recovery() {
+        let m = MonitorHandle::default();
+        let context = hand(&m);
+        m.set_bot(BotStatus::Ready {
+            bot: "demo".into(),
+            actor_id: 0,
+        });
+        m.notification(
+            &Notification::warn("lost this hand")
+                .body("bad discard")
+                .id("demo-desync"),
+        );
+        assert!(m.begin(context, "demo", &MjaiEvent::None).is_none());
+        let context = deal(&m, 2, 0);
+        assert!(m.snapshot().sync_error.is_none());
+        assert_eq!(m.snapshot().sync_fault.as_deref(), Some("bad discard"));
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        m.complete(id, &response(r#"{"type":"none"}"#), 10);
+        assert!(m.snapshot().sync_fault.is_some());
+        // A reconnect/new start_game is not proof of restored inference either.
+        let context = hand(&m);
+        assert!(m.snapshot().sync_fault.is_some());
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        m.complete(
+            id,
+            &response(r#"{"type":"dahai","actor":0,"pai":"9m","tsumogiri":true}"#),
+            10,
+        );
+        assert!(m.snapshot().sync_fault.is_none());
+        m.gap("another lost hand".into());
+        let context = deal(&m, 3, 0);
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        m.complete(
+            id,
+            &response(r#"{"type":"none","meta":{"unavailable":"still lost"}}"#),
+            10,
+        );
+        assert!(m.snapshot().sync_fault.is_some());
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        m.complete(
+            id,
+            &response(r#"{"type":"none","meta":{"show":{"items":[]}}}"#),
+            10,
+        );
+        assert!(
+            m.snapshot().sync_fault.is_none(),
+            "an actual model PASS also confirms recovery"
+        );
     }
     #[test]
     fn notices_require_the_current_bot_namespace() {

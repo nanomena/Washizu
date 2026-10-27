@@ -50,7 +50,7 @@ export function FaultCard({ alerts, onDetails }: { alerts: Alert[]; onDetails?: 
       </li>)}
     </ul>
     <footer>
-      <small>{alerts.length > 3 ? tr('另有 {0} 项', alerts.length - 3) : alerts[0].hint}</small>
+      <small title={alerts[0].hint}>{alerts.length > 3 ? tr('另有 {0} 项', alerts.length - 3) : alerts[0].key === 'sync' ? tr('自动操作等待模型恢复') : alerts[0].hint}</small>
       {onDetails && <button onClick={onDetails}>{tr('连接详情')}<ChevronRight size={12} /></button>}
     </footer>
   </section>

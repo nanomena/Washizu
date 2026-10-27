@@ -76,8 +76,7 @@ function Round({ s }: { s: MonitorSnapshot | null }) {
 }
 
 /** The candidates' slot: candidates, or the reason there are none. */
-function Slot({ m, onDetails }: { m: Model; onDetails: () => void }) {
-  if (m.faults.length > 0 && m.rows.length === 0) return <FaultCard alerts={m.faults} onDetails={onDetails} />
+function Slot({ m }: { m: Model }) {
   // What the numbers are is the bot's to say; its card carries the words.
   const card = pickShow(m.s?.decision?.response?.meta)
   return <CandidateList rows={m.rows} state={m.listState} empty={m.noRows} loading={m.view.phase === 'thinking'} caption={card?.caption} hint={card?.hint} />
@@ -136,11 +135,12 @@ function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail,
     </header>
 
     <div className="md-body" role="tabpanel" data-tab={tab}>
-      <DecisionCard view={view} decision={s?.decision ?? null} elapsed={m.elapsed} past={!!s?.round_ended} />
+      {m.faults.length > 0 ? <div className="md-fault"><FaultCard alerts={m.faults} onDetails={() => { openGroup('link'); setTab('settings') }} /></div>
+        : <DecisionCard view={view} decision={s?.decision ?? null} elapsed={m.elapsed} past={!!s?.round_ended} />}
       {/* At the end of a round its result stands where the candidates and the hand were. */}
       {tab === 'decision' && (s?.result ? <ResultCard result={s.result} snapshot={s} />
         : <>
-          <Slot m={m} onDetails={() => { openGroup('link'); setTab('settings') }} />
+          <Slot m={m} />
           {game ? <div className="md-side"><HandStrip game={game} suggestion={view.live ? s?.decision?.response ?? null : null} /><ScoreStrip game={game} /></div>
             : <p className="mslot-empty">{tr('对局开始后，这里显示手牌和四家点数')}</p>}
         </>)}
