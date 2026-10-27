@@ -6,9 +6,7 @@ mod merge;
 mod monitor;
 mod platform;
 
-pub use autoplay::{
-    AutoplayConfig, DelayDistribution, DelayMode, DelayModelConfig, InputConfig,
-};
+pub use autoplay::{AutoplayConfig, DelayDistribution, DelayMode, DelayModelConfig, InputConfig};
 pub use bot::{BotConfig, NativeApiConfig};
 pub use capture::{CaptureConfig, HttpCaptureConfig};
 pub use logging::LoggingConfig;
@@ -61,8 +59,9 @@ pub fn load_config(path: &Path) -> AppConfig {
     eprintln!("Loading config from: {}", path.display());
 
     let mut cfg = match std::fs::read_to_string(path) {
-        Ok(content) => match migrate_input_config(&content).and_then(|body|
-            toml::from_str::<AppConfig>(&body).map_err(|e| e.to_string())) {
+        Ok(content) => match migrate_input_config(&content)
+            .and_then(|body| toml::from_str::<AppConfig>(&body).map_err(|e| e.to_string()))
+        {
             Ok(config) => config,
             Err(e) => {
                 eprintln!("Failed to parse config: {e}, using defaults");
@@ -128,8 +127,13 @@ fn migrate_retired_controls(path: &Path, cfg: &AppConfig) -> Result<(), String> 
 /// Move the old shared settings once; runtime code never reads a site-named
 /// alias. Preserve comments, unknown fields and all explicit user values.
 fn migrate_input_config(body: &str) -> Result<String, String> {
-    let mut document = body.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string())?;
-    if let Some(autoplay) = document.get_mut("autoplay").and_then(toml_edit::Item::as_table_mut) {
+    let mut document = body
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| e.to_string())?;
+    if let Some(autoplay) = document
+        .get_mut("autoplay")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
         if autoplay.contains_key("majsoul") {
             if autoplay.contains_key("input") {
                 return Err("config has both autoplay.majsoul and autoplay.input; refusing ambiguous input settings".into());
@@ -145,6 +149,20 @@ fn migrate_input_config(body: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn shared_input_migration_preserves_values_and_is_idempotent() {
+        let old = "# custom settings\n[autoplay.majsoul]\nclick_retries = 7\nhover_delay_ms = 123\nprivate_note = 'preserve'\n";
+        let migrated = migrate_input_config(old).unwrap();
+        let config: AppConfig = toml::from_str(&migrated).unwrap();
+        assert_eq!(config.autoplay.input.click_retries, 7);
+        assert_eq!(config.autoplay.input.hover_delay_ms, 123);
+        assert!(migrated.contains("# custom settings"));
+        assert!(migrated.contains("private_note"));
+        assert!(!migrated.contains("autoplay.majsoul"));
+        assert_eq!(migrated, migrate_input_config(&migrated).unwrap());
+        assert!(migrate_input_config("[autoplay.majsoul]\n[autoplay.input]\n").is_err());
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let mut d = std::env::temp_dir();
@@ -169,7 +187,15 @@ mod tests {
         let migrated = std::fs::read_to_string(&file).unwrap();
         assert!(migrated.contains("# user comment"));
         assert!(migrated.contains("my-value"));
-        for retired in ["stream_output", "stream_port", "stream_token", "always_on_top", "old-secret"] { assert!(!migrated.contains(retired)); }
+        for retired in [
+            "stream_output",
+            "stream_port",
+            "stream_token",
+            "always_on_top",
+            "old-secret",
+        ] {
+            assert!(!migrated.contains(retired));
+        }
         let _ = load_config(&file);
         assert_eq!(migrated, std::fs::read_to_string(&file).unwrap());
         std::fs::remove_dir_all(dir).unwrap();

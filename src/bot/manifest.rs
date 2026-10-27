@@ -382,6 +382,15 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    #[test]
+    fn pacing_is_an_optional_bot_owned_capability() {
+        let manifest: Manifest = toml::from_str("[pacing]\nentry = 'delay.lua'\n").unwrap();
+        assert_eq!(manifest.pacing.as_ref().unwrap().entry, "delay.lua");
+        let encoded = toml::to_string(&manifest).unwrap();
+        assert_eq!(toml::from_str::<Manifest>(&encoded).unwrap(), manifest);
+        assert!(Manifest::default().pacing.is_none());
+    }
+
     fn write(p: &Path, body: &str) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();

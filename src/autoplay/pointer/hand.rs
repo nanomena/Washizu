@@ -152,7 +152,7 @@ impl PointerController {
     /// Plan the pointer's way to the plan's first press and take its time
     /// out of the pause that leads the plan. `None` for a plan that does not
     /// open with a pause and a press: there is no thinking time to move in.
-    /// `glance` is the runner-up to look at, as a normalised point; `shown_at`
+    /// `glance` is the runner-up to look at, in viewport CSS pixels; `shown_at`
     /// when what the decision answers came on screen, before which the
     /// pointer cannot have seen it (see [`wait_to_see`]); after a deal the
     /// whole way is made once the hand can have been seen ([`dealt_lead`]).
@@ -323,7 +323,7 @@ impl PointerController {
         spot
     }
 
-    /// Look at `spot` of a hand at rest holding `tehai`, on the canvas at
+    /// Look at `spot` using the currently measured tile layout on the canvas at
     /// `rect`: the look waits its turn in the queue.
     pub fn look_at(&mut self, mut spot: Spot) {
         if self.live_lean().is_none() {

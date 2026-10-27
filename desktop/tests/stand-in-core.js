@@ -27,6 +27,7 @@ function snapshot() {
     game: null, view: null, round_ended: false, game_ended: !process.argv.includes('--live-game'),
     capture, bot: { state: 'ready', bot: 'stand-in', actor_id: 0 },
     service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null,
+    forecast: { owner: 0, state: 'disabled' },
     brand: 'Stand-in', facts: [], autoplay_enabled: false,
     previous_decision: null, result: null, previous_result: null, events: [], last_event_ms: null,
     decision: {

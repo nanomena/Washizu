@@ -417,7 +417,7 @@ fn inference_deadline(
     cfg: &AppConfig,
     now: Instant,
 ) -> (Instant, u32, u32) {
-    let click = &cfg.autoplay.majsoul;
+    let click = &cfg.autoplay.input;
     // Reserve a three-input plan, pointer travel, configured scheduling margin.
     let reserve = cfg
         .autoplay

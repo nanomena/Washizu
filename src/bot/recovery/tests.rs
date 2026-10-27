@@ -299,9 +299,9 @@ impl Rig {
         let mut cfg = AppConfig::default();
         cfg.autoplay.enabled = true;
         cfg.autoplay.delay.safety_margin_ms = 0;
-        cfg.autoplay.majsoul.hover_delay_ms = 0;
-        cfg.autoplay.majsoul.click_hold_ms = 0;
-        cfg.autoplay.majsoul.inter_click_delay_ms = 0;
+        cfg.autoplay.input.hover_delay_ms = 0;
+        cfg.autoplay.input.click_hold_ms = 0;
+        cfg.autoplay.input.inter_click_delay_ms = 0;
         let config = Arc::new(RwLock::new(cfg));
         let clock = Arc::new(AutoplayContext::new());
         let monitor = MonitorHandle::default();
@@ -793,9 +793,9 @@ fn remaining_budget_deducts_elapsed_time_input_reserve_and_bounded_bank() {
     });
     let mut config = AppConfig::default();
     config.autoplay.delay.safety_margin_ms = 100;
-    config.autoplay.majsoul.hover_delay_ms = 20;
-    config.autoplay.majsoul.click_hold_ms = 10;
-    config.autoplay.majsoul.inter_click_delay_ms = 40;
+    config.autoplay.input.hover_delay_ms = 20;
+    config.autoplay.input.click_hold_ms = 10;
+    config.autoplay.input.inter_click_delay_ms = 40;
     let (deadline, reserve, remaining) = inference_deadline(
         clock.time_budget.read().unwrap().map(InputWindow::Majsoul),
         &config,

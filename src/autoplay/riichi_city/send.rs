@@ -1,6 +1,6 @@
 //! Sending a planned Riichi City action, off the plan loop.
 //!
-//! A Riichi City plan is `[Sleep, SendFrame]`, run as its own task instead
+//! A mapped Riichi City frame uses the common pacing result in its own task instead
 //! of inline: inline execution serialized every decision's sleeps, window
 //! waits and verify pauses, so queued plans stacked — measured injections
 //! drifting 2→17 s later as a session progressed. A task gates its send on
@@ -8,31 +8,20 @@
 //! tasks cannot send into a later window by mistake.
 
 use crate::autoplay::inject::{InjectFrame, SharedInjectBus};
-use crate::autoplay::platform::{PlanResult, Step};
-use crate::config::MajsoulAutoplayConfig;
+
+use crate::config::InputConfig;
 use crate::schema::MjaiEvent;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-/// Start sending `plan`'s frame for `action` in a task of its own.
+/// Send the mapped frame using the wait already selected by the common policy.
 pub fn spawn(
-    plan: &PlanResult,
-    cfg: &MajsoulAutoplayConfig,
+    frame: Vec<u8>,
+    sleep_ms: u32,
+    cfg: &InputConfig,
     action: &MjaiEvent,
     inject: SharedInjectBus,
 ) {
-    let mut sleep_ms = 0;
-    let mut frame: Option<Vec<u8>> = None;
-    for step in &plan.steps {
-        match step {
-            Step::Sleep { duration_ms } => sleep_ms = *duration_ms,
-            Step::SendFrame(bytes) => frame = Some(bytes.clone()),
-            other => warn!("autoplay: unexpected riichi plan step {other:?}"),
-        }
-    }
-    let Some(frame) = frame else {
-        return;
-    };
     let verify_input_ms = cfg.verify_input_ms;
     let retries = cfg.click_retries;
     let action = action.clone();
