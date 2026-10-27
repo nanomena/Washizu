@@ -1,7 +1,79 @@
-# The desktop shell
+# Washizu desktop
 
-The Electron application: the window, the game view and the dock in it, and
-the local DevTools port.
+The Electron application: an account chooser, then an account's game view and
+dock, with its own local DevTools port.
+
+## Account profiles
+
+Opening Washizu shows saved accounts. Create a Mahjong Soul or Tenhou profile,
+or rename and open one already saved. The game window's folder button and
+Accounts menu return to the chooser after the current game has ended. Cancel
+any lobby reservation in the game before returning. Closing an account waits
+for its core to stop; another account cannot open until the old process exits.
+The chooser itself starts no core, model, game page or network connection.
+
+`--data` names the account library root. Its `profiles.json` stores stable ids,
+display names, platforms and the last opening time. Fresh profiles live under
+`profiles/<id>/`, each with its own configuration, `browser/`, history, logs,
+window state and bot settings. Renaming a profile never changes its directory.
+Only one account window is enabled; `ProfileSession` keeps that ownership in
+one place for future multi-window work.
+
+An existing home is adopted **in place** as the first profile. Its browser,
+Local State, cookies, bot settings and history are never moved, copied or
+rewritten by the chooser. Its game still uses `<root>/browser` and
+`persist:game`. The chooser uses `<root>/launcher/browser`, apart from it.
+Packaged launches discover the sibling `../data` home or the former
+`<appData>/akagi-desktop`; `--data` explicitly selects a home. Development
+defaults to `<appData>/Washizu-development` and never discovers production data.
+Do not use production data for development or tests.
+
+New profiles do not copy another account's bot settings or credentials.
+Mahjong Soul starts with the core's built-in bot and autoplay off. Tenhou
+starts with the bot and autoplay off: this change provides its separate
+login, capture and records, while miai rule/reward/settlement qualification
+remains separate work. The original account retains its configured miai.
+
+`main.js` chooses the launcher or account process. `profile-main.js` owns the
+chooser and starts an account with an internal `--profile=<id>` argument;
+`game-main.js` owns that account's existing shell. Each account fixes its
+Chromium userData before Electron is ready. App packaging, titles and product
+metadata say Washizu; the internal `akagi-core`, IPC names and the external
+Spout sender `Akagi` keep their existing identities. Upstream notices stay in
+the distribution. Deployment scripts and installed executables are unchanged
+by source development.
+
+The chooser is another view of the same React/TypeScript frontend and uses
+its existing fonts, palette, buttons and four-language text catalog. The chooser
+is a small, non-resizable, always-on-top guide that hides when the account's
+main window is ready and returns after that window closes. It has no game
+canvas or page zoom: body text remains 13 DIP and headings use Golos Text 500
+with the same system CJK fallback as the monitor.
+
+`profile-layout.js` derives its content size: 640 wide = 48 outer padding +
+352 name + 88 platform + 152 actions. Its vertical Grid is 48 outer padding +
+48 toolbar + 24 status + (32 header + 2..4 × 64 account rows) + 24 footer,
+giving 304/368/432 DIP heights. More rows scroll inside the list. Account
+state and language changes keep the same slots. Small displays cap its size
+to leave room for the native frame. The main window independently retains
+`layout.js`'s 4:3 ratio, 1200×900 opening basis, 880×660 minimum, Windows frame
+correction and uniformly scaled 1280×960 game/dock canvas.
+
+Offline verification:
+
+```sh
+cd desktop
+npm run check
+npm test
+xvfb-run -a npm run smoke:profiles
+xvfb-run -a npm run smoke
+```
+
+Both smoke tests use a fake core and temporary data. The account smoke opens
+four real Electron account windows with game pages kept at `about:blank`,
+checks independent persistent cookies on an offline `.invalid` origin, and
+waits for a delayed fake core to finish before returning to the chooser. It
+writes `desktop/test-output/profiles.png`; it never visits a game site.
 
 Capture and autoplay both go through the Chrome DevTools Protocol, and of the
 webviews an operating system provides only Windows' is a Chromium. This shell
@@ -16,7 +88,7 @@ path on every platform.
 | Core | `src/headless`, built as `akagi-core` | Everything else: capture, the bridge, the tracker, the bot, autoplay, the monitor snapshot. No window, no webview. |
 | Interface | `frontend/`, the monitor page | Draws the dock from the core's snapshot. |
 
-The shell starts the core as a child process and talks to it in JSON lines over
+The account shell starts the core as a child process and talks to it in JSON lines over
 the child's stdin and stdout; `src/headless/mod.rs` documents the protocol. The
 core lives exactly as long as that stdin is open, so there is nothing to clean
 up when the shell goes, however it goes.
@@ -158,7 +230,7 @@ npm start
 
 | Option | Environment | Default |
 | --- | --- | --- |
-| `--data=<dir>` | `AKAGI_DATA` | `<appData>/akagi-desktop` |
+| `--data=<dir>` | `AKAGI_DATA` | discovered existing home, otherwise `<appData>/Washizu` (development: `Washizu-development`) |
 | `--core=<file>` | `AKAGI_CORE` | the packaged core, or `target/release/akagi-core` |
 | `--dock=<dir>` | `AKAGI_DOCK` | the packaged interface, or `frontend/dist` |
 | `--cdp-port=<n>` | `AKAGI_CDP_PORT` | any free port |
@@ -177,6 +249,10 @@ executables:
 <data>/browser/       the Chromium profile, the game's session included
 <data>/window.json    where the window was left
 ```
+
+The adopted first profile uses these paths directly. A new profile has this
+same layout under `<data>/profiles/<id>/`; the chooser's registry and browser
+are kept outside each account home.
 
 ## Checks
 

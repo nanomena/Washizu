@@ -11,7 +11,7 @@ const start = (/** @type {string} */ mode) => new Core(process.execPath, [STAND_
 
 test('the core says it is ready, answers by id, and refuses by message', async () => {
   const core = start('ok')
-  assert.deepEqual(await core.ready, { brand: 'Stand-in', monitor: { always_on_top: false }, version: '0.0.0' })
+  assert.deepEqual(await core.ready, { brand: 'Stand-in', platform: 'Majsoul', monitor: { always_on_top: false }, version: '0.0.0' })
   // Asked together, answered each to its own.
   const [first, second] = await Promise.all([core.call('echo', { n: 1 }), core.call('echo', { n: 2 })])
   assert.deepEqual([first, second], [{ n: 1 }, { n: 2 }])
@@ -37,6 +37,15 @@ test('closing its stdin is all it takes to end the core', async () => {
   core.close()
   assert.deepEqual(await gone, ['The core stopped (exit 0).'])
   await assert.rejects(core.call('echo'), { message: 'The core is not running.' })
+})
+
+test('an account shutdown waits for the core to release its pipes', async () => {
+  const core = start('ok')
+  await core.ready
+  await core.stop()
+  assert.equal(core.gone, true)
+  await core.stop()
+  await assert.rejects(core.call('echo'), /not running/)
 })
 
 test('a core that dies fails what was waiting on it and keeps its last words', async () => {

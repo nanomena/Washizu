@@ -26,6 +26,8 @@ if (!fs.existsSync(path.join(dock, 'index.html'))) throw new Error(`No built int
 
 const sleep = (/** @type {number} */ ms) => new Promise(done => setTimeout(done, ms))
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'akagi-smoke-'))
+fs.mkdirSync(path.join(work, 'data'))
+fs.writeFileSync(path.join(work, 'data', 'config.toml'), '[platform]\nkind = "Majsoul"\n')
 const core = path.join(work, 'core.sh')
 fs.writeFileSync(core, `#!/bin/sh\nexec "${process.execPath}" "${path.join(HERE, 'stand-in-core.js')}" --mode monitor "$@"\n`, { mode: 0o755 })
 const port = await new Promise(done => {
@@ -37,7 +39,7 @@ const port = await new Promise(done => {
 const SCREEN_SCALE = 1.5
 // `--run` marks the start as one that has its logging switches already (see `src/journal.js`): without
 // it the shell starts itself again with them, and the process watched here would be gone.
-const shell = spawn(electron, [DESKTOP, '--no-sandbox', `--force-device-scale-factor=${SCREEN_SCALE}`, `--data=${path.join(work, 'data')}`, `--core=${core}`, `--dock=${dock}`, `--cdp-port=${port}`, '--run=smoke'], { stdio: ['ignore', 'pipe', 'pipe'] })
+const shell = spawn(electron, [DESKTOP, '--no-sandbox', `--force-device-scale-factor=${SCREEN_SCALE}`, `--data=${path.join(work, 'data')}`, '--profile=existing', `--core=${core}`, `--dock=${dock}`, `--cdp-port=${port}`, '--run=smoke'], { stdio: ['ignore', 'pipe', 'pipe'] })
 let said = ''
 shell.stdout.on('data', text => { said += text })
 shell.stderr.on('data', text => { said += text })

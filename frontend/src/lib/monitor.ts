@@ -7,6 +7,8 @@ import type { AccountLevels } from '@/lib/ladder'
 /** The window's own options, and which build it is (`version` comes from the shell).
  *  `stream_url` is the address the shell serves the game at, while it does. */
 export type MonitorConfig = {
+  platform?: 'Majsoul' | 'Tenhou'
+  profile_name?: string
   always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean
   /** `auto_win`: switch the client's own auto-win on after a riichi or for a hand played dama (see the core's `autoplay::dama`). */
   quick_confirm?: boolean; auto_win?: boolean

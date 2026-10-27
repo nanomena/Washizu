@@ -68,3 +68,4 @@ native_bot/out/
 
 # The Spout sender, built locally (CI builds its own)
 desktop/native/spout/build/
+desktop/test-output/

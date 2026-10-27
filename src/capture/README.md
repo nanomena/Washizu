@@ -37,7 +37,9 @@ supervisor::start ─▶ EmbeddedGame::run ─▶ cdp::run ─▶ FlowBridges �
 - **The page handle belongs to the tab, not to a socket.** Mahjong Soul opens
   and closes many short-lived sockets while a game runs on another; the handle
   autoplay uses is cleared only when the page itself goes, or capture stops.
-- **`game_url` allows Mahjong Soul's own sites over HTTPS and nothing else.**
+- **`game_url` allows only the selected platform's sites over HTTPS.**
+  Mahjong Soul profiles accept its own domains; Tenhou profiles accept
+  `tenhou.net`. Credentials in URLs and cross-platform destinations are refused.
   The configuration cannot point a signed-in view somewhere else.
 
 ## Status

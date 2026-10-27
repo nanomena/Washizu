@@ -12,7 +12,7 @@
 //   --out       where the application goes   (default: dist/desktop)
 //   --without-runtime   leave Python out; the core then needs python3 and uv on PATH for bots that use them
 //
-// The result is <out>/Akagi-<platform>-<arch>/. It is a folder, not an
+// The result is <out>/Washizu-<platform>-<arch>/. It is a folder, not an
 // installer: it runs from wherever it is put and keeps its data elsewhere.
 
 import { packager } from '@electron/packager'
@@ -80,9 +80,9 @@ const { version } = JSON.parse(fs.readFileSync(path.join(DESKTOP, 'package.json'
 const [application] = await packager({
   dir: DESKTOP,
   out,
-  name: 'Akagi',
+  name: 'Washizu',
   appVersion: version,
-  appBundleId: 'com.akagi.desktop',
+  appBundleId: 'com.washizu.desktop',
   icon: path.join(ROOT, 'icons', 'icon'),
   overwrite: true,
   // The shell is a handful of files with no dependencies of its own to hide.
@@ -90,7 +90,7 @@ const [application] = await packager({
   prune: true,
   ignore: [/^\/(tests|scripts|native|node_modules)($|\/)/, /^\/(tsconfig\.json|README\.md|package-lock\.json)$/],
   extraResource: [path.join(stage, 'core'), path.join(stage, 'dock'), ...(withSpout ? [path.join(stage, 'spout')] : [])],
-  win32metadata: { ProductName: 'Akagi', FileDescription: 'Akagi', CompanyName: 'Akagi' },
+  win32metadata: { ProductName: 'Washizu', FileDescription: 'Washizu', CompanyName: 'Washizu' },
 })
 fs.rmSync(stage, { recursive: true, force: true })
 for (const notice of ['LICENSE.txt', 'NOTICE']) {

@@ -13,7 +13,7 @@ const READY_TIMEOUT_MS = 30_000
 const STDERR_KEPT = 4_000
 
 /**
- * @typedef {{ brand: string, monitor: { always_on_top: boolean, pointer_trail?: boolean, pointer_lean?: boolean, quick_confirm?: boolean, auto_win?: boolean, auto_continue?: boolean }, version: string }} Ready
+ * @typedef {{ brand: string, platform: 'Majsoul' | 'Tenhou', monitor: { always_on_top: boolean, pointer_trail?: boolean, pointer_lean?: boolean, quick_confirm?: boolean, auto_win?: boolean, auto_continue?: boolean }, version: string }} Ready
  * @typedef {{ done: (value: unknown) => void, fail: (reason: Error) => void }} Waiting
  */
 
@@ -73,6 +73,19 @@ export class Core extends EventEmitter {
   /** Let the core go: it ends when its stdin closes, and takes the bot's processes with it. */
   close() {
     this.child.stdin.end()
+  }
+
+  /** @returns {Promise<void>} */
+  async stop() {
+    if (this.gone) return
+    await new Promise((done, fail) => {
+      const timer = setTimeout(() => {
+        this.child.kill()
+        fail(new Error('The core did not release the account within 10 seconds.'))
+      }, 10_000)
+      this.once('exit', () => { clearTimeout(timer); done(undefined) })
+      this.close()
+    })
   }
 
   /** @param {string} line */

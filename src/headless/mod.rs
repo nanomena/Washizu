@@ -36,7 +36,7 @@
 //!
 //! | Event             | Payload                                              |
 //! |-------------------|------------------------------------------------------|
-//! | `ready`           | `{brand, monitor, version}` — the first line written |
+//! | `ready`           | `{brand, platform, monitor, version}` — the first line written |
 //! | `monitor-updated` | `MonitorSnapshot`                                    |
 //! | `pointer`         | `{x, y, down}` — autoplay's pointer, while the trail is on |
 //!
@@ -91,6 +91,7 @@ struct Request {
 struct Ready {
     /// The name the window goes by.
     brand: String,
+    platform: Platform,
     monitor: MonitorConfig,
     version: &'static str,
 }
@@ -216,6 +217,7 @@ async fn serve(
     TRAIL.store(cfg.monitor.pointer_trail, Ordering::Relaxed);
     let ready = Ready {
         brand: monitor::brand(&cfg),
+        platform: cfg.platform.kind,
         monitor: cfg.monitor.clone(),
         version: env!("CARGO_PKG_VERSION"),
     };
@@ -410,6 +412,9 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
         }
         "set_monitor_autoplay" => {
             let Enabled { enabled } = parse(params)?;
+            if enabled && state.config.read().await.platform.kind == Platform::Tenhou {
+                return Err("天凤档案的自动操作尚未完成验证，当前仅支持手动操作。".into());
+            }
             state.save_config(|c| c.autoplay.enabled = enabled).await?;
             state.monitor.set_autoplay(enabled);
             start_autoplay(state, enabled);
@@ -435,10 +440,7 @@ fn reply<T: Serialize>(value: T) -> Result<Value, String> {
 /// the game. Asked again — the shell made a new view — capture moves over.
 async fn open_game(state: &AppState, game: Game) -> Result<(), String> {
     let config = state.config.read().await.clone();
-    if config.platform.kind != Platform::Majsoul {
-        return Err("内置雀魂需要雀魂平台。".into());
-    }
-    let url = embedded::game_url(&config.capture.url)?;
+    let url = embedded::game_url(config.platform.kind, &config.capture.url)?;
     let endpoint = embedded::discover_endpoint(game.port)
         .await
         .map_err(|e| format!("{e:#}"))?;
@@ -652,7 +654,8 @@ mod tests {
     #[test]
     fn the_ready_line_names_the_window_and_its_options() {
         let ready = Ready {
-            brand: "Akagi".into(),
+            brand: "Washizu".into(),
+            platform: Platform::Majsoul,
             monitor: MonitorConfig {
                 always_on_top: true,
                 quick_confirm: true,
@@ -663,7 +666,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ready).unwrap(),
             json!({
-                "brand": "Akagi",
+                "brand": "Washizu",
+                "platform": "Majsoul",
                 "monitor": {
                     "always_on_top": true, "pointer_trail": false, "pointer_lean": false,
                     "quick_confirm": true, "auto_win": false, "auto_continue": false,

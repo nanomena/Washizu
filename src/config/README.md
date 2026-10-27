@@ -43,7 +43,7 @@ it.
   `mjai_bot/` root, and whether to run `uv sync` before spawning. Nests
   `[bot.api]` (`NativeApiConfig`): cloud inference for the built-in bot.
 - `capture` (`capture.rs`) — `url`, the address the game view is sent to (it
-  must be Mahjong Soul's own site over HTTPS), and `[capture.http]`
+  must belong to the account's selected platform over HTTPS), and `[capture.http]`
   (`HttpCaptureConfig`): what to record of the HTTP traffic capture sees, on
   top of the WebSocket frames. `record_all` defaults to **off**: full capture
   puts tokens and cookies into the session's files.

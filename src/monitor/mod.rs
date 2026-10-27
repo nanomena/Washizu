@@ -23,7 +23,7 @@ pub fn brand(config: &crate::config::AppConfig) -> String {
                 .and_then(|manifest| manifest.bot.display)
                 .unwrap_or(bot.name)
         })
-        .unwrap_or_else(|| "Akagi".into())
+        .unwrap_or_else(|| "Washizu".into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,7 +190,7 @@ impl Default for MonitorSnapshot {
             server: ServiceStatus::None,
             sync_error: None,
             sync_fault: None,
-            brand: "Akagi".into(),
+            brand: "Washizu".into(),
             facts: vec![],
             autoplay_enabled: false,
             decision: None,

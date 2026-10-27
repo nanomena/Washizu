@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { LoaderCircle, Pin, PinOff, X } from 'lucide-react'
+import { FolderOpen, LoaderCircle, Pin, PinOff, X } from 'lucide-react'
 import { CandidateList, DecisionCard } from '@/components/monitor/Decision'
 import { GameStage } from '@/components/monitor/GameStage'
 import { HandStrip, ResultCard, ScoreStrip, SeatColumns } from '@/components/monitor/Table'
@@ -10,6 +10,7 @@ import { Settings } from '@/components/monitor/Settings'
 import { Statistics } from '@/components/monitor/Stats'
 import { Faces } from '@/components/monitor/Tiles'
 import { useMonitor } from '@/hooks/useMonitor'
+import { useCanvasScale } from '@/hooks/useCanvasScale'
 import { pickShow } from '@/lib/botShow'
 import { rememberGroup, savedGroup, type Group } from '@/lib/settingsGroup'
 import {
@@ -27,8 +28,6 @@ import { localized, tr, useLang } from '@/lib/i18n'
 // the canvas is centred and nothing is cut off.
 //
 //   1280 × 960 (4:3) — the game on a 16:9 stage, and a 1280 × 240 dock under it
-const STAGE = { w: 1280, h: 720 }
-const DOCK = { w: 1280, h: 240 }
 
 // From the move to the game: this decision, the hand it is in, the game the hand
 // is in. Then the record over games, and the settings, which hold the links.
@@ -46,19 +45,6 @@ function useNow(running: boolean, every: number): number {
     return () => clearInterval(timer)
   }, [running, every])
   return now
-}
-
-/** How much the `w × h` canvas has to be scaled to fit the window. */
-function useFit(w: number, h: number): number {
-  const fit = useCallback(() => Math.min(window.innerWidth / w, window.innerHeight / h) || 1, [w, h])
-  const [k, setK] = useState(fit)
-  useEffect(() => {
-    const apply = () => setK(fit())
-    apply()
-    window.addEventListener('resize', apply)
-    return () => window.removeEventListener('resize', apply)
-  }, [fit])
-  return k
 }
 
 /** Everything the dock draws from, worked out once. */
@@ -193,7 +179,7 @@ export function Monitor() {
   // Options the shell changes by itself: the Spout sender starting or stopping, the game view given up.
   useEffect(() => listen<MonitorConfig>('monitor-options', setOptions), [])
 
-  const k = useFit(STAGE.w, STAGE.h + DOCK.h)
+  const k = useCanvasScale()
   // Drawn offscreen, the game is a picture on the stage rather than a view over it.
   const offscreen = options.game_view_now === 'offscreen'
   // The game view outlives a reload of this page, and capture says so: it only
@@ -293,8 +279,12 @@ export function Monitor() {
     : tr('建议已失效，候选不再显示')
   const m: Model = { s, view, rows, listState, noRows, faults, health: healthOf(s), elapsed: d ? Math.max(0, now - d.started_ms) : 0, now }
 
-  const tools = <button className="mtool" aria-label={tr('置顶')} title={options.always_on_top ? tr('取消置顶') : tr('窗口置顶')} aria-pressed={options.always_on_top} disabled={!ready || busy}
-    onClick={() => void pin(!options.always_on_top)}>{options.always_on_top ? <Pin size={15} /> : <PinOff size={15} />}</button>
+  const tools = <>
+    <button className="mtool" aria-label={tr('返回账号档案')} title={tr('返回账号档案')} disabled={!ready || busy}
+      onClick={() => void invoke('return_to_profiles').catch(error => setUiError(String(error)))}><FolderOpen size={15} /></button>
+    <button className="mtool" aria-label={tr('置顶')} title={options.always_on_top ? tr('取消置顶') : tr('窗口置顶')} aria-pressed={options.always_on_top} disabled={!ready || busy}
+      onClick={() => void pin(!options.always_on_top)}>{options.always_on_top ? <Pin size={15} /> : <PinOff size={15} />}</button>
+  </>
 
   return <main className="mon" data-lang={lang} style={{ '--k': k } as CSSProperties}>
     <div className="mon-fit">
@@ -303,16 +293,16 @@ export function Monitor() {
           {embedded && offscreen ? <GameStage />
           : embedded ? <div className="mon-stage-idle">
             <LoaderCircle size={22} className="mspin" />
-            <p>{tr('雀魂视图在这里显示')}</p>
+            <p>{options.platform === 'Tenhou' ? tr('天凤视图在这里显示') : tr('雀魂视图在这里显示')}</p>
             <button className="mbtn" onClick={place}>{tr('重新对齐游戏视图')}</button>
           </div>
             : <div className="mon-stage-start">
-              <h2>{s?.brand ? tr('{0} · 雀魂', s.brand) : tr('雀魂')}</h2>
-              <p>{tr('上面登录雀魂并对局，下面核对模型建议和雀魂的实际动作。')}</p>
+              <h2>Washizu · {options.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')}</h2>
+              <p>{options.platform === 'Tenhou' ? tr('登录这个档案的天凤账号，登录资料和记录单独保存。') : tr('上面登录雀魂并对局，下面核对模型建议和雀魂的实际动作。')}</p>
               <div className="mon-start-card">
                 <p>{tr('游戏使用独立的登录资料，只在这个窗口里用。')}</p>
                 <button className="mbtn mbtn--primary" disabled={!ready || busy} onClick={() => void openGame()}>
-                  {busy ? <><LoaderCircle size={16} className="mspin" />{tr('正在连接游戏视图…')}</> : tr('打开雀魂')}
+                  {busy ? <><LoaderCircle size={16} className="mspin" />{tr('正在连接游戏视图…')}</> : options.platform === 'Tenhou' ? tr('打开天凤') : tr('打开雀魂')}
                 </button>
               </div>
             </div>}
@@ -321,11 +311,11 @@ export function Monitor() {
 
       <div className="mon-canvas mon-canvas--dock">
         <Dock key={lang} m={m} tab={tab} setTab={setTab} tools={tools} options={options}
-          onLevel={ready ? level => void setLevel(level) : null} onPin={ready && !busy ? pinned => void pin(pinned) : null}
+          onLevel={ready && options.platform !== 'Tenhou' ? level => void setLevel(level) : null} onPin={ready && !busy ? pinned => void pin(pinned) : null}
           onTrail={ready && !busy ? enabled => void choose('set_monitor_trail', enabled) : null}
           onLean={ready && !busy ? enabled => void choose('set_monitor_lean', enabled) : null}
-          onConfirm={ready && !busy ? enabled => void choose('set_monitor_confirm', enabled) : null}
-          onAutoWin={ready && !busy ? enabled => void choose('set_monitor_auto_win', enabled) : null}
+          onConfirm={ready && !busy && options.platform !== 'Tenhou' ? enabled => void choose('set_monitor_confirm', enabled) : null}
+          onAutoWin={ready && !busy && options.platform !== 'Tenhou' ? enabled => void choose('set_monitor_auto_win', enabled) : null}
           onStream={ready && !busy ? enabled => void choose('set_monitor_stream', enabled) : null}
           onCopyStream={ready ? copyStream : null}
           onGameView={ready && !busy ? view => void chooseGameView(view) : null}
