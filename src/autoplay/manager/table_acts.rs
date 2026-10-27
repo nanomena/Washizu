@@ -15,6 +15,37 @@ impl AutoplayManager {
         let effect = self.ui_transition("clock", |ui| ui.tick(Instant::now()));
         if let Some(effect) = effect {
             match effect {
+                ui::Effect::ObserveWeb(ticket) => {
+                    let observation = {
+                        let guard = self.ctx.page.read().await;
+                        match guard.as_ref() {
+                            Some(page) => {
+                                match crate::autoplay::cdp_input::observe_tenhou_ui(page).await {
+                                    Ok(observation) => Some(observation),
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "autoplay: Web UI observation unavailable: {error:#}"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            None => None,
+                        }
+                    };
+                    self.sync_ui().await;
+                    self.ui_transition("Web observation", |ui| {
+                        ui.web_observed(ticket, observation, Instant::now(), &mut rand::rng())
+                    });
+                }
+                ui::Effect::InvokeWeb { ticket, control } => {
+                    let result = self.web_ui_invoke(ticket, &control).await;
+                    self.sync_ui().await;
+                    self.ui_transition("Web dispatch", |ui| {
+                        ui.web_done(ticket, result, Instant::now())
+                    });
+                    info!(?control, ?result, "autoplay: Web UI effect completed");
+                }
                 ui::Effect::Observe(ticket) => {
                     let sight = self.look_at().await;
                     self.sync_ui().await;
@@ -64,6 +95,9 @@ impl AutoplayManager {
         let Some(act) = self.toggles.next(Instant::now()) else {
             return;
         };
+        if self.cfg.read().await.platform.kind != crate::config::Platform::Majsoul {
+            return;
+        }
         let phase = self.ui.lock().unwrap().phase();
         if !matches!(phase, ui::Phase::Table(_)) {
             return;

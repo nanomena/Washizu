@@ -18,14 +18,37 @@ impl AutoplayManager {
         self.advisor.note(ev);
         match ev {
             MjaiEvent::StartGame {
-                id, num_players, ..
+                id,
+                num_players,
+                game_meta,
+                ..
             } => {
                 // Capture our seat directly from the StartGame event rather
                 // than going through the tracker. This avoids the try_lock
                 // race entirely and makes cached_our_seat available from
                 // the very first event of the game.
                 self.toggles.reset();
-                self.ui_transition("start_game", |ui| ui.game_started());
+                let target = game_meta
+                    .as_ref()
+                    .and_then(|meta| meta.match_info.as_ref())
+                    .and_then(|info| match info {
+                        crate::schema::MatchInfo::Tenhou {
+                            go_type: Some(mode),
+                            lobby: Some(lobby),
+                            ..
+                        } if id.is_some() => Some(crate::autoplay::ui::tenhou_web::TableSpec {
+                            lobby: *lobby,
+                            mode: *mode,
+                        }),
+                        _ => None,
+                    });
+                self.ui_transition("start_game", |ui| {
+                    if ui.client() == crate::autoplay::ui::Client::TenhouWeb {
+                        ui.web_game_started(*id, target, Instant::now());
+                    } else {
+                        ui.game_started();
+                    }
+                });
                 self.new_game();
                 self.state.cached_our_seat = *id;
                 self.state.num_players = *num_players;

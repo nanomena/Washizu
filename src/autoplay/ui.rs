@@ -1,8 +1,9 @@
-//! Mahjong Soul UI phase and input authority. See `UI_FSM.md`.
+//! Platform UI phase and input authority. See `UI_FSM.md`.
 //! All times and observations are supplied by the caller. This module never
 //! sleeps, captures, clicks, selects a bot, or reconstructs model context.
 
 mod effects;
+pub mod tenhou_web;
 #[cfg(test)]
 mod tests;
 
@@ -39,6 +40,13 @@ pub struct Generation {
     pub table: u64,
     pub manual: u64,
     pub settings: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Client {
+    Majsoul,
+    TenhouWeb,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +101,7 @@ pub enum Phase {
     RematchAsk,
     Matching,
     Suspended(Suspension),
+    Web(tenhou_web::Stage),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,10 +112,16 @@ pub enum WaitingReason {
     EndTimeout,
     PressLimit,
     ClientReload,
+    NoKnownTable,
+    TargetUnavailable,
+    OwnershipChanged,
+    ObservationUnavailable,
+    DispatchUnavailable,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Environment {
+    pub client: Client,
     pub context: Option<crate::monitor::DecisionContext>,
     pub settings: Settings,
     pub generation: Generation,
@@ -154,12 +169,13 @@ impl Screens {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum State {
     WaitingStart(WaitingReason),
     Table(TablePhase),
     Screens(Screens),
     Matching,
+    Web(tenhou_web::Run),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +184,8 @@ enum Input {
     Screen(Sight),
     Decision,
     AutoWin,
+    WebObserve,
+    WebControl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,10 +205,18 @@ struct DecisionRun {
     next_click: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     Observe(Ticket),
-    Press { ticket: Ticket, sight: Sight },
+    Press {
+        ticket: Ticket,
+        sight: Sight,
+    },
+    ObserveWeb(Ticket),
+    InvokeWeb {
+        ticket: Ticket,
+        control: tenhou_web::Control,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +269,7 @@ impl Machine {
             return Phase::Suspended(why);
         }
         match self.state {
+            State::Web(ref run) => Phase::Web(run.stage),
             State::WaitingStart(_) => Phase::WaitingStart,
             State::Table(p) => Phase::Table(p),
             State::Matching => Phase::Matching,
@@ -265,6 +292,10 @@ impl Machine {
     pub fn waiting_reason(&self) -> Option<WaitingReason> {
         match self.state {
             State::WaitingStart(reason) => Some(reason),
+            State::Web(ref run) => match run.stage {
+                tenhou_web::Stage::Stopped(reason) => Some(reason),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -273,12 +304,17 @@ impl Machine {
         self.effects.issue(input)
     }
 
+    pub fn client(&self) -> Client {
+        self.env.map_or(Client::Unsupported, |env| env.client)
+    }
+
     /// Revoke old callbacks on every ownership change, including an off/on
     /// or manual interval that completed while an executor was awaiting CDP.
     pub fn synchronize(&mut self, env: Environment, now: Instant) {
         self.checked_at = Some(now);
         let session_changed = self.env.is_some_and(|old| {
-            old.generation.session != env.generation.session
+            old.client != env.client
+                || old.generation.session != env.generation.session
                 || old.generation.table != env.generation.table
         });
         let changed = self
@@ -294,7 +330,11 @@ impl Machine {
         } else {
             None
         };
-        if changed || self.suspension != why {
+        if env.client == Client::TenhouWeb {
+            self.synchronize_web(env, why, now);
+            return;
+        }
+        if changed || session_changed || self.suspension != why {
             self.revoke();
             if let State::Screens(s) = &mut self.state {
                 s.seen = None;
@@ -353,6 +393,10 @@ impl Machine {
 
     /// Called for authentic game/round starts, including protocol restore.
     pub fn table_started(&mut self, window: Option<Window>) {
+        if self.client() == Client::TenhouWeb {
+            self.web_table_started();
+            return;
+        }
         self.revoke();
         self.state = State::Table(window.map_or(TablePhase::Waiting, |w| w.phase));
     }
@@ -363,6 +407,9 @@ impl Machine {
     }
 
     pub fn result(&mut self, confirmed: u64, ours: bool, now: Instant) {
+        if self.client() == Client::TenhouWeb {
+            return;
+        }
         if let State::Screens(s) = &mut self.state {
             if let Route::Round { ours: own, .. } | Route::LastResult { ours: own, .. } =
                 &mut s.route
@@ -390,6 +437,9 @@ impl Machine {
     }
 
     pub fn game_ended(&mut self, now: Instant) {
+        if self.client() == Client::TenhouWeb {
+            return;
+        }
         let Some(env) = self.env else {
             return;
         };
@@ -434,6 +484,9 @@ impl Machine {
         if self.suspension.is_some() {
             return None;
         }
+        if matches!(self.state, State::Web(_)) {
+            return self.web_tick(now);
+        }
         if let State::Screens(s) = self.state {
             if now >= s.until || s.presses >= PRESS_LIMIT {
                 self.revoke();
@@ -457,6 +510,9 @@ impl Machine {
         now: Instant,
         rng: &mut R,
     ) {
+        if self.client() != Client::Majsoul {
+            return;
+        }
         if !self.effects.observed(ticket, Input::Observe) {
             return;
         }
@@ -538,6 +594,7 @@ impl Machine {
             return false;
         };
         let allowed = frame.stable_geometry && self.env.is_some_and(|env| match input {
+            Input::WebObserve | Input::WebControl => false,
             Input::Observe => false,
             Input::Screen(sight) => {
                 frame.sight == sight
@@ -609,6 +666,9 @@ impl Machine {
         request: crate::bot::control::DecisionRequest,
         retries: u32,
     ) -> Option<DecisionToken> {
+        if self.client() != Client::Majsoul {
+            return None;
+        }
         let Some(crate::bot::control::InputWindow::Majsoul(budget)) = request.window else {
             return None;
         };

@@ -1,4 +1,4 @@
-# Mahjong Soul UI control
+# Platform UI control
 
 Design and integration contract (2026-10-26). This is a module specification,
 not the project's work-status ledger or a deployment claim.
@@ -56,7 +56,7 @@ deploy this branch alone or introduce an unstamped compatibility path.
 The selected target for this integration is `https://tenhou.net/3/` Web.
 Its DOM observations and executable controls must have their own typed
 payloads; a Tenhou result or reservation is not a Mahjong Soul pixel `Sight`.
-The same machine and effect slot own their eventual scheduling, permission,
+The same machine and effect slot own their scheduling, permission,
 completion and bounded retry policy. There is no second click/retry loop.
 
 Client-specific popup identity, popup kind, enabled/closing status, result
@@ -67,9 +67,66 @@ DOM name alone is not proof of a game/result popup. Web client `1911.js`
 uses `name=ok` for popup confirmation and `name=join/cancel` for reservations;
 its popup dispatcher decides which queued result or terminal transition
 follows. Desktop4K `c6/c8` and its `.click()` dispatch contract do not apply.
-The Web observation and dispatch producer is an integration dependency;
-this section does not claim that automatic rematching is implemented or
-qualified. `/4/` facts are not a compatibility path for `/3/`.
+`/4/` facts are not a compatibility path for `/3/`.
+
+The Rust DTO is `ui::tenhou_web::Web3Observation`, containing a strictly
+parsed `client: "web3"`, nullable `popup` and nullable `lobby`. Popup fields
+are `identity`, `tag`, `enabled`, `closing`, `queued`; lobby fields are
+`identity`, `lobby`, `offers`, `reservationRequested`; offer fields are
+`identity`, `mode`, `enabled`. Missing required facts, wrong clients and
+malformed types are unavailable, not empty/default observations. Unknown
+popup tags are explicit and have no input permission. Simultaneous popup
+and lobby facts cannot acquire a control.
+
+The parent-owned producer's `readUi()` and `pressUi(kind, identity)` are
+called through `cdp_input::observe_tenhou_ui` and `press_tenhou_ui`. The
+result is the single `tenhou::client::Dispatch` enum: sent, changed, or
+unavailable. Popup dispatch uses `kind="popup"`, reservation uses `"join"`.
+An identity must refer to the same actionable client instance, including
+its popup type or offer's actual lobby/mode. The producer rechecks enabled,
+visible/non-closing status and identity in the same JavaScript evaluation
+as native dispatch. It performs no polling, retries or target selection.
+
+| Web phase | Real evidence | Effect / confirmation boundary |
+|---|---|---|
+| WaitingStart | no known game/player; first lobby | observe; never choose an initial reservation |
+| Starting | real player StartGame; TAIKYOKU popup | one permitted popup confirmation; INIT enters Table |
+| Table | real INIT | observe Web popup facts alongside the independent selected decision path |
+| RoundResult | actual AGARI/RYUUKYOKU popup | one dispatch per popup instance; client advances queued results or sends NEXTREADY |
+| FinalResult | actual OWARI popup | one confirmation when auto-continue is enabled |
+| WaitingLobby | successful own final confirmation | wait for an actual rebuilt lobby and exactly one enabled offer matching the real table |
+| ReservationPending | sent reservation or observed local request | no repeat; real StartGame completes the reservation path |
+| Stopped | unavailable producer/dispatch, unknown target, changed/ambiguous/disabled offer, revoked ending ownership, expiry/attempt limit | report typed reason; no guessed replacement room or retry loop |
+
+Only the real StartGame's player seat and `MatchInfo::Tenhou {go_type,lobby}`
+establish participant/target proof. Unknown target still permits owned
+result confirmation but never a reservation; observer mode has no input
+permission. Capture/client generation changes retire both proofs. Settings
+and manual ownership changes revoke outstanding effects and retire an
+already-dispatched final-to-lobby/queue continuation. A genuine new round
+or game explicitly reenters the machine.
+
+Web confirmations do **not** wait for MJAI Hora/EndKyoku. The bridge buffers
+multiple wins until real NEXTREADY or INIT; waiting for those model events
+before confirming the popup would deadlock. The verified popup is an
+independent UI fact and does not manufacture a model event. Delayed MJAI
+result/end events cannot restart a Web UI plan.
+
+At the final boundary the manager keeps the same page read lease, reads a
+fresh DTO, synchronizes ownership and consumes the exact machine-issued
+control/ticket. The native producer then checks identity again. A sent
+popup remains spent for the whole game; its reappearance cannot repeat it.
+Changed proves no native invocation and requires a fresh observation and
+ticket. Unavailable after permission stops because delivery is unconfirmed.
+Observation/guard attempts are bounded by the same machine's phase deadline
+and finite limit. Local reservation UI only suppresses duplicates; it is
+never represented as successful matching, and cancellation does not requeue.
+Typed stop transitions also report their reason through the existing core
+notification bus, including target/qualification changes and unconfirmed
+delivery. They do not appear only in diagnostic logs.
+
+These are source contracts and offline regressions. Integrated producer,
+core compilation and client qualification remain required before deployment.
 
 ## State and events
 

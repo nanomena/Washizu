@@ -75,6 +75,7 @@ impl Harness {
     fn new() -> Self {
         let now = Instant::now();
         let env = Environment {
+            client: Client::Majsoul,
             context: Some(crate::monitor::DecisionContext {
                 game: 1,
                 round: 1,
@@ -141,6 +142,7 @@ impl Harness {
                     assert_eq!(sight, expected);
                     return ticket;
                 }
+                other => panic!("Majsoul route emitted a Web effect: {other:?}"),
             }
         }
         panic!("reaction did not complete")
