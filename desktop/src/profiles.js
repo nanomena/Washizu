@@ -4,10 +4,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { readObsPreference, saveObsPreference } from './view-preferences.js'
 
 export const PLATFORMS = Object.freeze({
   Majsoul: { name: '雀魂', url: 'https://game.maj-soul.com/1/' },
-  Tenhou: { name: '天凤', url: 'https://tenhou.net/4/' },
+  Tenhou: { name: '天凤', url: 'https://tenhou.net/3/' },
 })
 /** @typedef {keyof typeof PLATFORMS} Platform */
 /** @typedef {{ id: string, name: string, platform: Platform, lastOpened: string | null }} AccountProfile */
@@ -116,11 +117,14 @@ export class ProfileStore {
     const platform = platformKind(kind)
     const label = profileName(name)
     this.checkName(label, platform)
+    const original = this.registry.profiles.find(p => p.id === 'existing' && p.platform === 'Majsoul')
+    const obs = readObsPreference(original ? this.home(original.id) : null)
     const profile = { id: randomUUID(), name: label, platform, lastOpened: null }
     const home = path.join(this.root, 'profiles', profile.id)
     fs.mkdirSync(path.dirname(home), { recursive: true })
     fs.mkdirSync(home)
     fs.writeFileSync(path.join(home, 'config.toml'), initialConfig(platform), { flag: 'wx' })
+    saveObsPreference(home, obs)
     const before = this.registry.profiles
     this.registry.profiles = [...before, profile]
     try { this.save() } catch (error) { this.registry.profiles = before; throw error }

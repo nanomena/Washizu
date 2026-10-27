@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { ProfileStore, defaultProfileRoot, homePlatform } from '../src/profiles.js'
+import { spoutSenderName } from '../src/view-preferences.js'
 
 /** @param {import('node:test').TestContext} t */
 function temporary(t) {
@@ -51,9 +52,10 @@ test('each platform and each account own a stable independent home', t => {
     assert.equal(homePlatform(store.home(profile.id)), profile.platform)
     const config = fs.readFileSync(path.join(store.home(profile.id), 'config.toml'), 'utf8')
     assert.match(config, /\[autoplay\]\nenabled = false/)
-    assert.match(config, profile.platform === 'Tenhou' ? /https:\/\/tenhou.net\/4\// : /https:\/\/game.maj-soul.com\/1\//)
+    assert.match(config, profile.platform === 'Tenhou' ? /https:\/\/tenhou.net\/3\// : /https:\/\/game.maj-soul.com\/1\//)
     assert.equal(fs.existsSync(path.join(store.home(profile.id), 'browser')), false)
     assert.equal(fs.existsSync(path.join(store.home(profile.id), 'mjai_bot')), false)
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(store.home(profile.id), 'obs.json'), 'utf8')), { enabled: true })
   }
   const firstHome = store.home(first.id)
   store.rename(first.id, '改过名字的主号')
@@ -64,6 +66,29 @@ test('each platform and each account own a stable independent home', t => {
   assert.throws(() => store.home('../config.toml'), /不存在/)
   store.list()[0].name = 'changed outside the store'
   assert.equal(store.get(first.id).name, '改过名字的主号')
+})
+
+test('new profiles inherit only current original Mahjong Soul OBS preference', t => {
+  const root = temporary(t)
+  const config = '[platform]\nkind = "Majsoul"\n[monitor]\nstream_token = "private"\nstream_port = 50000\n'
+  fs.writeFileSync(path.join(root, 'config.toml'), config)
+  const original = '{"game_view":"window","spout":false,"unknownSecret":"private"}'
+  fs.writeFileSync(path.join(root, 'view.json'), original)
+  const store = new ProfileStore(root).load()
+  const first = store.create('web', 'Tenhou')
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(store.home(first.id), 'obs.json'), 'utf8')), { enabled: false })
+  fs.writeFileSync(path.join(root, 'obs.json'), '{"enabled":true}')
+  const second = store.create('next', 'Majsoul')
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(store.home(second.id), 'obs.json'), 'utf8')), { enabled: true })
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(store.home(first.id), 'obs.json'), 'utf8')), { enabled: false })
+  assert.equal(fs.readFileSync(path.join(root, 'view.json'), 'utf8'), original)
+  assert.doesNotMatch(fs.readFileSync(path.join(store.home(second.id), 'config.toml'), 'utf8'), /private|50000/)
+  assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), config)
+  assert.equal(spoutSenderName(store.get('existing')), 'Washizu')
+  assert.notEqual(spoutSenderName(first), spoutSenderName(second))
+  const sender = spoutSenderName(first)
+  store.rename(first.id, 'renamed')
+  assert.equal(spoutSenderName(store.get(first.id)), sender)
 })
 
 test('a damaged registry is reported without replacing it or adopting the home again', t => {

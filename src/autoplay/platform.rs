@@ -23,20 +23,10 @@ pub enum Step {
     /// pre-click "thinking" delay and the inter-click gap inside one
     /// action.
     Sleep { duration_ms: u32 },
-    /// Click the first DOM element the page has out of `selectors`.
-    ///
-    /// Tenhou wires its own action buttons through a document-level click
-    /// listener keyed on `name="c<handler>-<arg>"`, so dispatching a real
-    /// click on one runs the client's own handler — the action is performed
-    /// exactly as if the user had pressed it, with none of the coordinate
-    /// guessing a canvas needs. `label` is for logs only.
-    ///
-    /// A list, because some actions are offered under more than one slot and
-    /// which ones exist depends on the hand: the pon that keeps a red five
-    /// out of the meld is only drawn when there is a red five to keep. The
-    /// order is the caller's preference, not the document's.
-    DomClick {
-        selectors: Vec<String>,
+    /// Match a semantic descriptor to one actual Web3 native offer. This is
+    /// never a synthesized socket frame or a menu-position fallback.
+    ClientChoice {
+        payload: serde_json::Value,
         label: String,
     },
     /// Block until the client is ready to take input, then continue.

@@ -34,7 +34,7 @@
 //! - [`canvas`] — where the game's canvas is on the page, measured and
 //!   cached for the presses.
 //! - [`platform`] — `PlatformAutoplay` trait + the `Step` types
-//!   (`Click` / `Sleep` / `AwaitReady` / `DomClick` / `Discard`).
+//!   (`Click` / `Sleep` / `AwaitReady` / `ClientChoice` / `Discard`).
 //! - [`majsoul`] — the production Majsoul implementation: 16:9
 //!   coordinate tables (ported from the Python autoplay in
 //!   <https://github.com/shinkuan/Akagi>) + plan dispatch covering all mjai

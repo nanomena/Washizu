@@ -75,7 +75,52 @@ pub fn load_config(path: &Path) -> AppConfig {
     };
     // Migrate legacy `[bot] active = "..."` into `active_4p` once.
     cfg.bot.migrate_legacy_active();
+    if cfg.platform.kind == Platform::Tenhou && cfg.capture.url == "https://tenhou.net/4/" {
+        cfg.capture.url = "https://tenhou.net/3/".into();
+    }
+    // Retired controls are removed once from the persisted app config. Unknown
+    // user sections remain in the document, including private bot settings.
+    if let Err(error) = migrate_retired_controls(path, &cfg) {
+        eprintln!("Could not save configuration migration: {error}");
+    }
     cfg
+}
+
+fn migrate_retired_controls(path: &Path, cfg: &AppConfig) -> Result<(), String> {
+    let original = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut document = original
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| e.to_string())?;
+    let mut changed = false;
+    if let Some(monitor) = document
+        .get_mut("monitor")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        for key in [
+            "always_on_top",
+            "stream_output",
+            "stream_port",
+            "stream_token",
+        ] {
+            changed |= monitor.remove(key).is_some();
+        }
+    }
+    if cfg.platform.kind == Platform::Tenhou {
+        if let Some(capture) = document
+            .get_mut("capture")
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            if capture.get("url").and_then(toml_edit::Item::as_str) == Some("https://tenhou.net/4/")
+            {
+                capture.insert("url", toml_edit::value(&cfg.capture.url));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        std::fs::write(path, document.to_string()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -93,6 +138,23 @@ mod tests {
         d.push(format!("akagi-cfg-{tag}-{pid}-{nanos}"));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn retired_controls_and_old_tenhou_entry_migrate_without_copying_account_settings() {
+        let dir = temp_dir("retired-controls");
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "# user comment\n[platform]\nkind='Tenhou'\n[capture]\nurl='https://tenhou.net/4/'\n[monitor]\nstream_output=true\nstream_port=12345\nstream_token='old-secret'\nalways_on_top=false\nquick_confirm=true\n[private]\nkeep='my-value'\n").unwrap();
+        let loaded = load_config(&file);
+        assert_eq!(loaded.capture.url, "https://tenhou.net/3/");
+        assert!(loaded.monitor.quick_confirm);
+        let migrated = std::fs::read_to_string(&file).unwrap();
+        assert!(migrated.contains("# user comment"));
+        assert!(migrated.contains("my-value"));
+        for retired in ["stream_output", "stream_port", "stream_token", "always_on_top", "old-secret"] { assert!(!migrated.contains(retired)); }
+        let _ = load_config(&file);
+        assert_eq!(migrated, std::fs::read_to_string(&file).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

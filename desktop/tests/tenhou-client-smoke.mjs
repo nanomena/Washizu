@@ -17,7 +17,7 @@ fs.mkdirSync(browser)
 app.setPath('userData', browser)
 app.commandLine.appendSwitch('remote-debugging-port', '0')
 app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1')
-fs.writeFileSync(path.join(root, 'config.toml'), '[platform]\nkind="Tenhou"\n[capture]\nurl="https://tenhou.net/4/"\n[bot]\nenabled=false\n[autoplay]\nenabled=false\n')
+fs.writeFileSync(path.join(root, 'config.toml'), '[platform]\nkind="Tenhou"\n[capture]\nurl="https://tenhou.net/3/"\n[bot]\nenabled=false\n[autoplay]\nenabled=false\n')
 /** @param {number} ms */
 const sleep = ms => new Promise(done => setTimeout(done, ms))
 /** @param {() => Promise<any>} read @param {(value: any) => boolean} matches @param {string} name */
@@ -54,11 +54,11 @@ try {
   await core.call('open_game', { port: activePort, target: target.id })
   const observed = await until(async () => {
     try {
-      return await game.webContents.executeJavaScript('({url:location.href, ready:document.readyState, discard:typeof window.__akagiTenhou?.R?.c21})')
+      return await game.webContents.executeJavaScript('({url:location.href, ready:document.readyState, client:window.__akagiTenhou?.client, discard:typeof window.__akagiTenhou?.discard, readInput:typeof window.__akagiTenhou?.readInput, readUi:typeof window.__akagiTenhou?.readUi, choose:typeof window.__akagiTenhou?.choose})')
     } catch { return null }
-  }, value => value?.discard === 'function', 'current client instrumented by actual core')
+  }, value => value?.client === 'web3' && value.discard === 'function' && value.readInput === 'function' && value.readUi === 'function' && value.choose === 'function', 'current client instrumented by actual core')
   assert.equal(game.isVisible(), false, 'qualification never presents a window')
-  assert.equal(observed.url, 'https://tenhou.net/4/')
+  assert.equal(observed.url, 'https://tenhou.net/3/')
   const monitor = /** @type {{autoplay_enabled: boolean, events: unknown[]}} */ (await core.call('get_monitor'))
   assert.equal(monitor.autoplay_enabled, false)
   assert.equal(monitor.events.length, 0, 'no game events or login input')

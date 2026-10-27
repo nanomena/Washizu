@@ -70,6 +70,9 @@ pub fn game_url(platform: Platform, configured: &str) -> Result<reqwest::Url, St
     {
         return Err("内置游戏地址必须是当前档案所属平台的 HTTPS 网站。".into());
     }
+    if platform == Platform::Tenhou && !matches!(url.path(), "/3" | "/3/") {
+        return Err("天凤内置客户端使用 Web 版地址 https://tenhou.net/3/。".into());
+    }
     Ok(url)
 }
 
@@ -144,7 +147,8 @@ mod tests {
 
     #[test]
     fn an_accounts_platform_owns_its_navigation() {
-        assert!(game_url(Platform::Tenhou, "https://tenhou.net/4/").is_ok());
+        assert!(game_url(Platform::Tenhou, "https://tenhou.net/3/").is_ok());
+        assert!(game_url(Platform::Tenhou, "https://tenhou.net/4/").is_err());
         assert!(game_url(Platform::Tenhou, "https://tenhou.net.example.org/4/").is_err());
         assert!(game_url(Platform::Tenhou, "https://game.maj-soul.com/1/").is_err());
         assert!(game_url(Platform::Majsoul, "https://tenhou.net/4/").is_err());

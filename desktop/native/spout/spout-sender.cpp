@@ -224,7 +224,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   DWORD pid = strtoul(argv[1], nullptr, 10);
-  std::string name = "Akagi";
+  std::string name = "Washizu";
   for (int i = 2; i + 1 < argc; i++) if (!strcmp(argv[i], "--name")) name = argv[i + 1];
   if (name.empty() || name.size() >= NAME_LEN) {
     say("sender name must be 1 to 255 characters");

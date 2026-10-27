@@ -9,7 +9,7 @@ use crate::autoplay::tenhou::input::{Effect, Facts, Owner, Run, Verdict};
 use crate::schema::MjaiEvent;
 use chromiumoxide::page::Page;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 impl AutoplayManager {
     /// Run `plan`'s steps for `action`, walking `approach` to the first
@@ -42,7 +42,7 @@ impl AutoplayManager {
         };
         let mut clicked = false;
         let mut click_index = 0;
-        for step in &plan.steps {
+        for (index, step) in plan.steps.iter().enumerate() {
             match step {
                 Step::Sleep { duration_ms } => {
                     // The pause before the first press is the think time, already
@@ -56,68 +56,101 @@ impl AutoplayManager {
                     tokio::time::sleep(Duration::from_millis(u64::from(ms))).await;
                 }
                 Step::AwaitReady { timeout_ms } => {
-                    let page_guard = self.ctx.page.read().await;
-                    let Some(page) = page_guard.as_ref() else {
-                        warn!("autoplay: no page handle — cannot wait for the client");
-                        return false;
-                    };
-                    if !await_turn_ready(page, *timeout_ms).await {
-                        return false;
-                    }
-                }
-                Step::DomClick { selectors, label } => {
                     let Some(run) = tenhou.as_mut() else {
                         return false;
                     };
-                    let page_guard = self.ctx.page.read().await;
-                    let Some(page) = page_guard.as_ref() else {
-                        warn!("autoplay: no page handle — cannot press {label}");
+                    let Some(effect) = plan.steps[index + 1..].iter().find_map(|next| match next {
+                        Step::ClientChoice { .. } => Some(Effect::Button),
+                        Step::Discard { tile_index } => Some(Effect::Discard(*tile_index)),
+                        _ => None,
+                    }) else {
                         return false;
                     };
-                    // The client only renders the buttons it is currently
-                    // offering, so a selector that matches nothing means the
-                    // decision resolved while we were thinking. Report it and
-                    // stop rather than pressing something else.
-                    // The buttons exist only between the end of the
-                    // client's animation for the triggering frame and
-                    // whatever resolves the window, and neither edge is
-                    // observable from here — a single look loses the race
-                    // either way. Wait for the element instead, bounded by
-                    // what is left of the turn.
-                    if !self.press_when_offered(page, selectors, label, run).await {
+                    let guard = self.ctx.page.read().await;
+                    let Some(page) = guard.as_ref() else {
                         return false;
+                    };
+                    if !self
+                        .await_tenhou_ready(page, run, effect, *timeout_ms)
+                        .await
+                    {
+                        return false;
+                    }
+                }
+                Step::ClientChoice { payload, label } => {
+                    let Some(run) = tenhou.as_mut() else {
+                        return false;
+                    };
+                    let guard = self.ctx.page.read().await;
+                    let Some(page) = guard.as_ref() else {
+                        return false;
+                    };
+                    if !self.tenhou_effect_current(run, Effect::Button).await {
+                        return false;
+                    }
+                    let current = match crate::autoplay::tenhou::client::read_input(page).await {
+                        Ok(current) => current,
+                        Err(error) => {
+                            warn!("autoplay: Web3 offer probe failed: {error:#}");
+                            return false;
+                        }
+                    };
+                    if !native_matches(run, &current) {
+                        return false;
+                    }
+                    let Some(offer) = current.matching_offer(payload) else {
+                        warn!("autoplay: Web3 has no exact native offer for {label}");
+                        return false;
+                    };
+                    if !self.tenhou_effect_current(run, Effect::Button).await {
+                        return false;
+                    }
+                    match crate::autoplay::tenhou::client::choose(
+                        page,
+                        current.window.as_deref().unwrap(),
+                        &offer.identity,
+                    )
+                    .await
+                    {
+                        Ok(crate::autoplay::tenhou::client::Dispatch::Sent) => {
+                            run.issued(Effect::Button);
+                            clicked = true;
+                            info!("autoplay: invoked native Web3 {label}");
+                        }
+                        result => {
+                            warn!("autoplay: Web3 choice was not dispatched: {result:?}");
+                            return false;
+                        }
                     }
                 }
                 Step::Discard { tile_index } => {
                     let Some(run) = tenhou.as_mut() else {
                         return false;
                     };
-                    let page_guard = self.ctx.page.read().await;
-                    let Some(page) = page_guard.as_ref() else {
-                        warn!("autoplay: no page handle — cannot discard");
+                    let guard = self.ctx.page.read().await;
+                    let Some(page) = guard.as_ref() else {
                         return false;
                     };
                     if !self
                         .tenhou_effect_current(run, Effect::Discard(*tile_index))
                         .await
                     {
-                        warn!("autoplay: withholding obsolete Tenhou discard");
                         return false;
                     }
-                    match crate::autoplay::cdp_input::discard_tile(page, *tile_index).await {
-                        Ok(true) => {
+                    let (Some(window), Some(hand)) = (run.native_window(), run.native_hand())
+                    else {
+                        return false;
+                    };
+                    match crate::autoplay::tenhou::client::discard(page, window, hand, *tile_index)
+                        .await
+                    {
+                        Ok(crate::autoplay::tenhou::client::Dispatch::Sent) => {
                             run.issued(Effect::Discard(*tile_index));
-                            info!("autoplay: discarded tile index {tile_index}");
+                            clicked = true;
+                            info!("autoplay: invoked native Web3 discard {tile_index}");
                         }
-                        Ok(false) => {
-                            warn!(
-                                "autoplay: the client script was not instrumented, so its \
-                                 discard handler is unreachable; skipping"
-                            );
-                            return false;
-                        }
-                        Err(e) => {
-                            warn!("autoplay: discard failed: {e:#}");
+                        result => {
+                            warn!("autoplay: Web3 discard was not dispatched: {result:?}");
                             return false;
                         }
                     }
@@ -182,56 +215,6 @@ impl AutoplayManager {
     }
 }
 
-/// Wait until the client is taking input, or give up.
-///
-/// The turn does not begin when the frame arrives. Tenhou's server sends
-/// as fast as the seats answer — against instant opponents that means
-/// three seats' actions in one burst — and the client then animates them
-/// for seconds before drawing its buttons and starting its clock. Timing
-/// anything from frame arrival times it from the wrong instant, which is
-/// why fixed delays kept landing either side of the window.
-///
-/// The client raises its clock display and its highlight together, so the
-/// highlight appearing is the readiness signal.
-async fn await_turn_ready(page: &Page, timeout_ms: u32) -> bool {
-    const POLL_INTERVAL: Duration = Duration::from_millis(120);
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-    let started = Instant::now();
-    loop {
-        match crate::autoplay::cdp_input::turn_clock_running(page).await {
-            Ok(true) => {
-                debug!(
-                    "autoplay: client ready after {}ms",
-                    started.elapsed().as_millis()
-                );
-                return true;
-            }
-            Ok(false) => {}
-            Err(e) => {
-                warn!("autoplay: readiness probe failed: {e:#}");
-                return false;
-            }
-        }
-        if Instant::now() >= deadline {
-            warn!(
-                "autoplay: client never started its clock within {timeout_ms}ms; \
-                 skipping this decision"
-            );
-            return false;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-/// Press `selector` as soon as the client offers it.
-///
-/// A button is only in the DOM between the end of the client's animation
-/// for the frame that opened the window and whatever closes it. Neither
-/// edge is visible from here and the gap moves with animation length, so
-/// a single `querySelector` races it — the first live run pressed
-/// successfully three times and missed four, all with the client offering
-/// nothing at the instant we looked. Polling turns that race into a
-/// bounded wait.
 impl AutoplayManager {
     async fn tenhou_input_facts(&self) -> Facts {
         let cfg = self.cfg.read().await;
@@ -254,59 +237,53 @@ impl AutoplayManager {
         }
     }
 
-    async fn tenhou_effect_current(&self, run: &Run, effect: Effect) -> bool {
-        loop {
-            match run.inspect(effect, &self.tenhou_input_facts().await) {
-                Verdict::Allowed => return true,
-                Verdict::Obsolete => return false,
-                Verdict::AwaitingEcho if Instant::now() < run.wait_deadline() => {
-                    tokio::time::sleep(Duration::from_millis(10)).await
-                }
-                Verdict::AwaitingEcho => return false,
-            }
-        }
+    async fn tenhou_effect_current(&self, run: &mut Run, effect: Effect) -> bool {
+        matches!(
+            run.inspect(effect, &self.tenhou_input_facts().await),
+            Verdict::Allowed
+        )
     }
 
-    async fn press_when_offered(
+    async fn await_tenhou_ready(
         &self,
         page: &Page,
-        selectors: &[String],
-        label: &str,
         run: &mut Run,
+        effect: Effect,
+        timeout_ms: u32,
     ) -> bool {
-        const POLL_INTERVAL: Duration = Duration::from_millis(120);
-        const WAIT_BUDGET: Duration = Duration::from_millis(2_400);
-
-        let deadline = Instant::now() + WAIT_BUDGET;
-        let mut attempts = 0u32;
+        let deadline = (Instant::now() + Duration::from_millis(u64::from(timeout_ms)))
+            .min(run.wait_deadline());
         loop {
-            if !self.tenhou_effect_current(run, Effect::Button).await {
-                warn!("autoplay: withholding obsolete Tenhou {label}");
-                return false;
-            }
-            attempts += 1;
-            match crate::autoplay::cdp_input::click_dom(page, selectors).await {
-                Ok(true) => {
-                    run.issued(Effect::Button);
-                    info!("autoplay: pressed {label} ({selectors:?}) after {attempts} look(s)");
-                    return true;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    warn!("autoplay: pressing {label} failed: {e:#}");
-                    return false;
-                }
+            match run.inspect(effect, &self.tenhou_input_facts().await) {
+                Verdict::Obsolete => return false,
+                Verdict::AwaitingEcho => {}
+                Verdict::Allowed => match crate::autoplay::tenhou::client::read_input(page).await {
+                    Ok(current) if current.ready => {
+                        return current
+                            .window
+                            .as_deref()
+                            .is_some_and(|window| run.bind_native(window, &current.hand));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!("autoplay: Web3 input unavailable: {error:#}");
+                        return false;
+                    }
+                },
             }
             if Instant::now() >= deadline {
-                let offered = crate::autoplay::cdp_input::list_action_buttons(page).await;
                 warn!(
-                    "autoplay: {label} button ({selectors:?}) never appeared in {:?}; \
-                 client is offering slots {offered:?} (its own order: highest first)",
-                    WAIT_BUDGET
+                    "autoplay: Web3 input did not become ready within the original decision permit"
                 );
                 return false;
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::time::sleep(Duration::from_millis(60)).await;
         }
     }
+}
+
+fn native_matches(run: &Run, current: &crate::autoplay::tenhou::client::InputSnapshot) -> bool {
+    current.ready
+        && current.window.as_deref() == run.native_window()
+        && Some(current.hand.as_slice()) == run.native_hand()
 }

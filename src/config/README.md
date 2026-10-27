@@ -49,7 +49,7 @@ it.
   puts tokens and cookies into the session's files.
 - `autoplay` (`autoplay.rs`) — whether a bot's decisions are played, and how:
   click timings for Mahjong Soul and the delay model.
-- `monitor` (`monitor.rs`) — pointer display, autoplay between-hand options and stream output.
+- `monitor` (`monitor.rs`) — pointer display and autoplay between-hand options. OBS output belongs to the desktop shell and is stored in obs.json.
 
 ## Adding a section
 

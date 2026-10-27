@@ -29,13 +29,4 @@ pub struct MonitorConfig {
     /// and "play again" (see `autoplay::ui`). The level of autoplay above
     /// playing a game; switched off during a game, that game is the last.
     pub auto_continue: bool,
-    /// Offer the game view — the game alone, without the dock or any pointer
-    /// drawn over it — at a local address a streaming program can show. The
-    /// shell serves it while this is on.
-    pub stream_output: bool,
-    /// The port that address is on, on 127.0.0.1, and the secret it carries so
-    /// that nothing else on the machine can guess it. Both are the shell's
-    /// choice, kept here so that the address stays the same from run to run.
-    pub stream_port: u16,
-    pub stream_token: String,
 }

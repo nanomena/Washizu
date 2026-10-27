@@ -134,7 +134,7 @@ impl AutoplayManager {
             .filter_map(|s| match s {
                 Step::Click { x_norm, y_norm } => Some((*x_norm, *y_norm)),
                 Step::Sleep { .. }
-                | Step::DomClick { .. }
+                | Step::ClientChoice { .. }
                 | Step::Discard { .. }
                 | Step::AwaitReady { .. }
                 | Step::SendFrame(_) => None,
