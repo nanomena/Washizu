@@ -98,7 +98,7 @@ try {
   await send('Runtime.enable', {}, sessionId)
   await send('Log.enable', {}, sessionId)
   const evaluate = async (/** @type {string} */ expression) => {
-    const reply = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId)
+    const reply = await send('Runtime.evaluate', { expression: `(async()=>(${expression}))()`, awaitPromise: true, returnByValue: true }, sessionId)
     if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text)
     return reply.result.value
   }

@@ -386,11 +386,7 @@ pub fn choice_payload(action: &MjaiEvent, state: &TenhouState) -> Option<Value> 
                 return None;
             }
         }
-        MjaiEvent::Kakan { pai, .. } => {
-            if normalized.get("tile")? != pai {
-                return None;
-            }
-        }
+        MjaiEvent::Kakan { pai, .. } if normalized.get("tile")? != pai => return None,
         _ => {}
     }
     Some(payload)

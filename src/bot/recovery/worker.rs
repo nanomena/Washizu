@@ -273,6 +273,76 @@ fn validate_delivery(reply: BotResponse, expected: u64) -> Result<BotResponse, S
     Ok(reply)
 }
 
+pub struct StandbyWorker {
+    pub input: mpsc::UnboundedSender<Observation>,
+}
+
+impl StandbyWorker {
+    pub fn spawn(seat: u8, players: u8, output: mpsc::UnboundedSender<Report>) -> Self {
+        let (input, mut observations) = mpsc::unbounded_channel::<Observation>();
+        // The embedded CPU policy never blocks the event/coordinator executor.
+        // Dropping input retires the worker after the current finite forward.
+        tokio::task::spawn_blocking(move || {
+            let mut engine = LocalStandby::new(seat, players).map_err(|e| format!("{e:#}"));
+            let mut through = 0;
+            let mut policy_error: Option<String> = None;
+            while let Some(work) = observations.blocking_recv() {
+                let mut legal = vec![];
+                let mut response = None;
+                let result = match &mut engine {
+                    Ok(bot) => work
+                        .event
+                        .as_ref()
+                        .map_or(Ok(()), |event| bot.observe(event))
+                        .map(|_| {
+                            through = work.through;
+                            if work.decide {
+                                legal = bot.legal();
+                                match bot.decide() {
+                                    Ok(reply) => {
+                                        response = Some(reply);
+                                        policy_error = None;
+                                    }
+                                    Err(error) => {
+                                        policy_error =
+                                            Some(format!("Local inference failed: {error:#}"));
+                                    }
+                                }
+                            }
+                        })
+                        .map_err(|e| format!("{e:#}")),
+                    Err(reason) => Err(reason.clone()),
+                };
+                let health = match result {
+                    Ok(()) => match &policy_error {
+                        Some(reason) => RunnerHealth::Blocked {
+                            through,
+                            reason: reason.clone(),
+                        },
+                        None => RunnerHealth::Ready { through },
+                    },
+                    Err(reason) => {
+                        engine = Err(reason.clone());
+                        RunnerHealth::Blocked { through, reason }
+                    }
+                };
+                if output
+                    .send(Report::Standby {
+                        context: work.context,
+                        health,
+                        response,
+                        legal,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self { input }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,75 +585,5 @@ mod tests {
         let mut unavailable = reply(3);
         unavailable.meta.as_mut().unwrap()["unavailable"] = json!("uncommitted transaction");
         assert!(validate_delivery(unavailable, 4).is_ok());
-    }
-}
-
-pub struct StandbyWorker {
-    pub input: mpsc::UnboundedSender<Observation>,
-}
-
-impl StandbyWorker {
-    pub fn spawn(seat: u8, players: u8, output: mpsc::UnboundedSender<Report>) -> Self {
-        let (input, mut observations) = mpsc::unbounded_channel::<Observation>();
-        // The embedded CPU policy never blocks the event/coordinator executor.
-        // Dropping input retires the worker after the current finite forward.
-        tokio::task::spawn_blocking(move || {
-            let mut engine = LocalStandby::new(seat, players).map_err(|e| format!("{e:#}"));
-            let mut through = 0;
-            let mut policy_error: Option<String> = None;
-            while let Some(work) = observations.blocking_recv() {
-                let mut legal = vec![];
-                let mut response = None;
-                let result = match &mut engine {
-                    Ok(bot) => work
-                        .event
-                        .as_ref()
-                        .map_or(Ok(()), |event| bot.observe(event))
-                        .map(|_| {
-                            through = work.through;
-                            if work.decide {
-                                legal = bot.legal();
-                                match bot.decide() {
-                                    Ok(reply) => {
-                                        response = Some(reply);
-                                        policy_error = None;
-                                    }
-                                    Err(error) => {
-                                        policy_error =
-                                            Some(format!("Local inference failed: {error:#}"));
-                                    }
-                                }
-                            }
-                        })
-                        .map_err(|e| format!("{e:#}")),
-                    Err(reason) => Err(reason.clone()),
-                };
-                let health = match result {
-                    Ok(()) => match &policy_error {
-                        Some(reason) => RunnerHealth::Blocked {
-                            through,
-                            reason: reason.clone(),
-                        },
-                        None => RunnerHealth::Ready { through },
-                    },
-                    Err(reason) => {
-                        engine = Err(reason.clone());
-                        RunnerHealth::Blocked { through, reason }
-                    }
-                };
-                if output
-                    .send(Report::Standby {
-                        context: work.context,
-                        health,
-                        response,
-                        legal,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        Self { input }
     }
 }

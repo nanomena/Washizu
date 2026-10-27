@@ -506,10 +506,7 @@ impl Machine {
             }
             Route::QuestionSent => env.settings.auto_continue && sight == Sight::RematchAsk,
         };
-        if !allowed {
-            s.seen = None;
-            self.effects.schedule(now + LOOK, Input::Observe);
-        } else if s.retry.is_some_and(|(old, at)| old == sight && now < at) {
+        if !allowed || s.retry.is_some_and(|(old, at)| old == sight && now < at) {
             s.seen = None;
             self.effects.schedule(now + LOOK, Input::Observe);
         } else {

@@ -545,9 +545,8 @@ fn mapped_targets(ctx: &ActionContext) -> TargetMapping {
 /// Where `pai` sits in our hand, as a normalised 16:9 point — the place a
 /// discard of it would be pressed.
 pub fn discard_point(pai: &str, ctx: &ActionContext) -> Option<(f64, f64)> {
-    match plan_dahai_click(pai, Whence::Unsaid, ctx)? {
-        MappedClick { x_norm, y_norm } => Some((x_norm, y_norm)),
-    }
+    let MappedClick { x_norm, y_norm } = plan_dahai_click(pai, Whence::Unsaid, ctx)?;
+    Some((x_norm, y_norm))
 }
 
 /// Where a tile of a hand at rest — between turns, nothing drawn — lies: the
@@ -1310,16 +1309,13 @@ mod tests {
         let result = mapped_targets(&ctx);
         // one click target
         assert_eq!(result.targets.len(), 1);
-        match &result.targets[0] {
-            MappedClick { x_norm, .. } => {
-                // Tsumohai (5p) → idx 13, with TSUMO_SPACE offset.
-                let expected = TILES[13].0 + TSUMO_SPACE;
-                assert!(
-                    (*x_norm - expected).abs() < 1e-9,
-                    "expected tsumohai at {expected}, got {x_norm}"
-                );
-            }
-        }
+        let MappedClick { x_norm, .. } = &result.targets[0];
+        // Tsumohai (5p) → idx 13, with TSUMO_SPACE offset.
+        let expected = TILES[13].0 + TSUMO_SPACE;
+        assert!(
+            (*x_norm - expected).abs() < 1e-9,
+            "expected tsumohai at {expected}, got {x_norm}"
+        );
     }
 
     /// The click of a discard planned with a fixed source of chance.
@@ -1382,9 +1378,8 @@ mod tests {
             assert!((dahai_x("5p", Whence::Drawn, &ctx, seed) - drawn).abs() < 1e-9);
         }
         // The plan reads the choice off the event itself.
-        match &mapped_targets(&ctx).targets[0] {
-            MappedClick { x_norm, .. } => assert!((*x_norm - drawn).abs() < 1e-9),
-        }
+        let MappedClick { x_norm, .. } = &mapped_targets(&ctx).targets[0];
+        assert!((*x_norm - drawn).abs() < 1e-9)
     }
 
     #[test]
@@ -1596,14 +1591,11 @@ mod tests {
         let ctx = ctx_for(&act, &snap, &legal, Some("4z"), None, false);
         let result = mapped_targets(&ctx);
         assert_eq!(result.targets.len(), 1, "ron target, got {result:?}");
-        match &result.targets[0] {
-            MappedClick { x_norm, y_norm } => {
-                // [Ron, Pass] sorted by priority → Ron in slot 1, one left
-                // of the always-rightmost pass.
-                assert_eq!(*x_norm, 8.637_5);
-                assert_eq!(*y_norm, 7.0);
-            }
-        }
+        let MappedClick { x_norm, y_norm } = &result.targets[0];
+        // [Ron, Pass] sorted by priority → Ron in slot 1, one left
+        // of the always-rightmost pass.
+        assert_eq!(*x_norm, 8.637_5);
+        assert_eq!(*y_norm, 7.0);
     }
 
     /// The decline side of the same window: a bot `none` on a robbed kan
@@ -1626,12 +1618,9 @@ mod tests {
         let ctx = ctx_for(&act, &snap, &legal, Some("4z"), None, false);
         let result = mapped_targets(&ctx);
         assert_eq!(result.targets.len(), 1, "pass target, got {result:?}");
-        match &result.targets[0] {
-            MappedClick { x_norm, y_norm } => {
-                assert_eq!(*x_norm, 10.875);
-                assert_eq!(*y_norm, 7.0);
-            }
-        }
+        let MappedClick { x_norm, y_norm } = &result.targets[0];
+        assert_eq!(*x_norm, 10.875);
+        assert_eq!(*y_norm, 7.0);
     }
 
     /// Regression: in sanma, drawing a North while in riichi opens the
@@ -1666,14 +1655,11 @@ mod tests {
         let ctx = ctx_for(&act, &snap, &legal, Some("1z"), Some("N"), true);
         let result = mapped_targets(&ctx);
         assert_eq!(result.targets.len(), 1, "pass target, got {result:?}");
-        match &result.targets[0] {
-            MappedClick { x_norm, y_norm } => {
-                // The X (pass / cancel) is always the rightmost button —
-                // slot 0 — regardless of what else is on the row.
-                assert_eq!(*x_norm, 10.875);
-                assert_eq!(*y_norm, 7.0);
-            }
-        }
+        let MappedClick { x_norm, y_norm } = &result.targets[0];
+        // The X (pass / cancel) is always the rightmost button —
+        // slot 0 — regardless of what else is on the row.
+        assert_eq!(*x_norm, 10.875);
+        assert_eq!(*y_norm, 7.0);
     }
 
     /// A structural North locked inside a riichi'd hand makes the engine
@@ -1734,12 +1720,9 @@ mod tests {
         let ctx = ctx_for(&act, &snap, &legal, Some("1z"), Some("1m"), true);
         let result = mapped_targets(&ctx);
         assert_eq!(result.targets.len(), 1, "pass target, got {result:?}");
-        match &result.targets[0] {
-            MappedClick { x_norm, y_norm } => {
-                assert_eq!(*x_norm, 10.875);
-                assert_eq!(*y_norm, 7.0);
-            }
-        }
+        let MappedClick { x_norm, y_norm } = &result.targets[0];
+        assert_eq!(*x_norm, 10.875);
+        assert_eq!(*y_norm, 7.0);
     }
 
     #[test]
@@ -1778,9 +1761,8 @@ mod tests {
                 tsumogiri,
             };
             let ctx = ctx_for(&act, &snap, &legal, Some("1m"), Some("5p"), false);
-            match mapped_targets(&ctx).targets[1] {
-                MappedClick { x_norm, .. } => x_norm,
-            }
+            let MappedClick { x_norm, .. } = mapped_targets(&ctx).targets[1];
+            x_norm
         };
         let drawn = TILES[13].0 + TSUMO_SPACE;
         assert!((pressed(Some(true)) - drawn).abs() < 1e-9);
@@ -1830,13 +1812,10 @@ mod tests {
         let ctx = ctx_for(&act, &snap, &legal, Some("1m"), None, false);
         let result = mapped_targets(&ctx);
         assert_eq!(result.targets.len(), 1);
-        match &result.targets[0] {
-            MappedClick { x_norm, y_norm } => {
-                // ACTIONS[0] is the pass slot (rightmost top row).
-                assert_eq!(*x_norm, 10.875);
-                assert_eq!(*y_norm, 7.0);
-            }
-        }
+        let MappedClick { x_norm, y_norm } = &result.targets[0];
+        // ACTIONS[0] is the pass slot (rightmost top row).
+        assert_eq!(*x_norm, 10.875);
+        assert_eq!(*y_norm, 7.0);
     }
 
     #[test]
@@ -1898,14 +1877,11 @@ mod tests {
         let ctx = ctx_for(&act, &snap, &[], None, Some("5p"), false);
         let result = mapped_targets(&ctx);
         assert_eq!(result.targets.len(), 1);
-        match &result.targets[0] {
-            MappedClick { x_norm, .. } => {
-                assert!(
-                    (*x_norm - TILES[13].0).abs() < 1e-9,
-                    "expected raw TILES[13] (no TSUMO_SPACE), got {x_norm}"
-                );
-            }
-        }
+        let MappedClick { x_norm, .. } = &result.targets[0];
+        assert!(
+            (*x_norm - TILES[13].0).abs() < 1e-9,
+            "expected raw TILES[13] (no TSUMO_SPACE), got {x_norm}"
+        );
     }
 
     /// Whatever the dealer does first waits out the deal, not only a
@@ -2010,13 +1986,10 @@ mod tests {
 
         let ctx = ctx_for(&act, &snap, &[], Some("9m"), Some("5p"), false);
         let result = mapped_targets(&ctx);
-        match &result.targets.last().unwrap() {
-            MappedClick { x_norm, .. } => {
-                // Tsumohai click → TILES[13] + TSUMO_SPACE.
-                let expected = TILES[13].0 + TSUMO_SPACE;
-                assert!((*x_norm - expected).abs() < 1e-9);
-            }
-        }
+        let MappedClick { x_norm, .. } = &result.targets.last().unwrap();
+        // Tsumohai click → TILES[13] + TSUMO_SPACE.
+        let expected = TILES[13].0 + TSUMO_SPACE;
+        assert!((*x_norm - expected).abs() < 1e-9);
     }
 
     #[test]
@@ -2128,17 +2101,14 @@ mod tests {
             false,
         );
         let result = mapped_targets(&ctx);
-        match result.targets.last().unwrap() {
-            MappedClick { x_norm, .. } => {
-                assert!(
-                    (*x_norm - TILES[12].0).abs() < 1e-9,
-                    "post-kita discard must click the true visual slot TILES[12] \
-                     ({}), got {x_norm} (TILES[13]={} would be one tile too far right)",
-                    TILES[12].0,
-                    TILES[13].0,
-                );
-            }
-        }
+        let MappedClick { x_norm, .. } = result.targets.last().unwrap();
+        assert!(
+            (*x_norm - TILES[12].0).abs() < 1e-9,
+            "post-kita discard must click the true visual slot TILES[12] \
+             ({}), got {x_norm} (TILES[13]={} would be one tile too far right)",
+            TILES[12].0,
+            TILES[13].0,
+        );
     }
 
     #[test]
@@ -2180,9 +2150,7 @@ mod tests {
         result
             .targets
             .iter()
-            .filter_map(|s| match s {
-                MappedClick { x_norm, y_norm } => Some((*x_norm, *y_norm)),
-            })
+            .map(|MappedClick { x_norm, y_norm }| (*x_norm, *y_norm))
             .collect()
     }
 
@@ -2279,9 +2247,7 @@ mod tests {
         let clicks: Vec<(f64, f64)> = result
             .targets
             .iter()
-            .filter_map(|s| match s {
-                MappedClick { x_norm, y_norm } => Some((*x_norm, *y_norm)),
-            })
+            .map(|MappedClick { x_norm, y_norm }| (*x_norm, *y_norm))
             .collect();
         assert_eq!(clicks.len(), 2);
         assert_eq!(clicks[1], CANDIDATES[6], "idx 1 of 2 → slot 6");
