@@ -44,13 +44,20 @@ the distribution. Deployment scripts and installed executables are unchanged
 by source development.
 
 The chooser is another view of the same React/TypeScript frontend and uses
-its existing fonts, palette, buttons and four-language text catalog. Both
-views share `useCanvasScale` and the 1280×960 design canvas. Both native windows
-use `layout.js`'s 4:3 ratio, 1200×900 opening basis, 880×660 minimum and the
-same Windows frame correction. The chooser's vertical Grid is 24 outer
-padding + 48 toolbar + 32 status + 800 list + 32 footer + 24 padding = 960.
-The list's 32px header and twelve 64px rows fit its 800px slot; additional rows
-scroll there. Changing account state or language never changes this geometry.
+its existing fonts, palette, buttons and four-language text catalog. The chooser
+is a small, non-resizable, always-on-top guide that hides when the account's
+main window is ready and returns after that window closes. It has no game
+canvas or page zoom: body text remains 13 DIP and headings use Golos Text 500
+with the same system CJK fallback as the monitor.
+
+`profile-layout.js` derives its content size: 640 wide = 48 outer padding +
+352 name + 88 platform + 152 actions. Its vertical Grid is 48 outer padding +
+48 toolbar + 24 status + (32 header + 2..4 × 64 account rows) + 24 footer,
+giving 304/368/432 DIP heights. More rows scroll inside the list. Account
+state and language changes keep the same slots. Small displays cap its size
+to leave room for the native frame. The main window independently retains
+`layout.js`'s 4:3 ratio, 1200×900 opening basis, 880×660 minimum, Windows frame
+correction and uniformly scaled 1280×960 game/dock canvas.
 
 Offline verification:
 

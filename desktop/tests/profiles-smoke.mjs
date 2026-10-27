@@ -105,6 +105,7 @@ try {
   await field('.accounts-tools select', 'zh-CN', 'HTMLSelectElement')
   assert.equal((await state()).profiles.length, 1)
   assert.equal((await state()).profiles[0].id, 'existing')
+  assert.deepEqual(await evaluate('({width: innerWidth, height: innerHeight})'), { width: 640, height: 304 })
   assert.equal((await browser.call('Target.getTargets')).targetInfos.some((/** @type {Target} */ t) => t.url.startsWith('http')), false)
   console.log('ok chooser adopts the old account without opening a game or starting a core')
   await evaluate('document.querySelector("#new").click()')
@@ -136,6 +137,7 @@ try {
     const marker = path.join(home, 'fake-core-released'); if (fs.existsSync(marker)) fs.unlinkSync(marker)
     await evaluate(`window.akagi.invoke("open_profile", {id:${JSON.stringify(id)}})`)
     await until(state, s => s.active === id && s.ready, 'account window ready')
+    await until(() => evaluate('document.visibilityState'), visibility => visibility === 'hidden', 'guide hides when the main window is ready')
     const logfile = fs.readdirSync(path.join(home, 'logs')).filter(f => /^shell-.*\.log$/.test(f)).sort().at(-1)
     assert.ok(logfile)
     const logged = fs.readFileSync(path.join(home, 'logs', logfile), 'utf8')
@@ -143,6 +145,8 @@ try {
     assert.ok(endpoint)
     const tools = worker = await DevTools.connect(endpoint)
     const dock = await tools.page(t => t.url.startsWith('app://dock/'))
+    const mainSize = await tools.evaluate(dock, '({width: innerWidth, height: innerHeight})')
+    assert.ok(Math.abs(mainSize.width / mainSize.height - 4 / 3) < 0.01, 'the main window keeps its existing 4:3 canvas')
     await until(() => tools.evaluate(dock, 'window.akagi.invoke("get_monitor_options")'), options => options.platform === platform, 'profile platform')
     await until(() => tools.evaluate(dock, 'window.akagi.invoke("get_monitor")'), snapshot => snapshot.capture.state === 'running', 'fake capture')
     const game = await tools.page(t => t.url === 'about:blank')
@@ -153,6 +157,7 @@ try {
     assert.ok(worker)
     await worker.closeBrowser(); worker = null
     await until(state, s => s.active === null, 'account shutdown and return to chooser')
+    await until(() => evaluate('document.visibilityState'), visibility => visibility === 'visible', 'guide returns after the main window closes')
     assert.ok(fs.existsSync(path.join(currentHome, 'fake-core-released')), 'the chooser waited for the old core to release its account')
   }
   let account = await openAccount(tenhou.id, path.join(root, 'profiles', tenhou.id), 'Tenhou')
@@ -172,7 +177,7 @@ try {
   assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), oldConfig)
   assert.equal(fs.readFileSync(path.join(root, 'history', 'keep.jsonl'), 'utf8'), 'existing game records\n')
   console.log('ok four real account-window starts preserve and isolate persistent cookies; all game pages stayed about:blank')
-  for (const [width, height] of [[880, 660], [1200, 900], [1280, 960]]) {
+  for (const [width, height] of [[560, 304], [640, 304], [640, 432]]) {
     await browser.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, chooser)
     for (const language of ['zh-CN', 'zh-TW', 'en', 'ja']) {
       await field('.accounts-tools select', language, 'HTMLSelectElement')
@@ -183,25 +188,57 @@ try {
         done({ overflow:document.documentElement.scrollWidth>innerWidth || panel.scrollWidth>panel.clientWidth,
           rowHeight:row.getBoundingClientRect().height, grid:getComputedStyle(document.querySelector('.accounts-canvas')).display,
           canvas:document.querySelector('.accounts-canvas').getBoundingClientRect().toJSON(), font:getComputedStyle(heading).fontFamily,
-          weight:getComputedStyle(heading).fontWeight, button:getComputedStyle(button).backgroundColor });
+          weight:getComputedStyle(heading).fontWeight, bodySize:getComputedStyle(row).fontSize, button:getComputedStyle(button).backgroundColor,
+          clipped:[...document.querySelectorAll('.accounts-tools > *, .accounts-row-tools button')].some(el=>el.scrollWidth>el.clientWidth),
+          toolbar:document.querySelector('.accounts-bar').getBoundingClientRect().height,
+          footer:document.querySelector('.accounts-footer').getBoundingClientRect().height });
       })))`)
       assert.equal(layout.overflow, false, `${width}x${height} ${language}: horizontal overflow`)
       assert.equal(layout.grid, 'grid')
-      assert.ok(Math.abs(layout.canvas.width - width) <= 1 && Math.abs(layout.canvas.height - height) <= 1, 'the full canvas must scale uniformly')
-      assert.ok(Math.abs(layout.rowHeight - 64 * width / 1280) <= 1, `${width}x${height} ${language}: account rows must scale with the canvas`)
+      assert.ok(Math.abs(layout.canvas.width - width) <= 1 && Math.abs(layout.canvas.height - height) <= 1, 'the guide fills its own window')
+      assert.equal(layout.rowHeight, 64, 'account rows keep their DIP height')
+      assert.equal(layout.bodySize, '13px', 'body text is not shrunk with the main canvas')
+      assert.equal(layout.clipped, false, `${width}x${height} ${language}: clipped controls`)
+      assert.equal(layout.toolbar, 48)
+      assert.equal(layout.footer, 24)
       assert.ok(layout.font.includes('Golos Text'))
       assert.equal(layout.weight, '500')
       assert.equal(layout.button, 'rgb(27, 131, 228)')
+      await evaluate('document.querySelector("#new").click()')
+      await until(() => evaluate('document.querySelector("#editor").open'), open => open, 'compact editor open')
+      const editor = await evaluate(`{
+        const box=document.querySelector('#editor'), rect=box.getBoundingClientRect();
+        const save=document.querySelector('#save').getBoundingClientRect();
+        ({visible:rect.top>=0 && rect.bottom<=innerHeight && save.bottom<=rect.bottom, scroll:box.scrollHeight>box.clientHeight});
+      }`)
+      assert.equal(editor.visible, true, `${language}: editor buttons visible`)
+      assert.equal(editor.scroll, false, `${language}: editor fits without scrolling`)
+      await evaluate('document.querySelector(".accounts-editor-actions button").click()')
+      await until(() => evaluate('document.querySelector("#editor").open'), open => !open, 'compact editor close')
     }
   }
-  console.log('ok 12 viewport size/language layouts: shared 4:3 canvas, Grid, uniform scaling, no overflow, Golos 500 and blue action buttons')
-  await browser.call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false }, chooser)
+  console.log('ok 12 compact guide/language layouts: Grid, fixed rows and type sizes, full editor, no clipping, Golos 500 and blue action buttons')
+  await browser.call('Emulation.clearDeviceMetricsOverride', {}, chooser)
   await field('.accounts-tools select', 'zh-CN', 'HTMLSelectElement')
   await until(() => evaluate('document.querySelector("main").dataset.lang'), lang => lang === 'zh-CN', 'screenshot language')
   const screenshot = await browser.call('Page.captureScreenshot', { format: 'png' }, chooser)
   const output = path.join(DESKTOP, 'test-output'); fs.mkdirSync(output, { recursive: true })
   fs.writeFileSync(path.join(output, 'profiles.png'), Buffer.from(screenshot.data, 'base64'))
   console.log(`ok chooser screenshot: ${path.join(output, 'profiles.png')}`)
+  await evaluate('document.querySelector("#new").click()')
+  await until(() => evaluate('document.querySelector("#editor").open'), open => open, 'editor screenshot')
+  const editorShot = await browser.call('Page.captureScreenshot', { format: 'png' }, chooser)
+  fs.writeFileSync(path.join(output, 'profiles-editor.png'), Buffer.from(editorShot.data, 'base64'))
+  await evaluate('document.querySelector(".accounts-editor-actions button").click()')
+  for (const [count, height] of [[3, 368], [4, 432], [5, 432]]) {
+    await evaluate(`window.akagi.invoke('create_profile', {name:'Extra ${count}', platform:'Tenhou'})`)
+    await until(() => evaluate('innerHeight'), actual => actual === height, `native guide size for ${count} accounts`)
+  }
+  await until(() => evaluate('document.querySelectorAll("tbody tr").length'), count => count === 5, 'scrolling account list')
+  const panel = await evaluate(`({scrolls:document.querySelector('.accounts-panel').scrollHeight>document.querySelector('.accounts-panel').clientHeight, bodyScroll:document.documentElement.scrollHeight>innerHeight})`)
+  assert.equal(panel.scrolls, true)
+  assert.equal(panel.bodyScroll, false)
+  console.log('ok the native guide grows from 304 to 368 to 432 DIP for 2/3/4 accounts; additional rows scroll within the list')
   await browser.closeBrowser(); browser = null
 } catch (error) {
   console.error(error); console.error(diagnostic.slice(-4000)); process.exitCode = 1

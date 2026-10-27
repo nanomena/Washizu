@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react'
-import { useCanvasScale } from '@/hooks/useCanvasScale'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { invoke, listen } from '@/lib/host'
 import { LANGS, setLang, tr, useLang, type Lang } from '@/lib/i18n'
 import type { AccountProfile, ProfileState } from '@/lib/profiles'
@@ -10,7 +9,6 @@ type Editor = { id: string | null; name: string; platform: AccountProfile['platf
 
 export function Profiles() {
   const lang = useLang()
-  const scale = useCanvasScale()
   const [state, setState] = useState<ProfileState | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -61,7 +59,7 @@ export function Profiles() {
   const status = error || state?.error || (!state ? tr('正在读取账号档案…')
     : state.active ? state.ready ? tr('账号窗口已打开') : tr('正在打开账号档案…') : '')
 
-  return <main className="mon accounts" data-lang={lang} style={{ '--k': scale } as CSSProperties}>
+  return <main className="mon accounts" data-lang={lang}>
     <div className="accounts-canvas">
     <header className="accounts-bar">
       <div><h1>Washizu</h1><span>{tr('账号档案')}</span></div>
@@ -73,12 +71,11 @@ export function Profiles() {
     <div className="accounts-status" title={status} data-error={!!(error || state?.error)} role={error || state?.error ? 'alert' : 'status'}>{status}</div>
     <section className="mstat accounts-panel" aria-label={tr('已保存的账号档案')}>
       <table>
-        <colgroup><col /><col className="accounts-platform" /><col className="accounts-last" /><col className="accounts-actions" /></colgroup>
-        <thead><tr><th>{tr('名称')}</th><th>{tr('平台')}</th><th>{tr('最近打开')}</th><th className="accounts-action-heading">{tr('操作')}</th></tr></thead>
+        <colgroup><col /><col className="accounts-platform" /><col className="accounts-actions" /></colgroup>
+        <thead><tr><th>{tr('名称')}</th><th>{tr('平台')}</th><th className="accounts-action-heading">{tr('操作')}</th></tr></thead>
         <tbody>{state?.profiles.map(profile => <tr key={profile.id}>
-          <td><span className="accounts-name" title={profile.name}>{profile.name}</span>{profile.id === 'existing' && <span className="accounts-original">{tr('原有资料')}</span>}</td>
+          <td><span className="accounts-name" title={profile.name}>{profile.name}</span><span className="accounts-meta">{profile.id === 'existing' && <span className="accounts-original">{tr('原有资料')}</span>}{profile.lastOpened && <span title={new Date(profile.lastOpened).toLocaleString(lang)}>{tr('最近打开')} {new Date(profile.lastOpened).toLocaleDateString(lang)}</span>}</span></td>
           <td>{profile.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')}</td>
-          <td>{profile.lastOpened ? new Date(profile.lastOpened).toLocaleDateString(lang) : '—'}</td>
           <td><div className="accounts-row-tools">
             <button className="mbtn accounts-rename" disabled={!!blocked} aria-label={tr('改名 {0}', profile.name)} onClick={() => openEditor(profile)}>{tr('改名')}</button>
             <button className="mbtn mbtn--primary" disabled={!!blocked} aria-label={tr('打开 {0}', profile.name)} onClick={() => void request('open_profile', { id: profile.id })}>{tr('打开')}</button>

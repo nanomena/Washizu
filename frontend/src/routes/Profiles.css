@@ -1,30 +1,33 @@
 /* Account selection uses the monitor's palette, fonts, panels and buttons.
  * The toolbar, status slot, table columns and footer keep their positions in
  * every state and language. Only the account list scrolls. */
-/* The same 1280×960 canvas as Monitor: 24px outer padding leaves 1232×912.
- * Vertical grid: 48 toolbar + 32 status + 800 list + 32 footer = 912.
- * The list fits a 32px header and twelve 64px account rows. All of this is
- * scaled together by the shared --k, including the fonts and controls. */
-.accounts-canvas { width: 1280px; height: 960px; padding: 24px; display: grid; grid-template-rows: 48px 32px 800px 32px; align-items: stretch; justify-items: stretch; zoom: var(--k); overflow: hidden; }
+/* A 640px-wide guide: 48px outer padding + 352 name + 88 platform + 152
+ * actions. The native content height (profile-layout.js) is 48 padding +
+ * 48 toolbar + 24 status + (32 header + 2..4 × 64 rows) + 24 footer:
+ * 304 / 368 / 432px. Fonts remain at their normal DIP size, with no zoom.
+ * Only the row count changes the height; loading/errors/languages do not. */
+.accounts-canvas { width: 100%; height: 100%; padding: 24px; display: grid; grid-template-rows: 48px 24px minmax(0, 1fr) 24px; align-items: stretch; justify-items: stretch; overflow: hidden; }
 .accounts-bar, .accounts-tools, .accounts-bar > div:first-child, .accounts-footer, .accounts-row-tools, .accounts-editor-actions { display: flex; align-items: center; }
 .accounts-bar, .accounts-footer { justify-content: space-between; }
-.accounts-bar > div:first-child { gap: 16px; }
+.accounts-bar > div:first-child { gap: 12px; white-space: nowrap; }
 .accounts-bar h1 { font: 500 24px/32px var(--m-display); }
 .accounts-bar span { color: var(--m-ink2); font-size: 13px; }
-.accounts-tools { gap: 16px; }
-.accounts-tools select { width: 128px; }
-.accounts .accounts-create { width: 160px; height: 32px; font-size: 13px; }
+.accounts-tools { gap: 8px; }
+.accounts-tools select { width: 112px; height: 32px; }
+.accounts .accounts-create { width: 112px; height: 32px; font-size: 13px; }
 .accounts-status { display: flex; align-items: center; color: var(--m-live); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .accounts-status[data-error="true"] { color: var(--m-bad); }
-.mon.accounts .accounts-panel { display: block; min-width: 0; min-height: 0; overflow: auto; padding: 0; }
+.mon.accounts .accounts-panel { display: block; min-width: 0; min-height: 0; overflow: auto; padding: 0; border: 0; outline: 1px solid var(--m-line); outline-offset: -1px; }
 .accounts table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
-.accounts-platform { width: 96px; }.accounts-last { width: 160px; }.accounts-actions { width: 160px; }
+.accounts-platform { width: 88px; }.accounts-actions { width: 152px; }
 .accounts th { position: sticky; top: 0; height: 32px; background: var(--m-panel); font-size: 12px; font-weight: 500; color: var(--m-ink2); text-align: left; z-index: 1; }
 .accounts th, .accounts td { border-bottom: 1px solid var(--m-line); padding: 0 16px; }
 .accounts td { height: 64px; vertical-align: middle; }
 .accounts tbody tr:last-child td { border-bottom: 0; }
 .accounts-name { display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.accounts-original { display: block; color: var(--m-dim); font-size: 11px; line-height: 18px; }
+.accounts-meta { display: flex; gap: 8px; color: var(--m-dim); font-size: 11px; line-height: 18px; white-space: nowrap; overflow: hidden; }
+.accounts-meta > span { overflow: hidden; text-overflow: ellipsis; }
+.accounts-original { flex: none; }
 .accounts-row-tools { justify-content: flex-end; gap: 8px; }
 .accounts .accounts-action-heading { text-align: right; padding-right: 16px; }
 .accounts-row-tools .mbtn { width: 56px; height: 32px; padding: 0; font-size: 12px; }
@@ -32,12 +35,12 @@
 .accounts-footer { color: var(--m-dim); font-size: 11px; }
 .accounts select, .accounts input { font: inherit; color: var(--m-ink); border: 1px solid var(--m-line); border-radius: 6px; padding: 6px 8px; background: var(--m-panel); }
 .accounts :is(input, select):focus-visible { outline: 2px solid var(--m-live); outline-offset: 2px; }
-.accounts-editor { color: var(--m-ink); background: var(--m-panel); border: 1px solid var(--m-line); border-radius: 10px; box-shadow: var(--m-shadow); width: 384px; padding: 24px; margin: auto; }
+.accounts-editor { color: var(--m-ink); background: var(--m-panel); border: 1px solid var(--m-line); border-radius: 10px; box-shadow: var(--m-shadow); width: 384px; max-height: calc(100% - 24px); padding: 20px; margin: auto; }
 .accounts-editor::backdrop { background: hsl(35 20% 14% / 0.25); }
-.accounts-editor h2 { font: 500 20px/24px var(--m-display); margin-bottom: 24px; }
-.accounts-editor label { display: block; font-size: 12px; line-height: 16px; color: var(--m-ink2); margin-bottom: 16px; }
-.accounts-editor :is(input, select) { display: block; width: 100%; height: 40px; margin-top: 8px; }
+.accounts-editor h2 { font: 500 20px/24px var(--m-display); margin-bottom: 16px; }
+.accounts-editor label { display: block; font-size: 12px; line-height: 16px; color: var(--m-ink2); margin-bottom: 12px; }
+.accounts-editor :is(input, select) { display: block; width: 100%; height: 32px; margin-top: 8px; }
 .accounts-platform-field[hidden] { visibility: hidden; display: block; }
-.accounts-form-status { height: 32px; color: var(--m-bad); font-size: 12px; overflow: auto; }
+.accounts-form-status { height: 24px; color: var(--m-bad); font-size: 12px; overflow: auto; }
 .accounts-editor-actions { justify-content: flex-end; gap: 16px; }
 .accounts-editor-actions .mbtn { width: 96px; height: 32px; font-size: 13px; }

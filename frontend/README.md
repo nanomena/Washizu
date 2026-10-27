@@ -3,9 +3,11 @@
 Two views of the same React/TypeScript/Vite frontend: the account chooser
 (`?view=profiles`) and the monitor's dock with the game's stage above it.
 Both use the monitor's palette, type and controls, without a component library.
-The 1280×960 canvas and its scale calculation are shared in `lib/canvas.ts`
-and `hooks/useCanvasScale.ts`. `routes/Profiles.css` documents its fixed Grid
-slots; only the profile list scrolls. All its words go through the same `tr`
+The monitor keeps its 1280×960 canvas and `hooks/useCanvasScale.ts`. The chooser
+is a compact floating guide with unscaled type, separate from that game canvas.
+`routes/Profiles.css` documents its fixed Grid slots and `desktop/src/profile-layout.js`
+derives the native size from those slots and two to four visible account rows;
+only the profile list scrolls. All its words go through the same `tr`
 and language tables as the monitor. The chooser subscribes before reading its
 initial state and uses `revision` to discard late snapshots.
 

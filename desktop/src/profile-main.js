@@ -8,8 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { ProfileStore } from './profiles.js'
 import { ProfileSession } from './profile-session.js'
 import { registerDockScheme, serveDock } from './dock.js'
-import { MIN, openingSize } from './layout.js'
-import { holdRatio } from './window-frame.js'
+import { guideSize } from './profile-layout.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -32,6 +31,17 @@ export async function startProfiles(root) {
   let revision = 0
   const state = () => ({ revision, profiles: store.list(), active: session.active, ready: session.ready, error })
   const changed = () => { revision++; window?.webContents.send('akagi:event', 'profiles-updated', state()) }
+  const fitGuide = () => {
+    if (!window) return
+    const area = screen.getDisplayMatching(window.getBounds()).workArea
+    const size = guideSize(store.list().length, area)
+    const [width, height] = window.getContentSize()
+    if (width === size.width && height === size.height) return
+    const before = window.getBounds()
+    window.setContentSize(size.width, size.height)
+    const after = window.getBounds()
+    window.setPosition(Math.max(area.x, Math.min(before.x, area.x + area.width - after.width)), Math.max(area.y, Math.min(before.y, area.y + area.height - after.height)))
+  }
   const show = () => { window?.show(); if (window?.isMinimized()) window.restore(); window?.focus() }
   app.on('second-instance', () => { if (session.child) session.focus(); else show() })
   app.on('activate', show)
@@ -48,7 +58,7 @@ export async function startProfiles(root) {
       if (!window || event.sender !== window.webContents) throw new Error('只有账号档案页可以执行此操作。')
       const values = args && typeof args === 'object' ? args : {}
       if (method !== 'list_profiles' && session.child) throw new Error('请先从当前窗口返回账号档案。')
-      if (method === 'create_profile') store.create(values.name, values.platform)
+      if (method === 'create_profile') { store.create(values.name, values.platform); fitGuide() }
       else if (method === 'rename_profile') store.rename(values.id, values.name)
       else if (method === 'open_profile') { const profile = store.get(values.id); error = ''; session.open(profile.id) }
       else if (method !== 'list_profiles') throw new Error('未知的档案操作。')
@@ -60,10 +70,9 @@ export async function startProfiles(root) {
   Menu.setApplicationMenu(null)
   const files = path.resolve(app.commandLine.getSwitchValue('dock') || process.env.AKAGI_DOCK || (app.isPackaged ? path.join(process.resourcesPath, 'dock') : path.join(HERE, '..', '..', 'frontend', 'dist')))
   serveDock(files)
-  const size = openingSize(screen.getPrimaryDisplay().workAreaSize)
-  window = new BrowserWindow({ ...size, useContentSize: true, minWidth: MIN.width, minHeight: MIN.height, maximizable: false, fullscreenable: false, title: 'Washizu · 账号档案', backgroundColor: '#ece9e4', show: false,
+  const size = guideSize(store.list().length, screen.getPrimaryDisplay().workAreaSize)
+  window = new BrowserWindow({ ...size, useContentSize: true, resizable: false, maximizable: false, fullscreenable: false, alwaysOnTop: true, title: 'Washizu · 账号档案', backgroundColor: '#ece9e4', show: false,
     webPreferences: { preload: path.join(HERE, 'profiles-preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false } })
-  holdRatio(window)
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', event => event.preventDefault())
   window.on('close', event => { if (session.child) { event.preventDefault(); session.focus(); window?.hide() } })
