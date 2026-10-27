@@ -13,6 +13,7 @@
     "test": "node --test \"tests/*.test.js\"",
     "smoke": "node tests/smoke.mjs",
     "smoke:profiles": "node tests/profiles-smoke.mjs",
+    "smoke:window": "node tests/native-presentation.mjs",
     "package": "node scripts/package.mjs"
   },
   "devDependencies": {

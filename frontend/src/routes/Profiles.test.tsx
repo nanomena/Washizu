@@ -79,7 +79,7 @@ describe('account profiles', () => {
     expect(screen.getByRole('alert').textContent).toContain('Cleanup ACK missing')
     expect((screen.getByRole('button', { name: '打开 Main' }) as HTMLButtonElement).disabled).toBe(true)
     const show = screen.getByRole('button', { name: '打开 Second' }) as HTMLButtonElement
-    expect(show.disabled).toBe(false); expect(show.textContent).toBe('显示')
+    expect(show.disabled).toBe(false); expect(show.textContent).toBe('切换到窗口')
     fireEvent.click(show)
     await waitFor(() => expect(fixture.calls).toContainEqual(['open_profile', { id: 'second' }]))
     await act(async () => fixture.listener!({ ...fixture.state!, revision: 8, clients: [{ id: 'second', state: 'closing', cleanup: 'acknowledged', error: '' }] }))

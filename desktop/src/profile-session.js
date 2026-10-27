@@ -45,7 +45,9 @@ export class ProfileSessions extends EventEmitter {
     let child
     try {
       fs.mkdirSync(logs, { recursive: true })
-      child = (this.settings.spawn ?? spawn)(this.settings.executable, args, { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true })
+      // This is the user's GUI client. STARTUPINFO's SW_HIDE overrides its
+      // first ShowWindow call on Windows and otherwise forces a second Open.
+      child = (this.settings.spawn ?? spawn)(this.settings.executable, args, { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: false })
     } catch (cause) {
       slot.state = 'failed'; slot.cleanup = 'not-started'; slot.error = String(cause)
       this.emit('change')

@@ -1,7 +1,7 @@
 /* Account selection uses the monitor's palette, fonts, panels and buttons.
  * The toolbar, status slot, table columns and footer keep their positions in
  * every state and language. Only the account list scrolls. */
-/* A 640px-wide guide: 48px outer padding + 352 name + 88 platform + 152
+/* A 640px-wide guide: 48px outer padding + 272 name + 88 platform + 232
  * actions. The native content height (profile-layout.js) is 48 padding +
  * 48 toolbar + 24 status + (32 header + 2..4 × 64 rows) + 24 footer:
  * 304 / 368 / 432px. Fonts remain at their normal DIP size, with no zoom.
@@ -19,7 +19,7 @@
 .accounts-status[data-error="true"] { color: var(--m-bad); }
 .mon.accounts .accounts-panel { display: block; min-width: 0; min-height: 0; overflow: auto; padding: 0; border: 0; outline: 1px solid var(--m-line); outline-offset: -1px; }
 .accounts table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
-.accounts-platform { width: 88px; }.accounts-actions { width: 152px; }
+.accounts-platform { width: 88px; }.accounts-actions { width: 232px; }
 .accounts th { position: sticky; top: 0; height: 32px; background: var(--m-panel); font-size: 12px; font-weight: 500; color: var(--m-ink2); text-align: left; z-index: 1; }
 .accounts th, .accounts td { border-bottom: 1px solid var(--m-line); padding: 0 16px; }
 .accounts td { height: 64px; vertical-align: middle; }
@@ -32,6 +32,7 @@
 .accounts-row-tools { justify-content: flex-end; gap: 8px; }
 .accounts .accounts-action-heading { text-align: right; padding-right: 16px; }
 .accounts-row-tools .mbtn { width: 56px; height: 32px; padding: 0; font-size: 12px; }
+.accounts-row-tools .mbtn--primary { width: 136px; flex: none; white-space: nowrap; }
 .accounts .accounts-empty { color: var(--m-dim); text-align: center; padding: 28px 16px; }
 .accounts-footer { color: var(--m-dim); font-size: 11px; gap: 16px; }.accounts-footer > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .accounts select, .accounts input { font: inherit; color: var(--m-ink); border: 1px solid var(--m-line); border-radius: 6px; padding: 6px 8px; background: var(--m-panel); }
