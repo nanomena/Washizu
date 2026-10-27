@@ -742,7 +742,9 @@ impl PointerController {
             self.at = Some(to);
             return true;
         }
-        let wait = rules::turn_wait(self.last_move, from, to, Instant::now(), &mut rand::rng());
+        let wait = rules::turn_wait(self.last_move, from, to, Instant::now(), &mut rand::rng())
+            .map(|wait| wait.min(Duration::from_millis(u64::from(travel_ms))));
+        let travel_ms = travel_ms.saturating_sub(wait.map_or(0, |wait| wait.as_millis() as u32));
         if let Some(wait) = wait {
             tokio::time::sleep(wait).await;
         }
