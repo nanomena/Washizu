@@ -79,7 +79,11 @@ createInterface({ input: process.stdin }).on('line', line => {
   else if (request.method === 'nudge') { say({ event: 'monitor-updated', payload: { sequence: 7 } }); say({ id: request.id, result: null }) }
   else say({ id: request.id, error: `unknown method: ${request.method}` })
 }).on('close', () => {
+  const finish = () => {
+    if (mode !== 'shutdown-missing') say({ event: 'shutdown-complete', payload: { ok: mode !== 'shutdown-failure', error: mode === 'shutdown-failure' ? 'model service could not be reaped' : null } })
+    process.stdout.write('', () => process.exit(mode === 'shutdown-failure' ? 1 : 0))
+  }
   if (process.argv.includes('--delay-release') && homeAt >= 0) {
-    setTimeout(() => { fs.writeFileSync(path.join(process.argv[homeAt + 1], 'fake-core-released'), 'released'); process.exit(0) }, 250)
-  } else process.exit(0)
+    setTimeout(() => { fs.writeFileSync(path.join(process.argv[homeAt + 1], 'fake-core-released'), 'released'); finish() }, 250)
+  } else finish()
 })

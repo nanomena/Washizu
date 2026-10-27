@@ -85,9 +85,9 @@ actionable model reply or displayed PASS in a valid hand confirms recovery.
   `REACT_TIMEOUT` because it blocks the bot's turn. Building an `ApiClient`
   builds a fresh connection pool, so hold one and reuse it. Consumed by
   `NativeBot` while cloud inference is on (`[bot.api]`).
-- `service` — `service::run`: the resident process a bot may declare in its
+- `service` — `service::start`: the resident process a bot may declare in its
   manifest (`[service]`), run for as long as the app is open. See
-  [A bot's service](#a-bots-service).
+  [A bot's service](#a-bots-service) and [shutdown ownership](SERVICE-LIFETIME.md).
 - `supervisor` — `run_bot_manager`: constructs the `BotManager` and drives
   its run loop off the `PostTrackerBus`. Tolerates a missing Python runtime
   — the built-in `native` bots need none.

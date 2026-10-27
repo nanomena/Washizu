@@ -49,3 +49,19 @@ test('failed account startup releases the slot and reports the failure', async t
   assert.match(result.error, /ENOENT/)
   assert.equal(session.active, null)
 })
+
+test('an account crash without service release keeps the slot held after its process is gone', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'washizu-session-test-'))
+  const store = new ProfileStore(root).load(); const first = store.create('主号', 'Majsoul'); const next = store.create('备用', 'Tenhou')
+  const session = new ProfileSession({ executable: process.execPath, entry: [fileURLToPath(new URL('./profile-child.js', import.meta.url))], root })
+  t.after(() => { session.child?.kill(); assert.ok(root.startsWith(path.join(os.tmpdir(), 'washizu-session-test-'))); fs.rmSync(root, { recursive: true, force: true }) })
+  session.open(first.id)
+  const child = session.child
+  assert.ok(child)
+  await once(child, 'message')
+  const closed = once(session, 'closed'); child.send({ type: 'unreleased-close' })
+  assert.match((await closed)[0].error, /账号切换保持锁定/)
+  assert.equal(session.child, null)
+  assert.equal(session.active, first.id)
+  assert.throws(() => session.open(next.id), /服务释放失败/)
+})

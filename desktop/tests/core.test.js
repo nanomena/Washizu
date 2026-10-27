@@ -55,6 +55,15 @@ test('a core that dies fails what was waiting on it and keeps its last words', a
   assert.match(core.stderr, /stand-in core: giving up/)
 })
 
+test('missing or failed service-release acknowledgements cannot complete an account shutdown', async () => {
+  for (const mode of ['shutdown-missing', 'shutdown-failure']) {
+    const core = start(mode)
+    await core.ready
+    await assert.rejects(core.stop(), mode === 'shutdown-missing' ? /did not confirm/ : /could not be reaped/)
+    assert.equal(core.gone, true)
+  }
+})
+
 test('a core that cannot be started says so', async () => {
   const core = new Core(path.join(path.dirname(STAND_IN), 'no-such-core'), [])
   await assert.rejects(core.ready, /The core could not be started/)

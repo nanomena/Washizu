@@ -167,6 +167,7 @@ let gameOpen = false
 let cdpPort = 0
 let quitting = false
 let stoppingCore = false
+let profileReleased = false
 
 /** Stop with a message. Nothing is left half-done by it: the core goes when we do. */
 function fail(/** @type {string} */ title, /** @type {string} */ detail) {
@@ -789,14 +790,17 @@ async function prepare() {
   })
   app.on('window-all-closed', () => app.quit())
   app.on('before-quit', event => {
-    if (!core || core.gone) { quitting = true; return }
+    if (!core || profileReleased) { quitting = true; return }
     event.preventDefault()
     if (stoppingCore) return
     stoppingCore = true
     quitting = true
     // The launcher must not open another account until the old core and its
     // managed service have released their input and connection ownership.
-    void core.stop().then(() => app.quit(), error => { dialog.showErrorBox('Washizu 无法关闭当前档案', String(error)); app.exit(1) })
+    void core.stop().then(() => new Promise(resolve => {
+      if (process.connected && process.send) process.send({ type: 'profile-released' }, () => resolve(undefined))
+      else resolve(undefined)
+    })).then(() => { profileReleased = true; app.quit() }, error => { dialog.showErrorBox('Washizu 无法关闭当前档案', String(error)); app.exit(1) })
   })
   process.on('message', message => {
     if (message && typeof message === 'object' && 'type' in message && message.type === 'focus') {

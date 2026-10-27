@@ -39,13 +39,15 @@
 //! | `ready`           | `{brand, platform, monitor, version}` — the first line written |
 //! | `monitor-updated` | `MonitorSnapshot`                                    |
 //! | `pointer`         | `{x, y, down}` — autoplay's pointer, while the trail is on |
+//! | `shutdown-complete` | `{ok, error}` — terminal, flushed only after owned service cleanup |
 //!
 //! # Lifetime
 //!
 //! The core lives as long as its stdin is open. The shell holds the other end
 //! and never has to remember to stop anything: when it goes, for whatever
-//! reason, the core stops capture and exits, and the bot's processes — which
-//! hang on the core in the same way — follow.
+//! reason, the core stops capture, cancels and reaps its resident service,
+//! flushes `shutdown-complete`, and exits. Missing or failed cleanup must keep
+//! the shell's account ownership held. See `bot/SERVICE-LIFETIME.md`.
 
 use crate::capture::cdp::EmbeddedPage;
 use crate::capture::embedded::{self, EmbeddedGame};
@@ -62,7 +64,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
@@ -261,7 +263,7 @@ async fn serve(
         mjai_bus.subscribe(),
         state.log_session.inspector(),
     ));
-    if bot_enabled {
+    let service = if bot_enabled {
         // A bot's environment is installed by whichever of the two needs it
         // first, the manager or the service; this keeps them from doing it at once.
         let syncs_in_flight = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
@@ -284,18 +286,21 @@ async fn serve(
         });
         // The process the active bot needs across games lives and dies with
         // the core.
-        tokio::spawn(bot::service::run(
+        Some(bot::service::start(
             state.config.clone(),
             runtime,
             syncs_in_flight,
             state.monitor.clone(),
-        ));
-    }
+        ))
+    } else {
+        None
+    };
     start_autoplay(&state, autoplay_enabled);
 
     // One writer owns stdout, so a reply and an event never share a line.
     let (out, lines) = mpsc::unbounded_channel::<String>();
-    tokio::spawn(write_lines(lines));
+    let (finish, last_line) = oneshot::channel();
+    let writer = tokio::spawn(write_lines(lines, last_line));
     send(&out, &json!({ "event": "ready", "payload": ready }));
     tokio::spawn(forward_monitor(state.monitor.subscribe(), out.clone()));
     tokio::spawn(forward_pointer(out.clone()));
@@ -328,7 +333,21 @@ async fn serve(
 
     info!("the shell has gone; stopping");
     supervisor::stop_and_wait(&state, LAST_WORDS).await;
-    std::process::exit(0);
+    let cleanup = match service {
+        Some(service) => service.shutdown().await,
+        None => Ok(()),
+    };
+    let ok = cleanup.is_ok();
+    let error = cleanup.err().map(|error| format!("{error:#}"));
+    if let Some(error) = &error {
+        error!(%error, "account service cleanup failed");
+    }
+    // The terminal line is flushed by the same stdout owner as every reply.
+    // A core crash or a missing acknowledgement must not release an account.
+    let _ = finish
+        .send(json!({ "event": "shutdown-complete", "payload": { "ok": ok, "error": error } }));
+    let _ = tokio::time::timeout(Duration::from_millis(500), writer).await;
+    std::process::exit(if ok { 0 } else { 1 });
 }
 
 /// Answer one request. An `Err` is a message the shell's interface shows as is.
@@ -608,13 +627,24 @@ fn send(out: &mpsc::UnboundedSender<String>, message: &Value) {
     let _ = out.send(message.to_string());
 }
 
-async fn write_lines(mut lines: mpsc::UnboundedReceiver<String>) {
+async fn write_lines(
+    mut lines: mpsc::UnboundedReceiver<String>,
+    mut finish: oneshot::Receiver<Value>,
+) {
     let mut stdout = tokio::io::stdout();
-    while let Some(mut line) = lines.recv().await {
+    loop {
+        let (mut line, last) = tokio::select! {
+            biased;
+            final_line = &mut finish => match final_line { Ok(value) => (value.to_string(), true), Err(_) => return },
+            line = lines.recv() => match line { Some(line) => (line, false), None => return },
+        };
         line.push('\n');
         let written = stdout.write_all(line.as_bytes()).await;
         if written.is_err() || stdout.flush().await.is_err() {
             // Nobody is reading: the shell has gone, and its stdin goes next.
+            return;
+        }
+        if last {
             return;
         }
     }

@@ -9,7 +9,11 @@ Opening Washizu shows saved accounts. Create a Mahjong Soul or Tenhou profile,
 or rename and open one already saved. The game window's folder button and
 Accounts menu return to the chooser after the current game has ended. Cancel
 any lobby reservation in the game before returning. Closing an account waits
-for its core to stop; another account cannot open until the old process exits.
+for its core to stop and acknowledge managed-service cleanup. The account
+process then acknowledges release to the chooser. Another account cannot open
+until both that acknowledgement and the old process's close have arrived.
+An abnormal exit or missing cleanup acknowledgement keeps the slot locked
+and displays the failure; it is never treated as successful release.
 The chooser itself starts no core, model, game page or network connection.
 
 `--data` names the account library root. Its `profiles.json` stores stable ids,
@@ -74,6 +78,8 @@ four real Electron account windows with game pages kept at `about:blank`,
 checks independent persistent cookies on an offline `.invalid` origin, and
 waits for a delayed fake core to finish before returning to the chooser. It
 writes `desktop/test-output/profiles.png`; it never visits a game site.
+The real-process service shutdown regressions and commands are documented in
+[`src/bot/SERVICE-LIFETIME.md`](../src/bot/SERVICE-LIFETIME.md).
 
 Capture and autoplay both go through the Chrome DevTools Protocol, and of the
 webviews an operating system provides only Windows' is a Chromium. This shell

@@ -57,7 +57,7 @@ export async function startProfiles(root) {
     try {
       if (!window || event.sender !== window.webContents) throw new Error('只有账号档案页可以执行此操作。')
       const values = args && typeof args === 'object' ? args : {}
-      if (method !== 'list_profiles' && session.child) throw new Error('请先从当前窗口返回账号档案。')
+      if (method !== 'list_profiles' && session.active !== null) throw new Error('请先从当前窗口返回账号档案；模型服务释放失败时不能切换。')
       if (method === 'create_profile') { store.create(values.name, values.platform); fitGuide() }
       else if (method === 'rename_profile') store.rename(values.id, values.name)
       else if (method === 'open_profile') { const profile = store.get(values.id); error = ''; session.open(profile.id) }

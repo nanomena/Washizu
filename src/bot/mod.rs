@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod control;
+mod lifecycle;
 pub mod manager;
 pub mod manifest;
 pub mod native;

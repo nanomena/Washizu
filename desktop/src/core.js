@@ -34,6 +34,10 @@ export class Core extends EventEmitter {
     this.next = 0
     this.stderr = ''
     this.gone = false
+    this.released = false
+    this.shutdownError = ''
+    /** @type {number | null} */
+    this.exitCode = null
     this.child = spawn(command, args, { ...options, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     /** @type {Promise<Ready>} */
     this.ready = new Promise((done, fail) => {
@@ -51,7 +55,7 @@ export class Core extends EventEmitter {
     this.child.stdin.on('error', () => {})
     this.child.on('error', error => this.#end(`The core could not be started: ${error.message}`))
     // `close`, not `exit`: by then everything it wrote has been read.
-    this.child.on('close', (code, signal) => this.#end(`The core stopped (${signal ?? `exit ${code}`}).`))
+    this.child.on('close', (code, signal) => { this.exitCode = code; this.#end(`The core stopped (${signal ?? `exit ${code}`}).`) })
   }
 
   /**
@@ -77,8 +81,7 @@ export class Core extends EventEmitter {
 
   /** @returns {Promise<void>} */
   async stop() {
-    if (this.gone) return
-    await new Promise((done, fail) => {
+    if (!this.gone) await new Promise((done, fail) => {
       const timer = setTimeout(() => {
         this.child.kill()
         fail(new Error('The core did not release the account within 10 seconds.'))
@@ -86,6 +89,7 @@ export class Core extends EventEmitter {
       this.once('exit', () => { clearTimeout(timer); done(undefined) })
       this.close()
     })
+    if (!this.released || this.exitCode !== 0) throw new Error(this.shutdownError || 'The core did not confirm that its managed service was released. Account switching remains blocked.')
   }
 
   /** @param {string} line */
@@ -95,6 +99,10 @@ export class Core extends EventEmitter {
     try { message = JSON.parse(line) } catch { return }
     if (!message || typeof message !== 'object') return
     if (typeof message.event === 'string') {
+      if (message.event === 'shutdown-complete') {
+        this.released = message.payload?.ok === true
+        this.shutdownError = typeof message.payload?.error === 'string' ? message.payload.error : ''
+      }
       if (message.event === 'ready') this.emit('ready', message.payload)
       else this.emit('event', message.event, message.payload)
       return
