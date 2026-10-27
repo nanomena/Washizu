@@ -137,18 +137,22 @@ fn take_indices(pool: &mut Vec<u32>, labels: &[String]) -> Option<Vec<u32>> {
 /// throwing the just-drawn copy *is* the tsumogiri — so which copy goes
 /// matters even between functionally identical tiles: a tsumogiri must name
 /// the drawn copy (the tail of `hand`), not whichever identical copy
-/// [`take_one`]'s ranking would reach first. When the named tile is not the
-/// drawn one, or nothing was drawn, the ordinary red-aware lookup applies.
+/// [`take_one`]'s ranking would reach first. A tsumogiri must match the drawn
+/// copy exactly; a tedashi excludes it. Red/plain identity is preserved.
 ///
 /// Shared by [`encode`] and the autoplay planner so the frame the encoder
 /// would build and the index the planner hands the client can never name
 /// different copies.
 pub fn dahai_index(view: HandView, pai: &str, tsumogiri: bool) -> Option<u32> {
     let drawn = view.is_tsumo.then(|| view.hand.last().copied()).flatten();
-    match drawn {
-        Some(d) if tsumogiri && super::tile::tenhou_to_mjai_one(d) == pai => Some(d),
-        _ => tile_index(view.hand, pai),
+    if tsumogiri {
+        return drawn.filter(|tile| super::tile::tenhou_to_mjai_one(*tile) == pai);
     }
+    view.hand
+        .iter()
+        .copied()
+        .filter(|tile| Some(*tile) != drawn && super::tile::tenhou_to_mjai_one(*tile) == pai)
+        .max()
 }
 
 /// Tenhou tile class (`0..=33`) for an mjai label, exposed for the autoplay
@@ -303,21 +307,16 @@ mod tests {
         );
     }
 
-    /// Holding only the red five, a request for a plain 5m can only mean that
-    /// tile — bots that normalise reds away name it this way. Falling back is
-    /// unambiguous here precisely because no plain copy exists.
+    /// A selected discard may not be reinterpreted as a different red value.
     #[test]
-    fn plain_five_falls_back_to_red_when_it_is_the_only_copy() {
+    fn plain_five_does_not_spend_the_only_red_copy() {
         let hand = [16];
         let ev = MjaiEvent::Dahai {
             actor: 0,
             pai: s("5m"),
             tsumogiri: false,
         };
-        assert_eq!(
-            encode(&ev, view(&hand, &[])).unwrap(),
-            r#"{"p":16,"tag":"D"}"#
-        );
+        assert!(encode(&ev, view(&hand, &[])).is_none());
         // The fallback must not fire while an exact match exists.
         let both = [16, 17];
         assert_eq!(
@@ -329,17 +328,14 @@ mod tests {
 
     /// The reverse direction: a red named while only plain copies are held.
     #[test]
-    fn red_five_falls_back_to_plain_when_no_red_is_held() {
+    fn red_five_does_not_spend_a_plain_copy() {
         let hand = [17, 18];
         let ev = MjaiEvent::Dahai {
             actor: 0,
             pai: s("5mr"),
             tsumogiri: false,
         };
-        assert_eq!(
-            encode(&ev, view(&hand, &[])).unwrap(),
-            r#"{"p":18,"tag":"D"}"#
-        );
+        assert!(encode(&ev, view(&hand, &[])).is_none());
     }
 
     /// The fallback is per tile *type* only — a tile we do not hold at all

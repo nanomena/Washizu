@@ -85,6 +85,40 @@ const TEHAI_SIZE: usize = 13;
 const TSUMO_TEHAI_SIZE: usize = 14;
 const UNKNOWN_TILE: &str = "?";
 
+/// Our dealer's undivided opening deal, projected onto MJAI's 13 + draw.
+/// Keep exact tile identities (including red fives), not just tile kinds.
+struct OpeningDeal {
+    hand: Vec<String>,
+    draw: String,
+}
+
+impl OpeningDeal {
+    fn discard_is_tsumogiri(&self, tile: &str, wire: bool) -> bool {
+        tile == self.draw && (wire || !self.hand.iter().any(|held| held == tile))
+    }
+
+    fn normalize_win(
+        &self,
+        pai: &mut Option<String>,
+        tehai: &mut Option<Vec<String>>,
+    ) -> Result<()> {
+        let mut revealed = tehai.clone().context("opening win missing hand")?;
+        revealed.push(pai.clone().context("opening win missing hu_tile")?);
+        let mut dealt = self.hand.clone();
+        dealt.push(self.draw.clone());
+        revealed.sort();
+        dealt.sort();
+        if revealed != dealt {
+            bail!("opening winning tiles differ from the fourteen dealt tiles");
+        }
+        // The provider can designate any of the fourteen as hu_tile. The
+        // MJAI lane must finish on the same synthetic draw it started with.
+        *pai = Some(self.draw.clone());
+        *tehai = Some(self.hand.clone());
+        Ok(())
+    }
+}
+
 /// Per-flow Majsoul state. Holds the liqi parser and the game state mirror
 /// needed to emit mjai events.
 ///
@@ -166,6 +200,10 @@ pub struct MajsoulBridge {
     /// next action is `ActionHule` — a ron on the declaration tile voids
     /// the riichi.
     pending_reach_accepted: Option<Actor>,
+    /// Present only until our dealer commits the opening deal. Majsoul
+    /// has fourteen dealt tiles; MJAI requires a thirteen-tile hand and a
+    /// synthetic draw. Discards and heavenly wins use that same partition.
+    opening_deal: Option<OpeningDeal>,
     /// 3 (sanma) or 4 (yonma). Resolved from `seat_list.len()` on the
     /// `authGame` response. Defaults to 4 so per-flow code that runs before
     /// auth (none today, but be defensive) sees a sane value.
@@ -174,6 +212,7 @@ pub struct MajsoulBridge {
     /// (`operation.time_fixed` / `time_add`, both ms). `None` when the
     /// autoplay context isn't wired (MITM path, tests).
     time_budget: Option<SharedTimeBudget>,
+    window: Option<TimeBudget>,
     /// True while `handle_game_restore` replays historical actions through
     /// `handle_action_prototype`. Replayed operations must not clobber the
     /// live budget slot — the last one is committed after the replay with
@@ -212,8 +251,10 @@ impl MajsoulBridge {
             deferred_doras: Vec::new(),
             last_revealed_tile_actor: None,
             pending_reach_accepted: None,
+            opening_deal: None,
             num_players: 4,
             time_budget: None,
+            window: None,
             replaying: false,
             restore_budget: None,
             input_watch: None,
@@ -326,6 +367,9 @@ impl MajsoulBridge {
     fn dispatch(&mut self, msg: &ParsedMessage) -> Vec<MjaiEvent> {
         match (&msg.msg_type, msg.method_name.as_ref()) {
             (MessageType::Request, METHOD_AUTH_GAME) => {
+                if let Some(watch) = &self.input_watch {
+                    watch.reset_ui_table();
+                }
                 self.account_id = msg.payload.get("account_id").and_then(JsonValue::as_u64);
                 self.game_uuid = msg
                     .payload
@@ -367,9 +411,38 @@ impl MajsoulBridge {
                 }
                 Vec::new()
             }
+            (MessageType::Response, ".lq.Lobby.startUnifiedMatch")
+            | (MessageType::Response, ".lq.Lobby.matchGame") => {
+                if !msg
+                    .payload
+                    .get("error")
+                    .is_some_and(|error| !error.is_null())
+                {
+                    if let Some(watch) = &self.input_watch {
+                        watch.note_lobby(crate::autoplay::verify::LobbyPhase::Matching);
+                    }
+                }
+                Vec::new()
+            }
             (MessageType::Notify, METHOD_ACTION_PROTOTYPE) => self.handle_action_prototype(msg),
             (MessageType::Response, METHOD_SYNC_GAME)
-            | (MessageType::Response, METHOD_ENTER_GAME) => self.handle_game_restore(&msg.payload),
+            | (MessageType::Response, METHOD_ENTER_GAME) => {
+                if let Some(watch) = &self.input_watch {
+                    watch.reset_ui_table();
+                }
+                self.handle_game_restore(&msg.payload)
+            }
+            (MessageType::Response, ".lq.Lobby.cancelMatch")
+            | (MessageType::Response, ".lq.Lobby.cancelQueue")
+            | (MessageType::Response, ".lq.Lobby.cancelUnifiedMatch")
+            | (MessageType::Response, ".lq.Lobby.leaveRoom") => {
+                if !msg.payload.get("error").is_some_and(|e| !e.is_null()) {
+                    if let Some(watch) = &self.input_watch {
+                        watch.note_lobby(crate::autoplay::verify::LobbyPhase::WaitingStart);
+                    }
+                }
+                Vec::new()
+            }
             (MessageType::Notify, METHOD_NOTIFY_GAME_END_RESULT) => {
                 info!(
                     target: "akagi::bridge::majsoul",
@@ -533,8 +606,10 @@ impl MajsoulBridge {
     /// replay the value is parked in `restore_budget` instead — see
     /// `handle_game_restore`.
     fn update_time_budget(&mut self, action_name: &str, data: &JsonValue) {
-        if self.time_budget.is_none() {
-            return;
+        if !self.replaying && self.seat.is_some() && action_name == ACTION_NEW_ROUND {
+            if let Some(watch) = &self.input_watch {
+                watch.reset_ui_table();
+            }
         }
         // The slot is shared by every flow bridge (spectate tabs, the
         // dying socket during a reconnect). A bridge that never resolved
@@ -552,7 +627,8 @@ impl MajsoulBridge {
         }
     }
 
-    fn store_budget(&self, budget: Option<TimeBudget>) {
+    fn store_budget(&mut self, budget: Option<TimeBudget>) {
+        self.window = budget;
         if let Some(slot) = &self.time_budget {
             if let Ok(mut guard) = slot.write() {
                 *guard = budget;
@@ -627,6 +703,18 @@ impl MajsoulBridge {
             self.pending_reach_accepted.take()
         };
 
+        // Only the initial decision belongs to the undivided opening deal.
+        // A kan/kita followed by a real replacement draw must use wire moqie.
+        let ends_opening = matches!(
+            action_name,
+            ACTION_DEAL_TILE
+                | ACTION_AN_GANG_ADD_GANG
+                | ACTION_CHI_PENG_GANG
+                | ACTION_BA_BEI
+                | ACTION_NO_TILE
+                | ACTION_LIU_JU
+                | ACTION_HULE
+        );
         let result = match action_name {
             ACTION_NEW_ROUND => self.build_start_kyoku(action_data),
             ACTION_DEAL_TILE => self.build_tsumo(action_data),
@@ -640,7 +728,12 @@ impl MajsoulBridge {
             _ => return Vec::new(),
         };
         let events = match result {
-            Ok(events) => events,
+            Ok(events) => {
+                if ends_opening {
+                    self.opening_deal = None;
+                }
+                events
+            }
             Err(e) => {
                 warn!(
                     target: "akagi::bridge::majsoul",
@@ -724,7 +817,7 @@ impl MajsoulBridge {
     }
 
     /// `ActionDiscardTile` → mjai `dahai`. `moqie` (default false) maps
-    /// directly to `tsumogiri`. `seat` defaults to 0 — Majsoul omits it
+    /// to `tsumogiri` after the opening deal is normalized. `seat` defaults to 0 — Majsoul omits it
     /// for the dealer's first discard.
     ///
     /// Kan dora (後乗り): after a kakan/daiminkan the live server reveals
@@ -749,10 +842,18 @@ impl MajsoulBridge {
             bail!("ActionDiscardTile.tile is empty");
         }
         let pai = ms_to_mjai(tile_raw)?.to_string();
-        let tsumogiri = data
+        let wire_tsumogiri = data
             .get("moqie")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false);
+        // Project the discard onto the same 13 + draw partition used at
+        // start_kyoku. Opponents' concealed draw identities stay unknown.
+        let tsumogiri = match &self.opening_deal {
+            Some(deal) if Some(actor) == self.seat => {
+                deal.discard_is_tsumogiri(&pai, wire_tsumogiri)
+            }
+            _ => wire_tsumogiri,
+        };
         let is_riichi = data
             .get("is_liqi")
             .and_then(JsonValue::as_bool)
@@ -785,6 +886,7 @@ impl MajsoulBridge {
             self.pending_reach_accepted = Some(actor);
         }
         self.last_revealed_tile_actor = Some(actor);
+        self.opening_deal = None;
         Ok(events)
     }
 
@@ -1152,7 +1254,7 @@ impl MajsoulBridge {
             } else {
                 None
             };
-            let pai = hule
+            let mut pai = hule
                 .get("hu_tile")
                 .map(|value| {
                     value
@@ -1161,7 +1263,7 @@ impl MajsoulBridge {
                         .and_then(|tile| ms_to_mjai(tile).map(String::from))
                 })
                 .transpose()?;
-            let tehai = hule
+            let mut tehai = hule
                 .get("hand")
                 .map(|value| {
                     value
@@ -1177,6 +1279,11 @@ impl MajsoulBridge {
                         .collect::<Result<Vec<_>>>()
                 })
                 .transpose()?;
+            if zimo && Some(actor) == self.seat {
+                if let Some(deal) = &self.opening_deal {
+                    deal.normalize_win(&mut pai, &mut tehai)?;
+                }
+            }
             events.push(MjaiEvent::Hora {
                 score: hand_score(hule),
                 actor,
@@ -1379,6 +1486,14 @@ impl MajsoulBridge {
         self.deferred_doras.clear();
         self.last_revealed_tile_actor = None;
         self.pending_reach_accepted = None;
+        self.opening_deal = if my_tiles.len() == TSUMO_TEHAI_SIZE {
+            Some(OpeningDeal {
+                hand: tehais[seat as usize].clone(),
+                draw: my_tiles[TEHAI_SIZE].clone(),
+            })
+        } else {
+            None
+        };
 
         Ok(vec![
             MjaiEvent::StartKyoku {
@@ -1970,7 +2085,11 @@ impl Bridge for MajsoulBridge {
                     self.rotate_mjai_log();
                 }
                 self.write_mjai(&events);
-                ParseResult { events, parsed }
+                ParseResult {
+                    events,
+                    parsed,
+                    window: self.window.map(crate::bot::control::InputWindow::Majsoul),
+                }
             }
             Err(e) => {
                 warn!(
@@ -2189,6 +2308,56 @@ mod tests {
         let events = bridge.dispatch(&req(METHOD_CONFIRM_NEW_ROUND, json!({})));
         assert!(events.is_empty());
         assert_eq!(watch.confirmed(), 1);
+    }
+
+    #[test]
+    fn only_successful_matching_responses_end_the_click_sequence() {
+        let watch: crate::autoplay::verify::SharedInputWatch = Default::default();
+        let mut bridge = MajsoulBridge::new(None, None).with_input_watch(Some(watch.clone()));
+        for method in [".lq.Lobby.startUnifiedMatch", ".lq.Lobby.matchGame"] {
+            let before = watch.lobby();
+            bridge.dispatch(&req(method, json!({})));
+            assert_eq!(watch.lobby(), before, "a request can still fail");
+            let mut response = req(method, json!({"error": {"code": 1001}}));
+            response.msg_type = MessageType::Response;
+            bridge.dispatch(&response);
+            assert_eq!(watch.lobby(), before);
+            response.payload = json!({});
+            assert!(bridge.dispatch(&response).is_empty());
+            assert_eq!(
+                watch.lobby(),
+                crate::autoplay::verify::LobbyObservation {
+                    sequence: before.sequence + 1,
+                    phase: crate::autoplay::verify::LobbyPhase::Matching
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn only_confirmed_cancel_and_leave_responses_return_to_lobby() {
+        use crate::autoplay::verify::LobbyPhase;
+        let watch: crate::autoplay::verify::SharedInputWatch = Default::default();
+        let mut bridge = MajsoulBridge::new(None, None).with_input_watch(Some(watch.clone()));
+        for method in [
+            ".lq.Lobby.cancelMatch",
+            ".lq.Lobby.cancelQueue",
+            ".lq.Lobby.cancelUnifiedMatch",
+            ".lq.Lobby.leaveRoom",
+        ] {
+            watch.note_lobby(LobbyPhase::Matching);
+            let before = watch.lobby();
+            bridge.dispatch(&req(method, json!({})));
+            assert_eq!(watch.lobby(), before);
+            let mut response = req(method, json!({"error": {"code": 1001}}));
+            response.msg_type = MessageType::Response;
+            bridge.dispatch(&response);
+            assert_eq!(watch.lobby(), before);
+            response.payload = json!({});
+            assert!(bridge.dispatch(&response).is_empty());
+            assert_eq!(watch.lobby().phase, LobbyPhase::WaitingStart);
+            assert_eq!(watch.lobby().sequence, before.sequence + 1);
+        }
     }
 
     #[test]
@@ -3141,6 +3310,288 @@ mod tests {
             method_name: Arc::from(METHOD_ACTION_PROTOTYPE),
             payload: json!({ "step": 1, "name": name, "data": data }),
         }
+    }
+
+    fn opening_dealer(last: &str, hand_five: &str) -> MajsoulBridge {
+        let mut bridge = MajsoulBridge::new(None, None);
+        bridge.seat = Some(1);
+        let opening = bridge.dispatch(&new_round_msg(json!({
+            "ju": 1, "doras": ["9p"], "scores": [25000,25000,25000,25000],
+            "tiles": ["1m","1m","2m","3m","4m",hand_five,"6m",
+                      "1p","2p","3p","4s","5s","6s",last]
+        })));
+        assert_eq!(opening.len(), 2);
+        bridge
+    }
+
+    #[test]
+    fn opening_deal_normalizes_only_a_tile_absent_from_the_head() {
+        for (last, five, discard, wire, expected) in [
+            ("3z", "5m", "3z", false, true),
+            ("4z", "5m", "4z", false, true),
+            ("8s", "5m", "8s", false, true),
+            ("1m", "5m", "1m", false, false), // real hand copy
+            ("0m", "5m", "0m", false, true),  // red is not ordinary
+            ("5m", "0m", "5m", false, true),
+            ("5m", "5m", "5m", false, false),
+            ("4z", "5m", "1m", false, false),
+            ("4z", "5m", "4z", true, true),
+            ("4z", "5m", "1m", true, false), // partition, not the wire's slot
+            ("1m", "5m", "1m", true, true),  // identical draw and hand copy
+        ] {
+            let mut bridge = opening_dealer(last, five);
+            let events = bridge.dispatch(&action_msg(
+                ACTION_DISCARD_TILE,
+                json!({
+                    "seat": 1, "tile": discard, "moqie": wire
+                }),
+            ));
+            assert!(
+                matches!(&events[..], [MjaiEvent::Dahai { tsumogiri, .. }] if *tsumogiri == expected),
+                "last={last} five={five} discard={discard}: {events:?}"
+            );
+            assert!(bridge.opening_deal.is_none());
+            // No second discard, even of that tile, inherits the opening rule.
+            let next = bridge.dispatch(&action_msg(
+                ACTION_DISCARD_TILE,
+                json!({
+                    "seat": 1, "tile": discard, "moqie": false
+                }),
+            ));
+            assert!(matches!(
+                &next[..],
+                [MjaiEvent::Dahai {
+                    tsumogiri: false,
+                    ..
+                }]
+            ));
+        }
+    }
+
+    #[test]
+    fn opening_normalization_ends_at_draw_kan_kita_or_hand_end() {
+        for (name, data) in [
+            (ACTION_DEAL_TILE, json!({"seat": 1, "tile": "7s"})),
+            (
+                ACTION_AN_GANG_ADD_GANG,
+                json!({"seat": 1, "type": 3, "tiles": "1m"}),
+            ),
+            (ACTION_BA_BEI, json!({"seat": 1})),
+            (ACTION_NO_TILE, json!({})),
+            (ACTION_LIU_JU, json!({"type": 1, "seat": 1})),
+        ] {
+            let mut bridge = opening_dealer("4z", "5m");
+            assert!(
+                !bridge.dispatch(&action_msg(name, data)).is_empty(),
+                "{name}"
+            );
+            assert!(bridge.opening_deal.is_none(), "{name}");
+        }
+        let mut bridge = opening_dealer("4z", "5m");
+        bridge.dispatch(&new_round_msg(json!({
+            "ju": 2, "doras": ["9p"], "scores": [25000,25000,25000,25000],
+            "tiles": ["1m","1m","2m","3m","4m","5m","6m",
+                      "1p","2p","3p","4s","5s","6s"]
+        })));
+        assert!(bridge.opening_deal.is_none());
+    }
+
+    #[test]
+    fn opening_heavenly_win_uses_one_partition_and_preserves_provider_scoring() {
+        for tiles in [
+            [
+                "1m", "1m", "1m", "2p", "2p", "2p", "3s", "3s", "3s", "6z", "6z", "6z", "1z", "1z",
+            ],
+            [
+                "0m", "5m", "5m", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "1z", "1z",
+            ],
+        ] {
+            // Neither the deal's last slot nor the provider's hu_tile has
+            // a unique mahjong meaning before the dealer's first action.
+            for draw in 0..tiles.len() {
+                let mut ordered = tiles.to_vec();
+                let synthetic = ordered.remove(draw);
+                ordered.push(synthetic);
+                for won in 0..tiles.len() {
+                    let mut hand = tiles.to_vec();
+                    let hu_tile = hand.remove(won);
+                    hand.reverse(); // reveal order need not match the deal
+                    let mut bridge = MajsoulBridge::new(None, None);
+                    bridge.seat = Some(1);
+                    let opening = bridge.build_start_kyoku(&json!({
+                        "ju": 1, "doras": ["9p"], "scores": [25000,25000,25000,25000], "tiles": ordered
+                    })).unwrap();
+                    let settlement = json!({
+                        "delta_scores": [-48000,144000,-48000,-48000],
+                        "scores": [-23000,169000,-23000,-23000],
+                        "hules": [{"seat": 1, "zimo": true, "hu_tile": hu_tile,
+                            "hand": hand, "fans": [{"id": 35, "val": 1}, {"id": 48, "val": 2}],
+                            "count": 3, "fu": 0, "yiman": true}]
+                    });
+                    let events = bridge.dispatch(&action_msg(ACTION_HULE, settlement.clone()));
+                    assert_eq!(events.len(), 2);
+                    let MjaiEvent::StartKyoku { tehais, .. } = &opening[0] else {
+                        panic!()
+                    };
+                    let MjaiEvent::Tsumo { pai: draw_tile, .. } = &opening[1] else {
+                        panic!()
+                    };
+                    let MjaiEvent::Hora {
+                        pai,
+                        tehai,
+                        score,
+                        deltas,
+                        scores,
+                        actor,
+                        target,
+                        ..
+                    } = &events[0]
+                    else {
+                        panic!()
+                    };
+                    assert_eq!((*actor, *target), (1, 1));
+                    assert_eq!(pai.as_ref(), Some(draw_tile));
+                    assert_eq!(tehai.as_ref(), Some(&tehais[1]));
+                    assert_eq!(*deltas, Some(vec![-48000, 144000, -48000, -48000]));
+                    assert_eq!(*scores, Some(vec![-23000, 169000, -23000, -23000]));
+                    let score = score.as_ref().unwrap();
+                    assert_eq!(score.yaku, vec![(35, 1), (48, 2)]);
+                    assert_eq!((score.han, score.fu, score.yakuman), (3, 0, true));
+                    assert!(matches!(events[1], MjaiEvent::EndKyoku));
+                    assert!(bridge.opening_deal.is_none());
+                    assert_eq!(settlement["hules"][0]["hu_tile"], hu_tile);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opening_win_rejects_a_different_multiset_or_missing_reveal() {
+        let deal = OpeningDeal {
+            hand: [
+                "5mr", "5m", "5m", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E",
+            ]
+            .map(String::from)
+            .to_vec(),
+            draw: "E".into(),
+        };
+        let mut wrong_red = deal.hand.clone();
+        wrong_red[0] = "5m".into();
+        for (pai, hand) in [
+            (None, Some(deal.hand.clone())),
+            (Some(deal.draw.clone()), None),
+            (Some("S".into()), Some(deal.hand.clone())),
+            (Some(deal.draw.clone()), Some(wrong_red)),
+            (Some(deal.draw.clone()), Some(deal.hand[..12].to_vec())),
+        ] {
+            let (mut pai, mut hand) = (pai, hand);
+            let before = (pai.clone(), hand.clone());
+            assert!(deal.normalize_win(&mut pai, &mut hand).is_err());
+            assert_eq!((pai, hand), before);
+        }
+    }
+
+    #[test]
+    fn opponents_opening_discard_and_win_keep_the_wire_identity() {
+        let mut bridge = MajsoulBridge::new(None, None);
+        bridge.seat = Some(2);
+        bridge
+            .build_start_kyoku(&json!({
+                "ju": 1, "doras": ["9p"], "scores": [25000,25000,25000,25000],
+                "tiles": ["1m","1m","2m","3m","4m","5m","6m","1p","2p","3p","4s","5s","6s"]
+            }))
+            .unwrap();
+        assert!(bridge.opening_deal.is_none());
+        let hand = [
+            "5m", "5m", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "1z", "1z",
+        ];
+        let win = bridge
+            .build_hule(&json!({"hules": [{"seat": 1, "zimo": true,
+            "hu_tile": "0m", "hand": hand}]}))
+            .unwrap();
+        assert!(
+            matches!(&win[0], MjaiEvent::Hora { pai: Some(pai), tehai: Some(hand), .. }
+            if pai == "5mr" && hand.len() == 13 && hand[0] == "5m")
+        );
+        let discard = bridge
+            .build_dahai(&json!({"seat": 1, "tile": "0m", "moqie": false}))
+            .unwrap();
+        assert!(matches!(
+            &discard[0],
+            MjaiEvent::Dahai {
+                tsumogiri: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn opening_riichi_keeps_one_discard_and_acceptance_order() {
+        let mut bridge = opening_dealer("4z", "5m");
+        let events = bridge.dispatch(&action_msg(
+            ACTION_DISCARD_TILE,
+            json!({
+                "seat": 1, "tile": "4z", "moqie": false, "is_wliqi": true
+            }),
+        ));
+        assert!(matches!(
+            &events[..],
+            [
+                MjaiEvent::Reach { actor: 1, .. },
+                MjaiEvent::Dahai {
+                    actor: 1,
+                    tsumogiri: true,
+                    ..
+                }
+            ]
+        ));
+        let next = bridge.dispatch(&action_msg(ACTION_DEAL_TILE, json!({"seat": 2})));
+        assert!(matches!(
+            &next[..],
+            [
+                MjaiEvent::ReachAccepted { actor: 1 },
+                MjaiEvent::Tsumo { actor: 2, .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn restored_opening_uses_the_same_normalization_as_live_actions() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use prost::Message;
+
+        let encode = |name: &str, data: JsonValue| {
+            let desc = parser::POOL
+                .get_message_by_name(&format!("lq.{name}"))
+                .unwrap();
+            let text = data.to_string();
+            let message = prost_reflect::DynamicMessage::deserialize(
+                desc,
+                &mut serde_json::Deserializer::from_str(&text),
+            )
+            .unwrap();
+            STANDARD.encode(message.encode_to_vec())
+        };
+        let mut bridge = opening_dealer("4z", "5m");
+        let opening = json!({
+            "ju": 1, "doras": ["9p"], "scores": [25000,25000,25000,25000],
+            "tiles": ["1m","1m","2m","3m","4m","5m","6m",
+                      "1p","2p","3p","4s","5s","6s","3z"]
+        });
+        let events = bridge.dispatch(&resp(METHOD_SYNC_GAME, json!({
+            "game_restore": {"actions": [
+                {"name": ACTION_NEW_ROUND, "data": encode(ACTION_NEW_ROUND, opening), "step": 1},
+                {"name": ACTION_DISCARD_TILE, "data": encode(ACTION_DISCARD_TILE,
+                    json!({"seat": 1, "tile": "3z", "moqie": false})), "step": 2},
+                {"name": ACTION_DEAL_TILE, "data": encode(ACTION_DEAL_TILE,
+                    json!({"seat": 2})), "step": 3}
+            ]}, "step": 4, "is_end": false
+        })));
+        assert!(matches!(&events[..], [MjaiEvent::StartKyoku { .. },
+            MjaiEvent::Tsumo { actor: 1, pai },
+            MjaiEvent::Dahai { actor: 1, tsumogiri: true, .. },
+            MjaiEvent::Tsumo { actor: 2, .. }] if pai == "W"));
+        assert!(bridge.opening_deal.is_none());
     }
 
     /// Other player's draw — server omits the tile field. We must emit
@@ -5213,12 +5664,22 @@ mod tests {
             .expect("final window must be committed");
         assert_eq!(b.fixed_ms, 300_000, "wire value of the final window");
         assert_eq!(b.source, BudgetSource::DealTile);
+        assert_eq!(
+            bridge.window,
+            Some(b),
+            "the producer retains the same window"
+        );
         assert!(
             b.elapsed_ms() >= 16_000,
             "opened_at must be backdated by passed_waiting_time (got {}ms)",
             b.elapsed_ms()
         );
         assert!(!bridge.replaying, "replay flag must be reset");
+        assert_eq!(
+            bridge.window,
+            Some(b),
+            "the event envelope retains restore backdating"
+        );
     }
 
     /// Regression: chankan / babei windows (`ActionAnGangAddGang`,

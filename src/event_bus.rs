@@ -32,7 +32,24 @@ use crate::schema::{
 use tokio::sync::broadcast;
 
 /// Fan-out for `MjaiEvent`s from platform bridges.
-pub type MjaiBus = broadcast::Sender<MjaiEvent>;
+pub type MjaiBus = broadcast::Sender<CapturedEvent>;
+
+/// One actual event plus its frame's original input window. Only the final
+/// event of a parsed frame carries that frame's complete-prefix window.
+#[derive(Debug, Clone)]
+pub struct CapturedEvent {
+    pub event: MjaiEvent,
+    pub window: Option<crate::bot::control::InputWindow>,
+}
+
+impl From<MjaiEvent> for CapturedEvent {
+    fn from(event: MjaiEvent) -> Self {
+        Self {
+            event,
+            window: None,
+        }
+    }
+}
 
 /// Fan-out for `BotResponse`s from the active bot.
 pub type BotResponseBus = broadcast::Sender<BotResponse>;
@@ -56,6 +73,7 @@ pub type NotifyBus = broadcast::Sender<Notification>;
 /// seats' actions, so that is not a rare race — it is most of them.
 #[derive(Debug, Clone)]
 pub struct TrackedEvent {
+    pub window: Option<crate::bot::control::InputWindow>,
     pub event: MjaiEvent,
     /// Exact tracker generation and sequence for a monitor decision.
     pub context: Option<crate::monitor::DecisionContext>,

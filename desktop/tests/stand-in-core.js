@@ -8,22 +8,26 @@
 //            show: enough for the monitor page to draw itself, tiles included
 // Ends when its stdin closes, as the core does.
 import { createInterface } from 'node:readline'
+import { homePlatform } from '../src/profiles.js'
+import fs from 'node:fs'
+import path from 'node:path'
 
 const mode = process.argv[process.argv.indexOf('--mode') + 1] ?? 'ok'
 const say = (/** @type {unknown} */ message) => process.stdout.write(JSON.stringify(message) + '\n')
 
 /** What the page sees: no game on the table, one answered decision with tiles in it. */
 /** @type {Record<string, unknown>} */
-const monitor = { always_on_top: false }
+const monitor = {}
 let capture = /** @type {Record<string, string>} */ ({ state: 'stopped' })
 function snapshot() {
   const context = { game: 1, round: 1, event_seq: 10 }
   const now = Date.now()
   return {
     revision: 1, context, names: [], red_fives: true,
-    game: null, view: null, round_ended: false, game_ended: true,
+    game: null, view: null, round_ended: false, game_ended: !process.argv.includes('--live-game'),
     capture, bot: { state: 'ready', bot: 'stand-in', actor_id: 0 },
     service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null,
+    forecast: { owner: 0, state: 'disabled' },
     brand: 'Stand-in', facts: [], autoplay_enabled: false,
     previous_decision: null, result: null, previous_result: null, events: [], last_event_ms: null,
     decision: {
@@ -42,12 +46,6 @@ const answers = {
   get_monitor: snapshot,
   get_hand_events: () => [],
   get_history: () => [],
-  set_monitor_pinned: ({ pinned }) => { monitor.always_on_top = pinned === true; return monitor },
-  set_monitor_stream: ({ enabled, port, token }) => {
-    if (enabled === true && !(Number.isInteger(port) && port > 0 && typeof token === 'string' && token.length >= 16)) throw new Error('invalid stream address')
-    Object.assign(monitor, { stream_output: enabled === true, stream_port: port, stream_token: token })
-    return monitor
-  },
   set_monitor_autoplay: () => null,
   open_game: ({ port, target }) => {
     if (!Number.isInteger(port) || typeof target !== 'string' || !target) throw new Error('invalid params')
@@ -58,7 +56,9 @@ const answers = {
 }
 
 process.stderr.write('stand-in core: starting\n')
-if (mode !== 'silent') say({ event: 'ready', payload: { brand: 'Stand-in', monitor, version: '0.0.0' } })
+const homeAt = process.argv.indexOf('--home')
+const platform = homeAt >= 0 ? homePlatform(process.argv[homeAt + 1]) : 'Majsoul'
+if (mode !== 'silent') say({ event: 'ready', payload: { brand: 'Stand-in', platform, monitor, version: '0.0.0' } })
 
 createInterface({ input: process.stdin }).on('line', line => {
   // Not everything on the line is ours to understand; the core skips what is not a request.
@@ -73,4 +73,14 @@ createInterface({ input: process.stdin }).on('line', line => {
   } else if (request.method === 'echo') say({ id: request.id, result: request.params })
   else if (request.method === 'nudge') { say({ event: 'monitor-updated', payload: { sequence: 7 } }); say({ id: request.id, result: null }) }
   else say({ id: request.id, error: `unknown method: ${request.method}` })
-}).on('close', () => process.exit(0))
+}).on('close', () => {
+  const finish = () => {
+    if (mode !== 'shutdown-missing') say({ event: 'shutdown-complete', payload: { ok: mode !== 'shutdown-failure', error: mode === 'shutdown-failure' ? 'model service could not be reaped' : null } })
+    process.stdout.write('', () => process.exit(mode === 'shutdown-failure' ? 1 : 0))
+  }
+  if (process.argv.includes('--delay-release') && homeAt >= 0) {
+    const releaseAt = process.argv.indexOf('--release-delay')
+    const delay = releaseAt >= 0 ? Number(process.argv[releaseAt + 1]) : 250
+    setTimeout(() => { fs.writeFileSync(path.join(process.argv[homeAt + 1], 'fake-core-released'), 'released'); finish() }, delay)
+  } else finish()
+})

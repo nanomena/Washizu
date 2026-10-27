@@ -280,7 +280,7 @@ future_knob = 42
 reach = [1.0, 0.5]
 
 [monitor]
-always_on_top = true
+quick_confirm = true
 ";
         let out = merge_into(&AppConfig::default(), existing).unwrap();
 
@@ -302,7 +302,7 @@ always_on_top = true
 # my notes
 
 [monitor]
-always_on_top = true
+quick_confirm = true
 
 [experimental_v4]
 feature = \"on\"
@@ -318,7 +318,7 @@ level = 3
         assert!(out.contains("# my notes"), "{out}");
 
         let back: AppConfig = toml::from_str(&out).unwrap();
-        assert!(back.monitor.always_on_top);
+        assert!(back.monitor.quick_confirm);
         // ...and the sections this build owns are all present now.
         assert!(out.contains("[bot]"), "{out}");
         assert!(out.contains("[capture]"), "{out}");

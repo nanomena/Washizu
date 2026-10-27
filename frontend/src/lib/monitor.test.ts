@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   actionLabel, alertsOf, candidatesOf, decisionMark, decisionView, describeAction, factsOf, handMarks, healthOf, meldView, newestSnapshot, ownHand,
-  serverLine,
-  type MonitorDecision, type MonitorSnapshot, type Table,
+  serverLine, decisionSound, controlLabel,
+  type ForecastStatus, type MonitorDecision, type MonitorSnapshot, type Table,
 } from './monitor'
 import type { GameStateSnapshot, MjaiEvent, ShowItem } from '@/types'
 
@@ -14,14 +14,57 @@ function decision(response: MjaiEvent & { meta?: unknown }, items: ShowItem[], t
     state: 'awaiting', response: { ...response, meta: { show: { items } } } as MonitorDecision['response'], error: null, confirmed_seq: null }
 }
 function snapshot(d: MonitorDecision, patch: Partial<MonitorSnapshot> = {}): MonitorSnapshot {
-  return { revision: 1, context: d.context, names: [], red_fives: true, game: { our_seat: 0, num_players: 4 } as GameStateSnapshot, view: null,
+  return { control: null, forecast: { owner: 0, state: 'disabled' }, revision: 1, context: d.context, names: [], red_fives: true, game: { our_seat: 0, num_players: 4 } as GameStateSnapshot, view: null,
     round_ended: false, game_ended: false, capture: { state: 'running', descriptor: 'test' },
-    bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null,
+    bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null, sync_fault: null,
     brand: 'Demo', facts: [], autoplay_enabled: true, decision: d, previous_decision: null,
     result: null, previous_result: null, hands: [], events: [], last_event_ms: null, ...patch }
 }
 
 describe('monitor stream identities', () => {
+  it('reports all forecast phases independently of formal advice, health and source', () => {
+    const d = decision({ type: 'dahai', actor: 0, pai: '9m', tsumogiri: true }, [])
+    const s = snapshot(d, { control: {
+      context: d.context, window: null, source: 'primary',
+      primary: { state: 'ready', through: 10 }, standby: { state: 'ready', through: 10 },
+    } })
+    const phases: Array<[ForecastStatus, string]> = [
+      [{ owner: 7, state: 'idle' }, '等待对局'],
+      [{ owner: 7, state: 'disabled' }, '未运行'],
+      [{ owner: 7, state: 'unsupported', reason: 'protocol lacks forecast' }, '不支持'],
+      [{ owner: 7, state: 'waiting' }, '等待中'],
+      [{ owner: 7, state: 'running', context: d.context, through: 10, position: 6 }, '计算中'],
+      [{ owner: 7, state: 'ready', context: d.context, through: 10, position: 6 }, '可用'],
+      [{ owner: 7, state: 'unavailable', reason: 'forecast worker timed out' }, '不可用'],
+    ]
+    for (const [forecast] of phases) {
+      const next = { ...s, forecast }
+      expect(decisionView(next)).toEqual(decisionView(s))
+      expect(decisionSound(next)).toBe(true)
+      expect(healthOf(next)).toEqual(healthOf(s))
+      expect(alertsOf(next, { ui: null, bridge: null })).toEqual([])
+      expect(controlLabel(next.control!)).toBe('主模型 · 主模型就绪')
+    }
+  })
+
+  it('keeps standby advice valid during a primary fault and still rejects a real tracker gap', () => {
+    const d = decision({ type: 'dahai', actor: 0, pai: '9s', tsumogiri: false }, [])
+    const control: NonNullable<MonitorSnapshot['control']> = {
+      context: d.context, window: { platform: 'majsoul', opened_ns: '-9223372036854775807' }, source: 'native_standby',
+      primary: { state: 'recovering', through: 9, reason: 'pipe closed' }, standby: { state: 'ready', through: 10 },
+    }
+    const s = snapshot(d, { control, service: 'error', service_error: 'pipe closed', sync_fault: 'old primary fault' })
+    expect(decisionSound(s)).toBe(true)
+    expect(alertsOf(s, { ui: null, bridge: null })).toEqual([])
+    expect(controlLabel(control)).toBe('本地备用 · 主模型恢复中')
+    expect(controlLabel({ ...control, source: 'primary', primary: { state: 'direct_ready', delivered: 10 } })).toBe('主模型 · 主模型就绪')
+    expect(controlLabel({ ...control, source: 'unavailable', primary: { state: 'direct_unavailable', delivered: 10, reason: 'pipe lost' } })).toBe('暂无有效来源 · 主模型不可用')
+    expect(decisionSound({ ...s, sync_error: 'missing real event' })).toBe(false)
+    expect(alertsOf({ ...s, sync_error: 'missing real event' }, { ui: null, bridge: null }).map(a => a.key)).toEqual(['sync'])
+    expect(decisionSound({ ...s, control: { ...control, source: 'unavailable' } })).toBe(false)
+    expect(decisionSound({ ...s, round_ended: true })).toBe(false)
+  })
+
   it('keeps an update that arrived before the initial query response', () => {
     const live = { revision: 9 } as MonitorSnapshot
     const olderQuery = { revision: 8 } as MonitorSnapshot

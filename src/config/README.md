@@ -43,13 +43,13 @@ it.
   `mjai_bot/` root, and whether to run `uv sync` before spawning. Nests
   `[bot.api]` (`NativeApiConfig`): cloud inference for the built-in bot.
 - `capture` (`capture.rs`) — `url`, the address the game view is sent to (it
-  must be Mahjong Soul's own site over HTTPS), and `[capture.http]`
+  must belong to the account's selected platform over HTTPS), and `[capture.http]`
   (`HttpCaptureConfig`): what to record of the HTTP traffic capture sees, on
   top of the WebSocket frames. `record_all` defaults to **off**: full capture
   puts tokens and cookies into the session's files.
 - `autoplay` (`autoplay.rs`) — whether a bot's decisions are played, and how:
   click timings for Mahjong Soul and the delay model.
-- `monitor` (`monitor.rs`) — the window's options: `always_on_top`.
+- `monitor` (`monitor.rs`) — pointer display and autoplay between-hand options. OBS output belongs to the desktop shell and is stored in obs.json.
 
 ## Adding a section
 

@@ -13,7 +13,7 @@ use akagi::bot::PythonRuntime;
 use akagi::config::AppConfig;
 use akagi::monitor::MonitorHandle;
 use std::collections::HashSet;
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,6 +82,7 @@ if os.name == "nt":
         pass
 else:
     sys.stdin.buffer.read()
+time.sleep(0.75)  # EOF is not proof that the listener has been released.
 "#;
 
 fn write(path: &Path, body: &str) {
@@ -132,12 +133,12 @@ async fn a_declared_service_is_installed_started_restarted_and_stopped() {
     cfg.bot.active_4p = "demo".into();
     cfg.bot.active_3p = String::new();
     let monitor = MonitorHandle::default();
-    let running = tokio::spawn(service::run(
+    let running = service::start(
         Arc::new(RwLock::new(cfg)),
         Some(runtime),
         Arc::new(Mutex::new(HashSet::new())),
         monitor.clone(),
-    ));
+    );
 
     // The first start exits: the user is told why, and it is started again.
     let failed = server_state(&monitor, "failed", |s| {
@@ -176,13 +177,9 @@ async fn a_declared_service_is_installed_started_restarted_and_stopped() {
     assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
 
     // ...and gone once Akagi stops: nothing is left holding its port.
-    running.abort();
-    let _ = running.await;
-    let gone = tokio::time::timeout(Duration::from_secs(20), async {
-        while TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(gone.is_ok(), "the service outlived the task that ran it");
+    running.shutdown().await.unwrap();
+    assert!(
+        TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "shutdown returned before the owned listener was released"
+    );
 }

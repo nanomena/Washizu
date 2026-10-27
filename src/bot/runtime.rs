@@ -17,10 +17,12 @@
 //! `pyproject.toml` nor `uv.lock` have changed since the last successful
 //! sync.
 
+use super::lifecycle::{cancelled, stop_child, stopping};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tokio::process::Command;
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 const STAMP_FILE: &str = "synced.stamp";
@@ -88,65 +90,91 @@ impl PythonRuntime {
     /// Run `uv sync` against the bot's `pyproject.toml` if the on-disk
     /// signature has changed since the last successful sync. Idempotent.
     pub async fn ensure_synced(&self, bot_dir: &Path) -> Result<()> {
-        let pyproject = bot_dir.join("pyproject.toml");
-        if !pyproject.is_file() {
-            bail!(
-                "pyproject.toml missing in {} — every Akagi bot must declare its deps",
-                bot_dir.display()
-            );
-        }
-        let lock = bot_dir.join("uv.lock");
-        let venv = bot_dir.join(AKAGI_DIR).join(VENV_DIR);
-        let stamp_path = bot_dir.join(AKAGI_DIR).join(STAMP_FILE);
+        let (_keep_open, mut stop) = watch::channel(false);
+        self.ensure_synced_until(bot_dir, &mut stop).await?;
+        Ok(())
+    }
 
-        let current = current_signature(&pyproject, &lock)?;
-        if venv.is_dir() && stamp_matches(&stamp_path, &current).await? {
-            if venv_python_alive(&venv) && venv_home_exists(&venv) {
-                return Ok(());
+    /// A cancelled install owns and reaps its uv process before returning.
+    /// `false` means cancellation, and never writes a successful sync stamp.
+    pub(super) async fn ensure_synced_until(
+        &self,
+        bot_dir: &Path,
+        stop: &mut watch::Receiver<bool>,
+    ) -> Result<bool> {
+        let prepare = async {
+            let pyproject = bot_dir.join("pyproject.toml");
+            if !pyproject.is_file() {
+                bail!(
+                    "pyproject.toml missing in {} — every Akagi bot must declare its deps",
+                    bot_dir.display()
+                );
             }
-            // Stamp says the deps are in sync, but the venv's baked-in
-            // absolute pointers to the base interpreter are stale. Two
-            // ways this happens:
-            //   1. AppImage: each launch creates a fresh
-            //      `/tmp/.mount_Akagi_<rand>/` mount, so the `bin/python`
-            //      symlink built under a previous mount now dangles
-            //      (`venv_python_alive` is false).
-            //   2. The user moved/renamed the whole Akagi folder, so the
-            //      `pyvenv.cfg.home` directory uv baked in at sync time is
-            //      gone (`venv_home_exists` is false). On Unix this also
-            //      dangles the symlink, but on Windows `Scripts/python.exe`
-            //      is a real copy that survives the move, so the missing
-            //      `home` dir is the only on-disk tell — without it we'd
-            //      hand a dead interpreter to the runner and the first
-            //      stdin write dies with `os error 232` ("The pipe is
-            //      being closed").
-            // The standalone python + installed wheels are binary-identical
-            // regardless of location, so we repoint the venv to the current
-            // python without paying for a full re-sync (which would
-            // otherwise re-run on every single launch under AppImage).
-            match repoint_venv(&venv, &self.python).await {
-                Ok(()) => {
-                    info!(
-                        bot = %bot_dir.display(),
-                        python = %self.python.display(),
-                        "repointed venv to current python (AppImage mount changed)"
-                    );
-                    return Ok(());
-                }
-                Err(e) => {
-                    warn!(
-                        bot = %bot_dir.display(),
-                        "venv repoint failed ({e:#}); wiping for full re-sync"
-                    );
-                    reset_sync_state(bot_dir).await;
-                }
-            }
-        }
+            let lock = bot_dir.join("uv.lock");
+            let venv = bot_dir.join(AKAGI_DIR).join(VENV_DIR);
+            let stamp_path = bot_dir.join(AKAGI_DIR).join(STAMP_FILE);
 
-        if let Some(parent) = stamp_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("create {}", parent.display()))?;
+            let current = current_signature(&pyproject, &lock)?;
+            if venv.is_dir() && stamp_matches(&stamp_path, &current).await? {
+                if venv_python_alive(&venv) && venv_home_exists(&venv) {
+                    return Ok(None);
+                }
+                // Stamp says the deps are in sync, but the venv's baked-in
+                // absolute pointers to the base interpreter are stale. Two
+                // ways this happens:
+                //   1. AppImage: each launch creates a fresh
+                //      `/tmp/.mount_Akagi_<rand>/` mount, so the `bin/python`
+                //      symlink built under a previous mount now dangles
+                //      (`venv_python_alive` is false).
+                //   2. The user moved/renamed the whole Akagi folder, so the
+                //      `pyvenv.cfg.home` directory uv baked in at sync time is
+                //      gone (`venv_home_exists` is false). On Unix this also
+                //      dangles the symlink, but on Windows `Scripts/python.exe`
+                //      is a real copy that survives the move, so the missing
+                //      `home` dir is the only on-disk tell — without it we'd
+                //      hand a dead interpreter to the runner and the first
+                //      stdin write dies with `os error 232` ("The pipe is
+                //      being closed").
+                // The standalone python + installed wheels are binary-identical
+                // regardless of location, so we repoint the venv to the current
+                // python without paying for a full re-sync (which would
+                // otherwise re-run on every single launch under AppImage).
+                match repoint_venv(&venv, &self.python).await {
+                    Ok(()) => {
+                        info!(
+                            bot = %bot_dir.display(),
+                            python = %self.python.display(),
+                            "repointed venv to current python (AppImage mount changed)"
+                        );
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        warn!(
+                            bot = %bot_dir.display(),
+                            "venv repoint failed ({e:#}); wiping for full re-sync"
+                        );
+                        reset_sync_state(bot_dir).await;
+                    }
+                }
+            }
+
+            if let Some(parent) = stamp_path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            Ok::<_, anyhow::Error>(Some((pyproject, lock, venv, stamp_path)))
+        };
+        let prepared = tokio::select! {
+            biased;
+            _ = cancelled(stop) => return Ok(false),
+            prepared = prepare => prepared?,
+        };
+        let Some((pyproject, lock, venv, stamp_path)) = prepared else {
+            return Ok(true);
+        };
+        if stopping(stop) {
+            return Ok(false);
         }
 
         let mut sync_cmd = Command::new(&self.uv);
@@ -154,13 +182,32 @@ impl PythonRuntime {
             .arg("sync")
             .arg("--project")
             .arg(bot_dir)
+            .current_dir(bot_dir)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
             .env("UV_PYTHON", &self.python)
             .env("UV_PROJECT_ENVIRONMENT", &venv);
         scrub_python_env(&mut sync_cmd);
-        let status = sync_cmd
-            .status()
-            .await
+        let mut child = sync_cmd
+            .spawn()
             .with_context(|| format!("spawn `uv` at {}", self.uv.display()))?;
+        let status = tokio::select! {
+            biased;
+            _ = cancelled(stop) => {
+                stop_child(&mut child, None, "bot environment installer").await?;
+                return Ok(false);
+            }
+            status = child.wait() => match status {
+                Ok(status) => status,
+                Err(error) => {
+                    stop_child(&mut child, None, "bot environment installer").await?;
+                    return Err(error).context("waiting for uv sync");
+                }
+            },
+        };
+        if stopping(stop) {
+            return Ok(false);
+        }
         if !status.success() {
             bail!("uv sync failed in {} ({status})", bot_dir.display());
         }
@@ -175,7 +222,7 @@ impl PythonRuntime {
         // matches what `is_synced` computes next.
         let synced = current_signature(&pyproject, &lock)?;
         write_stamp(&stamp_path, &synced).await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Build a `tokio::process::Command` that runs the venv's python with

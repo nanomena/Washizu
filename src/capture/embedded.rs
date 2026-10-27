@@ -2,6 +2,7 @@
 //! which address it may be sent to, and the loop that captures from it.
 use super::{cdp, CaptureCtx, ShutdownToken};
 use crate::capture::flow::FlowBridges;
+use crate::config::Platform;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,20 +48,30 @@ pub async fn discover_endpoint(port: u16) -> Result<String> {
     anyhow::bail!("the game view did not expose its local CDP endpoint")
 }
 
-/// The address an embedded game may be opened at: Mahjong Soul's own site, over
+/// The address an embedded game may be opened at: its account's platform over
 /// HTTPS. The game view is signed in to the player's account, so the
 /// configuration cannot be allowed to point it anywhere else.
-pub fn game_url(configured: &str) -> Result<reqwest::Url, String> {
+pub fn game_url(platform: Platform, configured: &str) -> Result<reqwest::Url, String> {
     let url: reqwest::Url = configured
         .parse()
         .map_err(|e| format!("Invalid game URL: {e}"))?;
     let host = url.host_str().unwrap_or("");
+    let allowed: &[&str] = match platform {
+        Platform::Majsoul => &["mahjongsoul.com", "maj-soul.com", "majsoul.com"],
+        Platform::Tenhou => &["tenhou.net"],
+        Platform::RiichiCity => return Err("这个平台没有内置网页客户端。".into()),
+    };
     if url.scheme() != "https"
-        || !["mahjongsoul.com", "maj-soul.com", "majsoul.com"]
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !allowed
             .iter()
             .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
     {
-        return Err("内置游戏地址必须是雀魂的 HTTPS 网站。".into());
+        return Err("内置游戏地址必须是当前档案所属平台的 HTTPS 网站。".into());
+    }
+    if platform == Platform::Tenhou && !matches!(url.path(), "/3" | "/3/") {
+        return Err("天凤内置客户端使用 Web 版地址 https://tenhou.net/3/。".into());
     }
     Ok(url)
 }
@@ -125,12 +136,23 @@ mod tests {
 
     #[test]
     fn the_game_opens_only_at_its_own_site_over_https() {
-        assert!(game_url("https://game.maj-soul.com/1/").is_ok());
-        assert!(game_url("https://game.mahjongsoul.com/").is_ok());
-        assert!(game_url("http://game.maj-soul.com/1/").is_err());
-        assert!(game_url("https://maj-soul.com.example.org/").is_err());
-        assert!(game_url("https://notmaj-soul.com/").is_err());
-        assert!(game_url("file:///etc/passwd").is_err());
-        assert!(game_url("not a url").is_err());
+        assert!(game_url(Platform::Majsoul, "https://game.maj-soul.com/1/").is_ok());
+        assert!(game_url(Platform::Majsoul, "https://game.mahjongsoul.com/").is_ok());
+        assert!(game_url(Platform::Majsoul, "http://game.maj-soul.com/1/").is_err());
+        assert!(game_url(Platform::Majsoul, "https://maj-soul.com.example.org/").is_err());
+        assert!(game_url(Platform::Majsoul, "https://notmaj-soul.com/").is_err());
+        assert!(game_url(Platform::Majsoul, "file:///etc/passwd").is_err());
+        assert!(game_url(Platform::Majsoul, "not a url").is_err());
+    }
+
+    #[test]
+    fn an_accounts_platform_owns_its_navigation() {
+        assert!(game_url(Platform::Tenhou, "https://tenhou.net/3/").is_ok());
+        assert!(game_url(Platform::Tenhou, "https://tenhou.net/4/").is_err());
+        assert!(game_url(Platform::Tenhou, "https://tenhou.net.example.org/4/").is_err());
+        assert!(game_url(Platform::Tenhou, "https://game.maj-soul.com/1/").is_err());
+        assert!(game_url(Platform::Majsoul, "https://tenhou.net/4/").is_err());
+        assert!(game_url(Platform::Tenhou, "https://user:password@tenhou.net/4/").is_err());
+        assert!(game_url(Platform::RiichiCity, "https://tenhou.net/4/").is_err());
     }
 }

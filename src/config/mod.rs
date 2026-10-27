@@ -6,9 +6,7 @@ mod merge;
 mod monitor;
 mod platform;
 
-pub use autoplay::{
-    AutoplayConfig, DelayDistribution, DelayMode, DelayModelConfig, MajsoulAutoplayConfig,
-};
+pub use autoplay::{AutoplayConfig, DelayDistribution, DelayMode, DelayModelConfig, InputConfig};
 pub use bot::{BotConfig, NativeApiConfig};
 pub use capture::{CaptureConfig, HttpCaptureConfig};
 pub use logging::LoggingConfig;
@@ -61,7 +59,9 @@ pub fn load_config(path: &Path) -> AppConfig {
     eprintln!("Loading config from: {}", path.display());
 
     let mut cfg = match std::fs::read_to_string(path) {
-        Ok(content) => match toml::from_str::<AppConfig>(&content) {
+        Ok(content) => match migrate_input_config(&content)
+            .and_then(|body| toml::from_str::<AppConfig>(&body).map_err(|e| e.to_string()))
+        {
             Ok(config) => config,
             Err(e) => {
                 eprintln!("Failed to parse config: {e}, using defaults");
@@ -75,13 +75,94 @@ pub fn load_config(path: &Path) -> AppConfig {
     };
     // Migrate legacy `[bot] active = "..."` into `active_4p` once.
     cfg.bot.migrate_legacy_active();
+    if cfg.platform.kind == Platform::Tenhou && cfg.capture.url == "https://tenhou.net/4/" {
+        cfg.capture.url = "https://tenhou.net/3/".into();
+    }
+    // Retired controls are removed once from the persisted app config. Unknown
+    // user sections remain in the document, including private bot settings.
+    if let Err(error) = migrate_retired_controls(path, &cfg) {
+        eprintln!("Could not save configuration migration: {error}");
+    }
     cfg
+}
+
+fn migrate_retired_controls(path: &Path, cfg: &AppConfig) -> Result<(), String> {
+    let original = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let migrated = migrate_input_config(&original)?;
+    let mut document = migrated
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| e.to_string())?;
+    let mut changed = migrated != original;
+    if let Some(monitor) = document
+        .get_mut("monitor")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        for key in [
+            "always_on_top",
+            "stream_output",
+            "stream_port",
+            "stream_token",
+        ] {
+            changed |= monitor.remove(key).is_some();
+        }
+    }
+    if cfg.platform.kind == Platform::Tenhou {
+        if let Some(capture) = document
+            .get_mut("capture")
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            if capture.get("url").and_then(toml_edit::Item::as_str) == Some("https://tenhou.net/4/")
+            {
+                capture.insert("url", toml_edit::value(&cfg.capture.url));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        std::fs::write(path, document.to_string()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Move the old shared settings once; runtime code never reads a site-named
+/// alias. Preserve comments, unknown fields and all explicit user values.
+fn migrate_input_config(body: &str) -> Result<String, String> {
+    let mut document = body
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| e.to_string())?;
+    if let Some(autoplay) = document
+        .get_mut("autoplay")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        if autoplay.contains_key("majsoul") {
+            if autoplay.contains_key("input") {
+                return Err("config has both autoplay.majsoul and autoplay.input; refusing ambiguous input settings".into());
+            }
+            let input = autoplay.remove("majsoul").expect("checked key");
+            autoplay.insert("input", input);
+        }
+    }
+    Ok(document.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn shared_input_migration_preserves_values_and_is_idempotent() {
+        let old = "# custom settings\n[autoplay.majsoul]\nclick_retries = 7\nhover_delay_ms = 123\nprivate_note = 'preserve'\n";
+        let migrated = migrate_input_config(old).unwrap();
+        let config: AppConfig = toml::from_str(&migrated).unwrap();
+        assert_eq!(config.autoplay.input.click_retries, 7);
+        assert_eq!(config.autoplay.input.hover_delay_ms, 123);
+        assert!(migrated.contains("# custom settings"));
+        assert!(migrated.contains("private_note"));
+        assert!(!migrated.contains("autoplay.majsoul"));
+        assert_eq!(migrated, migrate_input_config(&migrated).unwrap());
+        assert!(migrate_input_config("[autoplay.majsoul]\n[autoplay.input]\n").is_err());
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let mut d = std::env::temp_dir();
@@ -93,6 +174,31 @@ mod tests {
         d.push(format!("akagi-cfg-{tag}-{pid}-{nanos}"));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn retired_controls_and_old_tenhou_entry_migrate_without_copying_account_settings() {
+        let dir = temp_dir("retired-controls");
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "# user comment\n[platform]\nkind='Tenhou'\n[capture]\nurl='https://tenhou.net/4/'\n[monitor]\nstream_output=true\nstream_port=12345\nstream_token='old-secret'\nalways_on_top=false\nquick_confirm=true\n[private]\nkeep='my-value'\n").unwrap();
+        let loaded = load_config(&file);
+        assert_eq!(loaded.capture.url, "https://tenhou.net/3/");
+        assert!(loaded.monitor.quick_confirm);
+        let migrated = std::fs::read_to_string(&file).unwrap();
+        assert!(migrated.contains("# user comment"));
+        assert!(migrated.contains("my-value"));
+        for retired in [
+            "stream_output",
+            "stream_port",
+            "stream_token",
+            "always_on_top",
+            "old-secret",
+        ] {
+            assert!(!migrated.contains(retired));
+        }
+        let _ = load_config(&file);
+        assert_eq!(migrated, std::fs::read_to_string(&file).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -165,15 +271,15 @@ mod tests {
         let target = dir.join("config.toml");
         std::fs::write(
             &target,
-            "[monitor]\nalways_on_top = true\n\n[overlay]\nenabled = true\n",
+            "[monitor]\nquick_confirm = true\n\n[overlay]\nenabled = true\n",
         )
         .unwrap();
 
         let cfg = load_config(&target);
-        assert!(cfg.monitor.always_on_top);
+        assert!(cfg.monitor.quick_confirm);
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
-            "[monitor]\nalways_on_top = true\n\n[overlay]\nenabled = true\n",
+            "[monitor]\nquick_confirm = true\n\n[overlay]\nenabled = true\n",
             "loading leaves the file as it is"
         );
 

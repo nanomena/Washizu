@@ -3,6 +3,22 @@
 Runs mjai-protocol AI bots and routes `MjaiEvent`s from the platform
 bridge to them. 
 
+## Unavailable decisions
+
+A reply with `meta.unavailable` set to a reason string means the model cannot
+decide, for example after synchronization loss or a transport failure. The
+manager records it for inspection/monitoring but never publishes it to the
+autoplay response bus, including incomplete riichi replies. The marker is
+part of the reply, so gating does not race the independent stderr notification
+pump. The bot must mark every unavailable reply until it can decide again;
+notifications still describe the fault to the user.
+
+An ordinary `none` continues to mean a considered decline when asked at a
+decision window; a `none` with `meta.show` is a displayed model PASS. Neither
+is suppressed by this contract. Hand-boundary `none` remains withheld as before.
+The monitor retains unresolved sync faults across new deals/reconnects; an
+actionable model reply or displayed PASS in a valid hand confirms recovery.
+
 ## Submodules
 
 - `types` — `BotResponse`. Wire shape matches mjai.app: an mjai action
@@ -69,9 +85,9 @@ bridge to them.
   `REACT_TIMEOUT` because it blocks the bot's turn. Building an `ApiClient`
   builds a fresh connection pool, so hold one and reuse it. Consumed by
   `NativeBot` while cloud inference is on (`[bot.api]`).
-- `service` — `service::run`: the resident process a bot may declare in its
+- `service` — `service::start`: the resident process a bot may declare in its
   manifest (`[service]`), run for as long as the app is open. See
-  [A bot's service](#a-bots-service).
+  [A bot's service](#a-bots-service) and [shutdown ownership](SERVICE-LIFETIME.md).
 - `supervisor` — `run_bot_manager`: constructs the `BotManager` and drives
   its run loop off the `PostTrackerBus`. Tolerates a missing Python runtime
   — the built-in `native` bots need none.
@@ -415,3 +431,50 @@ without the legacy field on the next persist.
   bot script loads them itself.
 - Anything drawn. `BotResponse`s land on the broadcast bus and in the
   monitor snapshot; the interface (`frontend/`) draws them.
+
+## Positioned primary recovery
+
+A bot declaring `[bot] protocol = "positioned_mjai"` uses the single recovery
+coordinator when the runtime monitor and bridge clock are available. It must
+supply `meta.delivery.through` on every stdout answer. The coordinator owns one
+confirmed journal, independent primary/local workers and one source selection
+per real input window. Plain `mjai` remains the default active protocol.
+See [recovery design](RECOVERY.md), [shared control contract](CONTROL.md), and
+[offline qualification](RECOVERY-TESTS.md). Matching relay/server and core changes
+must be installed together; source changes alone are not a deployment.
+
+Direct Native/API and plain MJAI responses now carry the same core-owned
+original request as positioned responses. Direct `delivered` is separate from
+positioned acknowledged `through`; unavailable direct responses never report
+ready. Incomplete executable riichi is withheld, without speculative feeding
+or suppressing its later real echo.
+
+## Optional forecast channel
+
+A positioned bot can declare `[forecast] entry = "forecast.py"`. This lightweight
+JSONL relay uses the bot's existing Python environment and resolved settings;
+it connects to the existing model service, without creating a second model.
+Formal event requests never compute forecasts. Their replies may reference a
+committed snapshot in `meta.forecast = {session, through, position}`, where
+`through` must equal the validated `meta.delivery.through` and the actual
+delivered prefix. `session` is an opaque reference owned by the formal connection.
+
+The separate relay receives `{session, through, position}` and returns
+`{type:"forecast", session, through, position, status:"ready"|"obsolete"|"unavailable",
+lean?:{lines, options}, reason?:string}`. The core checks the result against its
+original request before considering it. There is one request in flight and
+only the latest pending snapshot. Every real context change immediately revokes
+the old result; old stdout is consumed without rebinding it to a new request.
+
+The managed bot owns this relay. Its close cancels pending work and reaps only
+its child. Formal recovery revokes old session references; optional transport
+failures never reset the formal runner or alter decision-source health. Forecasts
+only supply pointer looks, with context/owner checks at receipt and execution.
+Runners without this channel report unsupported instead of peeking on the formal
+pipe. `bot::forecast::subscribe_status()` exposes the separate serializable
+`ForecastStatus` (`disabled`, `unsupported`, `waiting`, `running`, `ready`, or
+`unavailable`); opaque sessions stay out of this public status.
+After a committed action, `meta.forecast_error` reports snapshot capture failure
+only. The core consumes this internal field into forecast status/notification,
+preserving the formal receipt, action and health. Wire identities and status
+payloads reject unknown fields; unavailable results require an explicit reason.

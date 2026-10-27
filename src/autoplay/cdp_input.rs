@@ -11,7 +11,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::Page;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -21,6 +21,11 @@ use tokio::sync::broadcast;
 /// both kinds of input, and a press of ours made while the user's mouse moves
 /// can be read by the client as part of the user's drag, and come to nothing.
 static USER_HAND: AtomicBool = AtomicBool::new(false);
+static USER_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub fn user_revision() -> u64 {
+    USER_REVISION.load(Ordering::SeqCst)
+}
 
 /// Until when a hand that has come to rest still counts as on the mouse:
 /// autoplay has the pointer back a while after the user stops, a while of its
@@ -29,6 +34,9 @@ static RESTING_UNTIL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::
 
 /// The shell's word on the user's mouse: moving over the game, or come to rest.
 pub fn set_user_active(active: bool) {
+    if active && !USER_HAND.load(Ordering::Relaxed) {
+        USER_REVISION.fetch_add(1, Ordering::SeqCst);
+    }
     let until = (!active).then(|| {
         let wait = crate::autoplay::humanize::HAND_BACK.draw_ms(&mut rand::rng());
         std::time::Instant::now() + Duration::from_millis(u64::from(wait))
@@ -76,23 +84,6 @@ pub fn take_user_left_pointer() -> Option<(f64, f64)> {
 /// The next mark starts a fresh stretch of the path (see [`PointerMark::fresh`]).
 static FRESH: AtomicBool = AtomicBool::new(false);
 
-/// Wait, up to `humanize::USER_WAIT_MS`, for the user's mouse to rest or leave the game.
-/// After that the press goes ahead: a turn's clock does not wait.
-async fn wait_for_user_hand() {
-    if !user_active() {
-        return;
-    }
-    let started = tokio::time::Instant::now();
-    let most = Duration::from_millis(crate::autoplay::humanize::USER_WAIT_MS);
-    while user_active() && started.elapsed() < most {
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-    tracing::info!(
-        "autoplay: waited {} ms for the user's mouse to rest before pressing",
-        started.elapsed().as_millis()
-    );
-}
-
 /// Where the pointer autoplay drives is, in the page's CSS pixels, and whether
 /// it is pressed. The page shows no cursor for input sent over CDP; these are
 /// for whoever wants to draw one.
@@ -127,6 +118,9 @@ fn mark(x: f64, y: f64, down: bool) {
 /// Put the pointer at `(x, y)` in one step: one frame of a move made a frame
 /// at a time (`autoplay::pointer::queue`).
 pub async fn step_to(page: &Page, x: f64, y: f64) -> Result<()> {
+    if user_active() {
+        return Err(anyhow!("manual pointer ownership"));
+    }
     move_to(page, x, y).await
 }
 
@@ -176,7 +170,34 @@ pub async fn dispatch_click_shaped(
     click_hold_ms: u32,
     jiggle: bool,
 ) -> Result<()> {
-    let pt = Point::new(x, y);
+    dispatch_click_guarded(
+        page,
+        x,
+        y,
+        hover_delay_ms,
+        click_hold_ms,
+        jiggle,
+        |_| async { true },
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Check the current page after travel, user wait and hover, immediately
+/// before mouse-down. A rejected check sends no button events.
+pub async fn dispatch_click_guarded<F, Fut>(
+    page: &Page,
+    x: f64,
+    y: f64,
+    hover_delay_ms: u32,
+    click_hold_ms: u32,
+    jiggle: bool,
+    check: F,
+) -> Result<bool>
+where
+    F: FnOnce(Page) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     // About the configured times, each press its own: mostly near them, now and then longer.
     let (hover_delay_ms, click_hold_ms) = {
         use crate::autoplay::humanize::{HOLD, HOVER};
@@ -186,58 +207,114 @@ pub async fn dispatch_click_shaped(
             HOLD.draw_ms(click_hold_ms, &mut rng),
         )
     };
-    wait_for_user_hand().await;
-    move_to(page, x, y).await?;
+    if user_active() {
+        return Ok(false);
+    }
+    guarded_mouse_sequence(
+        &mut PageMouse(page),
+        (x, y),
+        hover_delay_ms,
+        click_hold_ms,
+        jiggle,
+        || check(page.clone()),
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseEvent {
+    Move,
+    Down,
+    Up,
+}
+
+#[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // async_trait adds this attribute to boxed futures.
+pub(crate) trait MouseSink: Send {
+    async fn send(&mut self, event: MouseEvent, point: (f64, f64)) -> Result<()>;
+}
+
+struct PageMouse<'a>(&'a Page);
+
+#[async_trait::async_trait]
+impl MouseSink for PageMouse<'_> {
+    async fn send(&mut self, event: MouseEvent, (x, y): (f64, f64)) -> Result<()> {
+        if event == MouseEvent::Move {
+            return step_to(self.0, x, y).await;
+        }
+        let ty = match event {
+            MouseEvent::Down => DispatchMouseEventType::MousePressed,
+            MouseEvent::Up => DispatchMouseEventType::MouseReleased,
+            MouseEvent::Move => unreachable!(),
+        };
+        let params = DispatchMouseEventParams::builder()
+            .r#type(ty)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(|e| anyhow!("build mouse event: {e}"))?;
+        self.0.execute(params).await.context("CDP mouse button")?;
+        mark(x, y, event == MouseEvent::Down);
+        Ok(())
+    }
+}
+
+/// Production and isolated tests share the full move/hover/final-check/
+/// down/hold/up boundary. A refused check cannot emit either button event.
+pub(crate) async fn guarded_mouse_sequence<S, F, Fut>(
+    sink: &mut S,
+    point: (f64, f64),
+    hover_delay_ms: u32,
+    click_hold_ms: u32,
+    jiggle: bool,
+    check: F,
+) -> Result<bool>
+where
+    S: MouseSink,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    sink.send(MouseEvent::Move, point).await?;
     if hover_delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(hover_delay_ms as u64)).await;
     }
-
-    let press = DispatchMouseEventParams::builder()
-        .r#type(DispatchMouseEventType::MousePressed)
-        .x(pt.x)
-        .y(pt.y)
-        .button(MouseButton::Left)
-        .click_count(1)
-        .build()
-        .map_err(|e| anyhow!("build mousePressed: {e}"))?;
-    page.execute(press).await.context("CDP mousePressed")?;
-    mark(x, y, true);
-
-    if jiggle {
-        // Split the hold around the nudge so its total stays what the
-        // config says. The move is one CSS pixel — enough for the engine
-        // to resample the cursor while the button is down, not enough to
-        // leave the control.
-        let half = u64::from(click_hold_ms) / 2;
-        if half > 0 {
-            tokio::time::sleep(Duration::from_millis(half)).await;
-        }
-        page.move_mouse(Point::new(x + 1.0, y))
-            .await
-            .context("CDP move_mouse (jiggle out)")?;
-        page.move_mouse(pt)
-            .await
-            .context("CDP move_mouse (jiggle back)")?;
-        let rest = u64::from(click_hold_ms) - half;
-        if rest > 0 {
-            tokio::time::sleep(Duration::from_millis(rest)).await;
-        }
-    } else if click_hold_ms > 0 {
-        tokio::time::sleep(Duration::from_millis(click_hold_ms as u64)).await;
+    if !check().await {
+        return Ok(false);
     }
-
-    let release = DispatchMouseEventParams::builder()
-        .r#type(DispatchMouseEventType::MouseReleased)
-        .x(pt.x)
-        .y(pt.y)
-        .button(MouseButton::Left)
-        .click_count(1)
-        .build()
-        .map_err(|e| anyhow!("build mouseReleased: {e}"))?;
-    page.execute(release).await.context("CDP mouseReleased")?;
-    mark(x, y, false);
-
-    Ok(())
+    if let Err(e) = sink.send(MouseEvent::Down, point).await {
+        let _ = sink.send(MouseEvent::Up, point).await;
+        return Err(e);
+    }
+    let held: Result<()> = async {
+        if jiggle {
+            // Split the hold around the nudge so its total stays what the
+            // config says. The move is one CSS pixel — enough for the engine
+            // to resample the cursor while the button is down, not enough to
+            // leave the control.
+            let half = u64::from(click_hold_ms) / 2;
+            if half > 0 {
+                tokio::time::sleep(Duration::from_millis(half)).await;
+            }
+            sink.send(MouseEvent::Move, (point.0 + 1.0, point.1))
+                .await?;
+            sink.send(MouseEvent::Move, point).await?;
+            let rest = u64::from(click_hold_ms) - half;
+            if rest > 0 {
+                tokio::time::sleep(Duration::from_millis(rest)).await;
+            }
+        } else if click_hold_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(click_hold_ms as u64)).await;
+        }
+        Ok(())
+    }
+    .await;
+    // A transport error during a held jiggle must still release the button.
+    let released = sink.send(MouseEvent::Up, point).await;
+    held?;
+    released?;
+    Ok(true)
 }
 
 /// Move the pointer from `from` to `to` (CSS pixels) over `duration_ms`,
@@ -264,12 +341,12 @@ pub async fn travel(
         }
         let t = elapsed.as_secs_f64() / total.as_secs_f64();
         let (x, y) = crate::autoplay::pointer::along(from, to, bend, t);
-        move_to(page, x, y).await?;
+        step_to(page, x, y).await?;
         // About a display frame between steps, as a real mouse's events come: never quite even.
         let frame = Duration::from_millis(crate::autoplay::humanize::frame_ms(&mut rand::rng()));
         tokio::time::sleep(frame.min(total.saturating_sub(started.elapsed()))).await;
     }
-    move_to(page, to.0, to.1).await
+    step_to(page, to.0, to.1).await
 }
 
 /// Read the game canvas's `getBoundingClientRect()` via `Runtime.evaluate`.
@@ -302,143 +379,7 @@ pub async fn evaluate_canvas_rect(page: &Page) -> Result<CanvasRect> {
     Ok(rect)
 }
 
-// ============================================================================
-// Tenhou actuation
-// ============================================================================
-//
-// Tenhou's client owns its board state: when you discard, its own handler
-// updates the board *and* sends the frame, and its receive path then
-// deliberately ignores the server's echo of that discard
-// (`1==U.a && "D"==c.tag || Nb.cb(c)`) because it has already applied it.
-// Writing the frame onto the socket behind the client's back therefore
-// freezes the board — the local apply never happened and the echo is
-// skipped. Everything here exists to drive the client's *own* input path
-// instead, so its state machine stays in step.
-//
-// Two routes, because the client has two:
-//
-// - Buttons (chi/pon/kan/riichi/ron/tsumo/kyuushu/kita/pass) are real DOM
-//   elements carrying `class="s7" name="c22-<slot>"`, routed by a
-//   body-level click listener into the client's own handler. A dispatched
-//   click is indistinguishable from the user's.
-// - The discard is a canvas hit-test with no DOM element, so it needs a
-//   pixel position — see [`probe_hand_geometry`].
-
-/// Slots in the client's action menu. The client builds this menu itself
-/// from the server's `t` bitmask, and the slot number *is* the meaning.
-pub mod menu {
-    pub const TSUMO_AGARI: u8 = 0;
-    pub const RON: u8 = 1;
-    pub const RIICHI: u8 = 2;
-    pub const KYUUSHU: u8 = 3;
-    pub const PASS: u8 = 4;
-    /// 5..=9 — kita (sanma), one per distinct North the client offers.
-    pub const KITA_FIRST: u8 = 5;
-    /// 10..=12 — ankan / kakan candidates.
-    pub const KAN_FIRST: u8 = 10;
-    pub const DAIMINKAN: u8 = 13;
-    /// The pon, spending the red five if the hand holds one. Always drawn
-    /// when a pon is on offer — the client's builder writes it for all three
-    /// shapes of holding (two plain copies, red + plain, or the red of a
-    /// three-copy set).
-    pub const PON: u8 = 15;
-    /// The pon that *keeps* the red five out of the meld, drawn only when
-    /// there is a choice to make: exactly one red copy and two plain ones.
-    /// It holds the two plain copies.
-    pub const PON_KEEP_RED: u8 = 14;
-    /// 16..=21 — chi, in pairs running called-tile-lowest, -middle,
-    /// -highest. The odd slot of each pair spends no red five; the even one
-    /// below it does. Unlike pon, either can be drawn without the other:
-    /// which exist is decided per shape by which copies the hand holds.
-    pub const CHI_FIRST: u8 = 16;
-}
-
-/// CSS selector for one action button.
-pub fn action_button_selector(slot: u8) -> String {
-    format!(r#"button.s7[name="c22-{slot}"]"#)
-}
-
-/// Which action buttons the client is currently showing, in document order.
-///
-/// The client rebuilds this set on every decision window, so it is the
-/// authoritative list of what may be pressed right now — better than
-/// re-deriving the menu from the `t` bitmask and hoping the two agree.
-///
-/// Left in the client's own order rather than sorted: it renders highest slot
-/// first, and seeing that in a log is what tells you a selector list was
-/// resolved the wrong way round.
-pub async fn list_action_buttons(page: &Page) -> Result<Vec<u8>> {
-    let expr = "(()=>Array.from(document.querySelectorAll('button.s7[name^=\"c22-\"]'))\
-                .map(b=>parseInt(b.getAttribute('name').slice(4),10))\
-                .filter(n=>!isNaN(n)))()";
-    let result = page
-        .evaluate(expr)
-        .await
-        .context("CDP evaluate action button list")?;
-    let value = result
-        .value()
-        .cloned()
-        .unwrap_or(serde_json::Value::Array(vec![]));
-    Ok(serde_json::from_value::<Vec<u8>>(value).unwrap_or_default())
-}
-
-/// Dispatch a real click on the first of `selectors` the page actually has.
-///
-/// The list is a *preference* order, and it has to be honoured as one: the
-/// client appends its buttons in **descending** slot number
-/// (`Object.keys(k).sort((a,n)=>n-a)`), so a single comma-joined selector
-/// would resolve through `querySelector`'s document order and hand back the
-/// highest-numbered match — the opposite of what a caller listing
-/// "this one, or that one" means.
-///
-/// Returns `Ok(false)` when none match — the window closed while we were
-/// thinking, or the client never offered any of them. Callers report that as
-/// a skipped action rather than pressing something else.
-pub async fn click_dom(page: &Page, selectors: &[String]) -> Result<bool> {
-    let literal = serde_json::to_string(selectors).context("encode selectors as JS literal")?;
-    let expr = format!(
-        "(()=>{{for(const s of {literal}){{const e=document.querySelector(s);\
-          if(e){{e.click();return true;}}}}return false;}})()"
-    );
-    let result = page
-        .evaluate(expr)
-        .await
-        .context("CDP evaluate DOM click")?;
-    Ok(result.value().and_then(|v| v.as_bool()).unwrap_or(false))
-}
-
-/// Is the client taking input yet?
-///
-/// The client's turn clock and its highlight box are raised by the same call
-/// (`Ub.O`), at the end of the animation for whatever opened the window — so
-/// the box appearing *is* "animation finished, clock started". Frame arrival
-/// is not: the server can deliver several seats' actions at once and the
-/// client will spend seconds animating them.
-pub async fn turn_clock_running(page: &Page) -> Result<bool> {
-    let expr = "(()=>{for(const d of document.querySelectorAll('div')){\
-        const s=d.style; if(s.position!=='fixed'||s.display==='none')continue;\
-        const c=d.firstElementChild;\
-        if(!c||!c.classList||!c.classList.contains('ts2'))continue;\
-        const r=d.getBoundingClientRect();\
-        if(r.width>0&&r.height>0)return true;}\
-      return false;})()";
-    let result = page
-        .evaluate(expr)
-        .await
-        .context("CDP evaluate turn clock probe")?;
-    Ok(result.value().and_then(|v| v.as_bool()).unwrap_or(false))
-}
-
-/// Discard `tile_index` through the client's own handler.
-///
-/// `Ok(false)` means the client script was never instrumented, so the handler
-/// is not reachable — reported as a skipped action rather than fumbled into a
-/// click at a guessed position.
-pub async fn discard_tile(page: &Page, tile_index: u32) -> Result<bool> {
-    let expr = crate::autoplay::tenhou::inject::discard_expression(tile_index);
-    let result = page.evaluate(expr).await.context("CDP evaluate discard")?;
-    Ok(result.value().and_then(|v| v.as_str()) == Some("ok"))
-}
+pub(crate) use crate::autoplay::tenhou::client::{observe_tenhou_ui, press_tenhou_ui};
 
 #[cfg(test)]
 mod user_left_tests {
@@ -473,29 +414,5 @@ mod user_left_tests {
             left >= Duration::from_millis(450) && left <= Duration::from_millis(1000),
             "{left:?}"
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selector_names_the_menu_slot() {
-        assert_eq!(
-            action_button_selector(menu::PASS),
-            r#"button.s7[name="c22-4"]"#
-        );
-        assert_eq!(
-            action_button_selector(menu::RIICHI),
-            r#"button.s7[name="c22-2"]"#
-        );
-    }
-
-    /// A selector containing quotes must not break out of the JS literal.
-    #[test]
-    fn selector_is_escaped_into_the_expression() {
-        let literal = serde_json::to_string(r#"button.s7[name="c22-4"]"#).unwrap();
-        assert!(literal.contains(r#"\"c22-4\""#));
     }
 }

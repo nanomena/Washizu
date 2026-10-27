@@ -21,8 +21,22 @@
 
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LobbyPhase {
+    #[default]
+    Unknown,
+    Matching,
+    WaitingStart,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LobbyObservation {
+    pub sequence: u64,
+    pub phase: LobbyPhase,
+}
 
 /// What an input command was, to the extent autoplay needs to tell them
 /// apart.
@@ -57,12 +71,18 @@ pub enum InputKind {
 /// Counts input commands the client has sent, by kind.
 #[derive(Debug, Default)]
 pub struct InputWatch {
+    /// Real new-game/round/restore boundaries, available even while the UI
+    /// executor is awaiting CDP and its mjai receiver has not drained yet.
+    ui_table: AtomicU64,
     sent: AtomicU64,
     reach: AtomicU64,
     non_discard: AtomicU64,
     /// How many hands' results the client has confirmed (`confirmNewRound`):
     /// one more means the result is gone from the screen.
     confirmed: AtomicU64,
+    /// Successful match/cancel/leave responses, including manual requests.
+    /// One typed observation replaces the former matching-only counter.
+    lobby: Mutex<LobbyObservation>,
 }
 
 /// A snapshot of the counts, taken before a click.
@@ -74,6 +94,24 @@ pub struct InputTicket {
 }
 
 impl InputWatch {
+    pub fn reset_ui_table(&self) {
+        self.ui_table.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn ui_table(&self) -> u64 {
+        self.ui_table.load(Ordering::SeqCst)
+    }
+
+    pub fn note_lobby(&self, phase: LobbyPhase) {
+        let mut lobby = self.lobby.lock().expect("lobby observation poisoned");
+        lobby.sequence += 1;
+        lobby.phase = phase;
+    }
+
+    pub fn lobby(&self) -> LobbyObservation {
+        *self.lobby.lock().expect("lobby observation poisoned")
+    }
+
     /// The bridge saw the client send an input command.
     pub fn note_sent(&self, kind: InputKind) {
         self.sent.fetch_add(1, Ordering::Relaxed);
@@ -124,9 +162,9 @@ impl InputWatch {
 }
 
 /// Shared between the bridge (which counts) and the autoplay manager
-/// (which checks). `Relaxed` ordering throughout: the only thing that
-/// matters is that the count eventually differs, and every observation is
-/// separated from the write by a real timer wait.
+/// (which checks). Input counters use relaxed atomics; lifecycle generations
+/// use sequential ordering and lobby observations are one coherent mutex
+/// snapshot for the final mouse-down check.
 pub type SharedInputWatch = Arc<InputWatch>;
 
 #[cfg(test)]

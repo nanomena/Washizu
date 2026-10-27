@@ -266,6 +266,7 @@ pub async fn run(
                 let mut guard = ctx.page.write().await;
                 let owner = guard.as_ref().map(|p| p.target_id().inner().clone());
                 if page_handle_cleared_by_removal(owner.as_deref(), &removes) {
+                    ctx.invalidate_ui();
                     *guard = None;
                     drop(guard);
                     *ctx.canvas_rect.write().await = None;
@@ -332,9 +333,9 @@ pub async fn run(
 
 /// URL of the script that carries the Tenhou client.
 ///
-/// Versioned (`/4/1141.js`, reached through a redirect from `latest.js`), so
+/// Versioned (`/3/1911.js`, reached through a redirect from `latest.js`), so
 /// the pattern matches by shape rather than by version.
-const TENHOU_CLIENT_URL_PATTERN: &str = "*tenhou.net/4/*.js";
+const TENHOU_CLIENT_URL_PATTERN: &str = "*tenhou.net/3/*.js";
 
 /// Ask the browser to hand us the Tenhou client script before the page runs
 /// it, so it can be rewritten to expose its handler registry.
@@ -368,11 +369,7 @@ async fn enable_script_rewrite(page: &Page) -> Result<()> {
 async fn reload_if_uninstrumented(page: &Page) -> Result<()> {
     use chromiumoxide::cdp::browser_protocol::page::ReloadParams;
 
-    let expr = format!(
-        "(()=>{{try{{return !!window.{} || !/tenhou\\.net/.test(location.host);}}\
-          catch(e){{return true}}}})()",
-        crate::autoplay::tenhou::inject::EXPORT_GLOBAL
-    );
+    let expr = "(()=>{try{const api=window.__akagiTenhou;return !/tenhou\\.net/.test(location.host)||(api?.client==='web3'&&['readInput','probeTarget','readUi','pressUi'].every(key=>typeof api[key]==='function'));}catch(e){return false}})()";
     let done = page
         .evaluate(expr)
         .await
@@ -400,7 +397,7 @@ async fn rewrite_paused_script(
     request_id: chromiumoxide::cdp::browser_protocol::fetch::RequestId,
     url: &str,
 ) {
-    use crate::autoplay::tenhou::inject;
+    use crate::autoplay::tenhou::web3_rewrite as inject;
     use chromiumoxide::cdp::browser_protocol::fetch::{
         ContinueRequestParams, FulfillRequestParams, GetResponseBodyParams,
     };
@@ -438,7 +435,7 @@ async fn rewrite_paused_script(
         Some(Ok(js)) => Some(js),
         // Not the client at all — the URL pattern matches its neighbours
         // too (`inflate_min.js`, the `latest.js` redirect). Nothing to say.
-        Some(Err(inject::InjectError::NoDiscardHandler)) => {
+        Some(Err(inject::RewriteError::NotClient)) => {
             debug!("CDP: {url} is not the Tenhou client; passing through");
             None
         }
@@ -596,6 +593,7 @@ async fn attach_page(
                             let prev_target =
                                 guard.as_ref().map(|p| p.target_id().inner().clone());
                             let same_tab = prev_target.as_deref() == Some(target_id.as_str());
+                            if !same_tab { ctx.invalidate_ui(); }
                             *guard = Some(page.clone());
                             drop(guard);
                             if same_tab {
@@ -655,7 +653,7 @@ async fn attach_page(
                         &ev.response.payload_data,
                         &result,
                     );
-                    for e in result.events {
+                    for e in result.into_captured() {
                         let _ = mjai_bus.send(e);
                     }
                 }
@@ -688,7 +686,7 @@ async fn attach_page(
                         &ev.response.payload_data,
                         &result,
                     );
-                    for e in result.events {
+                    for e in result.into_captured() {
                         let _ = mjai_bus.send(e);
                     }
                 }

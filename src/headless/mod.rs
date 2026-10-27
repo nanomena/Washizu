@@ -23,29 +23,37 @@
 //! | `get_monitor`          | —                        | `MonitorSnapshot` |
 //! | `get_hand_events`      | `{round}`                | `[MonitorEvent]`  |
 //! | `get_history`          | —                        | `[GameRecord]`    |
-//! | `set_monitor_pinned`   | `{pinned}`               | `MonitorConfig`   |
 //! | `set_monitor_trail`    | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_lean`     | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_confirm`  | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_auto_win` | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_continue` | `{enabled}`              | `MonitorConfig`   |
-//! | `set_monitor_stream`   | `{enabled, port, token}` | `MonitorConfig`   |
 //! | `set_user_pointer`     | `{active, x?, y?}`       | `null`            |
 //! | `set_monitor_autoplay` | `{enabled}`              | `null`            |
 //! | `open_game`            | `{port, target}`         | `null`            |
 //!
 //! | Event             | Payload                                              |
 //! |-------------------|------------------------------------------------------|
-//! | `ready`           | `{brand, monitor, version}` — the first line written |
+//! | `ready`           | `{brand, platform, monitor, version}` — the first line written |
 //! | `monitor-updated` | `MonitorSnapshot`                                    |
 //! | `pointer`         | `{x, y, down}` — autoplay's pointer, while the trail is on |
+//! | `shutdown-complete` | `{ok, error}` — terminal, flushed only after owned service cleanup |
+//!
+//! `MonitorSnapshot.forecast` is the optional pointer prediction's own status:
+//! `{owner, state, ...}`. `state` is disabled, unsupported, waiting, running,
+//! ready or unavailable. Running/ready carry `{context, through, position}`;
+//! unsupported/unavailable carry `reason`. Private session references never
+//! enter this DTO. This field changes neither decision source nor primary
+//! health. It uses the existing snapshot revision and `monitor-updated` stream;
+//! `set_monitor_lean` remains the single setting for this feature.
 //!
 //! # Lifetime
 //!
 //! The core lives as long as its stdin is open. The shell holds the other end
 //! and never has to remember to stop anything: when it goes, for whatever
-//! reason, the core stops capture and exits, and the bot's processes — which
-//! hang on the core in the same way — follow.
+//! reason, the core stops capture, cancels and reaps its resident service,
+//! flushes `shutdown-complete`, and exits. Missing or failed cleanup must keep
+//! the shell's account ownership held. See `bot/SERVICE-LIFETIME.md`.
 
 use crate::capture::cdp::EmbeddedPage;
 use crate::capture::embedded::{self, EmbeddedGame};
@@ -62,13 +70,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "akagi-core",
-    about = "Akagi's core, for a desktop shell to run"
+    about = "Washizu's core, for a desktop shell to run"
 )]
 struct Cli {
     /// The folder everything is kept in: `config.toml`, and the bots, logs and
@@ -91,6 +99,7 @@ struct Request {
 struct Ready {
     /// The name the window goes by.
     brand: String,
+    platform: Platform,
     monitor: MonitorConfig,
     version: &'static str,
 }
@@ -110,11 +119,6 @@ struct UserPointer {
 }
 
 #[derive(Debug, Deserialize)]
-struct Pinned {
-    pinned: bool,
-}
-
-#[derive(Debug, Deserialize)]
 struct Hand {
     round: u64,
 }
@@ -122,30 +126,6 @@ struct Hand {
 #[derive(Debug, Deserialize)]
 struct Enabled {
     enabled: bool,
-}
-
-/// The game offered to a streaming program, and the address the shell serves
-/// it at. The address is kept when the option goes off, so that it is the
-/// same when it comes back on.
-#[derive(Debug, Deserialize)]
-struct Stream {
-    enabled: bool,
-    port: u16,
-    token: String,
-}
-
-impl Stream {
-    /// An address that is on stands on a port of its own and carries a secret
-    /// long enough not to be guessed, made of what a URL's path holds as is.
-    fn check(&self) -> Result<(), String> {
-        let token_ok = self.token.len() >= 16
-            && self.token.len() <= 128
-            && self.token.bytes().all(|b| b.is_ascii_alphanumeric());
-        if self.enabled && (self.port == 0 || !token_ok) {
-            return Err("invalid stream address".into());
-        }
-        Ok(())
-    }
 }
 
 /// Where the shell's game view can be reached.
@@ -216,6 +196,7 @@ async fn serve(
     TRAIL.store(cfg.monitor.pointer_trail, Ordering::Relaxed);
     let ready = Ready {
         brand: monitor::brand(&cfg),
+        platform: cfg.platform.kind,
         monitor: cfg.monitor.clone(),
         version: env!("CARGO_PKG_VERSION"),
     };
@@ -259,7 +240,7 @@ async fn serve(
         mjai_bus.subscribe(),
         state.log_session.inspector(),
     ));
-    if bot_enabled {
+    let service = if bot_enabled {
         // A bot's environment is installed by whichever of the two needs it
         // first, the manager or the service; this keeps them from doing it at once.
         let syncs_in_flight = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
@@ -273,6 +254,7 @@ async fn serve(
             runtime.clone(),
             syncs_in_flight.clone(),
             Some(state.monitor.clone()),
+            state.autoplay_context.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = manager.await {
@@ -281,18 +263,21 @@ async fn serve(
         });
         // The process the active bot needs across games lives and dies with
         // the core.
-        tokio::spawn(bot::service::run(
+        Some(bot::service::start(
             state.config.clone(),
             runtime,
             syncs_in_flight,
             state.monitor.clone(),
-        ));
-    }
+        ))
+    } else {
+        None
+    };
     start_autoplay(&state, autoplay_enabled);
 
     // One writer owns stdout, so a reply and an event never share a line.
     let (out, lines) = mpsc::unbounded_channel::<String>();
-    tokio::spawn(write_lines(lines));
+    let (finish, last_line) = oneshot::channel();
+    let writer = tokio::spawn(write_lines(lines, last_line));
     send(&out, &json!({ "event": "ready", "payload": ready }));
     tokio::spawn(forward_monitor(state.monitor.subscribe(), out.clone()));
     tokio::spawn(forward_pointer(out.clone()));
@@ -325,7 +310,21 @@ async fn serve(
 
     info!("the shell has gone; stopping");
     supervisor::stop_and_wait(&state, LAST_WORDS).await;
-    std::process::exit(0);
+    let cleanup = match service {
+        Some(service) => service.shutdown().await,
+        None => Ok(()),
+    };
+    let ok = cleanup.is_ok();
+    let error = cleanup.err().map(|error| format!("{error:#}"));
+    if let Some(error) = &error {
+        error!(%error, "account service cleanup failed");
+    }
+    // The terminal line is flushed by the same stdout owner as every reply.
+    // A core crash or a missing acknowledgement must not release an account.
+    let _ = finish
+        .send(json!({ "event": "shutdown-complete", "payload": { "ok": ok, "error": error } }));
+    let _ = tokio::time::timeout(Duration::from_millis(500), writer).await;
+    std::process::exit(if ok { 0 } else { 1 });
 }
 
 /// Answer one request. An `Err` is a message the shell's interface shows as is.
@@ -340,13 +339,6 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
                 .monitor
                 .hand_events(round)
                 .map_or_else(|| Err(format!("this game has no hand {round}")), reply)
-        }
-        "set_monitor_pinned" => {
-            let Pinned { pinned } = parse(params)?;
-            let config = state
-                .save_config(|c| c.monitor.always_on_top = pinned)
-                .await?;
-            reply(config.monitor)
         }
         "set_monitor_trail" => {
             let Enabled { enabled } = parse(params)?;
@@ -395,18 +387,6 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
                 .await?;
             reply(config.monitor)
         }
-        "set_monitor_stream" => {
-            let stream: Stream = parse(params)?;
-            stream.check()?;
-            let config = state
-                .save_config(|c| {
-                    c.monitor.stream_output = stream.enabled;
-                    c.monitor.stream_port = stream.port;
-                    c.monitor.stream_token = stream.token;
-                })
-                .await?;
-            reply(config.monitor)
-        }
         "set_monitor_autoplay" => {
             let Enabled { enabled } = parse(params)?;
             state.save_config(|c| c.autoplay.enabled = enabled).await?;
@@ -434,10 +414,7 @@ fn reply<T: Serialize>(value: T) -> Result<Value, String> {
 /// the game. Asked again — the shell made a new view — capture moves over.
 async fn open_game(state: &AppState, game: Game) -> Result<(), String> {
     let config = state.config.read().await.clone();
-    if config.platform.kind != Platform::Majsoul {
-        return Err("内置雀魂需要雀魂平台。".into());
-    }
-    let url = embedded::game_url(&config.capture.url)?;
+    let url = embedded::game_url(config.platform.kind, &config.capture.url)?;
     let endpoint = embedded::discover_endpoint(game.port)
         .await
         .map_err(|e| format!("{e:#}"))?;
@@ -483,6 +460,7 @@ fn start_autoplay(state: &AppState, enabled: bool) {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default(),
+        state.monitor.clone(),
     );
     tokio::spawn(async move {
         if let Err(e) = manager.await {
@@ -496,6 +474,11 @@ fn start_autoplay(state: &AppState, enabled: bool) {
 /// core has to say and with the player's own ranks, and the capture control's
 /// copy of its status with it.
 fn mirror_statuses(state: &AppState) {
+    mirror_forecast(
+        crate::bot::forecast::subscribe_status(),
+        state.monitor.clone(),
+    );
+
     let mut bots = state.bot_status_bus.subscribe();
     let monitor = state.monitor.clone();
     tokio::spawn(async move {
@@ -550,17 +533,33 @@ fn mirror_statuses(state: &AppState) {
     });
 }
 
+/// Subscribe before the bot manager starts. Seed synchronously, then copy only
+/// the producer's latest value; never hold a watch borrow across an await.
+fn mirror_forecast(
+    mut statuses: tokio::sync::watch::Receiver<crate::bot::forecast::ForecastStatus>,
+    monitor: crate::monitor::MonitorHandle,
+) {
+    let initial = statuses.borrow_and_update().clone();
+    monitor.set_forecast(initial);
+    tokio::spawn(async move {
+        while statuses.changed().await.is_ok() {
+            let status = statuses.borrow_and_update().clone();
+            monitor.set_forecast(status);
+        }
+    });
+}
+
 /// Mirror every event the bridge emits into the session's inspector timeline,
 /// so frames, events and the bot's reactions read as one record.
 async fn record_events(
-    mut events: broadcast::Receiver<schema::MjaiEvent>,
+    mut events: broadcast::Receiver<event_bus::CapturedEvent>,
     inspector: crate::inspector::InspectorWriter,
 ) {
     loop {
         match events.recv().await {
             Ok(event) => inspector.record(schema::InspectorEntry::MjaiEvent {
                 ts_ms: chrono::Local::now().timestamp_millis(),
-                event,
+                event: event.event,
             }),
             // The timeline is a view; the session's own files hold every event.
             Err(broadcast::error::RecvError::Lagged(_)) => {}
@@ -605,13 +604,24 @@ fn send(out: &mpsc::UnboundedSender<String>, message: &Value) {
     let _ = out.send(message.to_string());
 }
 
-async fn write_lines(mut lines: mpsc::UnboundedReceiver<String>) {
+async fn write_lines(
+    mut lines: mpsc::UnboundedReceiver<String>,
+    mut finish: oneshot::Receiver<Value>,
+) {
     let mut stdout = tokio::io::stdout();
-    while let Some(mut line) = lines.recv().await {
+    loop {
+        let (mut line, last) = tokio::select! {
+            biased;
+            final_line = &mut finish => match final_line { Ok(value) => (value.to_string(), true), Err(_) => return },
+            line = lines.recv() => match line { Some(line) => (line, false), None => return },
+        };
         line.push('\n');
         let written = stdout.write_all(line.as_bytes()).await;
         if written.is_err() || stdout.flush().await.is_err() {
             // Nobody is reading: the shell has gone, and its stdin goes next.
+            return;
+        }
+        if last {
             return;
         }
     }
@@ -620,6 +630,61 @@ async fn write_lines(mut lines: mpsc::UnboundedReceiver<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn forecast_is_seeded_then_forwarded_on_the_existing_snapshot_stream() {
+        use crate::bot::forecast::{ForecastPhase, ForecastStatus};
+        let monitor = crate::monitor::MonitorHandle::default();
+        let initial = ForecastStatus {
+            owner: 12,
+            phase: ForecastPhase::Waiting,
+        };
+        let (statuses, updates) = tokio::sync::watch::channel(initial.clone());
+        mirror_forecast(updates, monitor.clone());
+        // Startup exposes the current worker state before any task is polled.
+        assert_eq!(monitor.snapshot().forecast, initial);
+        let (out, mut lines) = mpsc::unbounded_channel();
+        tokio::spawn(forward_monitor(monitor.subscribe(), out));
+        let context = monitor.snapshot().context;
+        for phase in [
+            ForecastPhase::Running {
+                context,
+                through: 17,
+                position: 4,
+            },
+            ForecastPhase::Ready {
+                context,
+                through: 17,
+                position: 4,
+            },
+            ForecastPhase::Unavailable {
+                reason: "forecast timed out".into(),
+            },
+            ForecastPhase::Unsupported {
+                reason: "protocol lacks forecast".into(),
+            },
+            ForecastPhase::Disabled,
+            ForecastPhase::Idle,
+        ] {
+            let status = ForecastStatus { owner: 12, phase };
+            statuses.send_replace(status.clone());
+            let line = tokio::time::timeout(std::time::Duration::from_secs(1), lines.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let message: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(message["event"], "monitor-updated");
+            assert_eq!(
+                message["payload"],
+                serde_json::to_value(monitor.snapshot()).unwrap()
+            );
+            assert_eq!(
+                message["payload"]["forecast"],
+                serde_json::to_value(status).unwrap()
+            );
+            assert!(!line.contains("session"));
+        }
+    }
 
     #[test]
     fn a_request_needs_no_params() {
@@ -651,9 +716,9 @@ mod tests {
     #[test]
     fn the_ready_line_names_the_window_and_its_options() {
         let ready = Ready {
-            brand: "Akagi".into(),
+            brand: "Washizu".into(),
+            platform: Platform::Majsoul,
             monitor: MonitorConfig {
-                always_on_top: true,
                 quick_confirm: true,
                 ..MonitorConfig::default()
             },
@@ -662,44 +727,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ready).unwrap(),
             json!({
-                "brand": "Akagi",
+                "brand": "Washizu",
+                "platform": "Majsoul",
                 "monitor": {
-                    "always_on_top": true, "pointer_trail": false, "pointer_lean": false,
+                    "pointer_trail": false, "pointer_lean": false,
                     "quick_confirm": true, "auto_win": false, "auto_continue": false,
-                    "stream_output": false, "stream_port": 0, "stream_token": "",
                 },
                 "version": "1.2.3",
             })
         );
-    }
-
-    #[test]
-    fn a_stream_that_is_on_needs_a_port_and_a_secret() {
-        let stream: Stream = parse(
-            json!({ "enabled": true, "port": 50123, "token": "0123456789abcdef0123456789abcdef" }),
-        )
-        .unwrap();
-        assert!(stream.check().is_ok());
-        for (port, token) in [
-            (0, "0123456789abcdef"),
-            (50123, "short"),
-            (50123, "0123456789abcdef/../x"),
-            (50123, ""),
-        ] {
-            let stream = Stream {
-                enabled: true,
-                port,
-                token: token.into(),
-            };
-            assert!(stream.check().is_err(), "{port} {token:?}");
-        }
-        // Off, whatever was kept is kept as it is.
-        let off = Stream {
-            enabled: false,
-            port: 0,
-            token: String::new(),
-        };
-        assert!(off.check().is_ok());
-        assert!(parse::<Stream>(json!({ "enabled": true, "port": 70000, "token": "x" })).is_err());
     }
 }

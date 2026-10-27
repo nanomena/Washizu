@@ -1,6 +1,6 @@
 //! Lua override for the pre-click delay policy.
 //!
-//! Users drop a `delay.lua` next to their config file defining:
+//! A Bot policy or explicit profile override defines:
 //!
 //! ```lua
 //! function decide_delay(ctx)
@@ -26,20 +26,20 @@
 //!   error, timeout, wrong return shape, out-of-range delay) falls back
 //!   to the built-in model and is logged **once** per distinct error,
 //!   not once per hand.
-//! - The result is clamped by [`budget_cap`] and [`functional_floor`] —
+//! - The result is clamped by [`budget_cap`] and [`preferred_floor`] —
 //!   a script can neither overrun the server clock nor click into a
 //!   dealing animation.
 //! - The script never sees or influences the chosen action.
 
-use super::{budget_cap, functional_floor, DelayDecision, DelayInput};
+use super::PolicySource;
+use super::{budget_cap, preferred_floor, DelayDecision, DelayInput};
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, warn};
 
-/// The default delay policy, generated as `delay.lua` next to the
-/// config file on first use (see [`ScriptHost::maybe_reload`]).
+/// Embedded default when a Bot declares no policy. Never generated in each
+/// account: declared Bot policies and explicit overrides own their provenance.
 pub const DEFAULT_SCRIPT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/delay_default.lua"
@@ -48,8 +48,8 @@ pub const DEFAULT_SCRIPT: &str = include_str!(concat!(
 /// Every bundled default shipped by an earlier version, verbatim. An
 /// existing `delay.lua` identical (modulo line endings) to one of these
 /// is an untouched auto-generated copy of an outdated default, so
-/// [`ScriptHost::ensure_default`] replaces it with [`DEFAULT_SCRIPT`];
-/// anything else is a user edit and is never touched.
+/// migration can identify it as generated rather than an explicit override.
+/// Anything else is a user edit and must be preserved by the migration owner.
 ///
 /// When changing `assets/delay_default.lua`, copy the version being
 /// replaced into `assets/delay_default_superseded/<short-commit>.lua`
@@ -85,7 +85,7 @@ const SUPERSEDED_DEFAULT_SCRIPTS: &[&str] = &[
 /// endings are normalized on both sides: the file on disk or the
 /// compiled-in constant may carry CRLF depending on the checkout and
 /// platform, and a pure EOL difference is not a user edit.
-fn is_superseded_default(content: &str) -> bool {
+pub fn is_superseded_default(content: &str) -> bool {
     let normalized = content.replace("\r\n", "\n");
     SUPERSEDED_DEFAULT_SCRIPTS
         .iter()
@@ -222,7 +222,7 @@ impl DelayScript {
                 // Enforce the non-negotiables on the script's answer.
                 let target = target_ms
                     .min(budget_cap(input, allow_bank))
-                    .max(functional_floor(input));
+                    .max(preferred_floor(input));
                 Some(DelayDecision {
                     total_target_ms: target,
                     allow_bank,
@@ -379,158 +379,78 @@ fn kind_name(kind: super::DecisionKind) -> &'static str {
     }
 }
 
-/// Owns the optional script and its hot-reload state. The autoplay
-/// manager calls [`ScriptHost::maybe_reload`] (cheap mtime stat) before
-/// planning; the platform planner calls [`ScriptHost::script`].
+/// Owns a resolved policy and its hot-reload state. No implicit profile file
+/// is generated or searched; failed declared sources remain observable.
 #[derive(Default)]
 pub struct ScriptHost {
     script: Option<DelayScript>,
-    /// mtime + size of the last load *attempt* (successful or not) — a
-    /// broken file is not recompiled until it changes. Size is part of
-    /// the stamp because coarse-timestamp filesystems can give a
-    /// truncate-then-write the same mtime as the version we rejected.
+    attempted_source: Option<PolicySource>,
     attempted_stamp: Option<(SystemTime, u64)>,
-    attempted_path: Option<PathBuf>,
-    /// Default-file generation failed (read-only fs) — logged once,
-    /// not retried every hand.
-    generate_failed: bool,
-    /// The existing file was already checked against the superseded
-    /// defaults this session — the check reads the whole file, so it
-    /// runs once per host, not once per hand.
-    superseded_checked: bool,
+    load_error: Option<String>,
 }
 
 impl ScriptHost {
-    /// Write [`DEFAULT_SCRIPT`] to `path` if no file exists there yet,
-    /// or if the existing file is an unmodified copy of an earlier
-    /// bundled default (see [`SUPERSEDED_DEFAULT_SCRIPTS`]) — without
-    /// this, installs that generated `delay.lua` on an older version
-    /// would keep its behaviour forever after an update. A deleted file
-    /// is regenerated on the next start; a failure (e.g. read-only
-    /// install) is logged once and the built-in model runs.
-    pub fn ensure_default(&mut self, path: &Path) {
-        if self.generate_failed {
-            return;
-        }
-        if path.exists() {
-            self.refresh_superseded_default(path);
-            return;
-        }
-        match write_atomic(path, DEFAULT_SCRIPT) {
-            Ok(()) => {
-                info!("generated default delay script: {}", path.display());
-                self.superseded_checked = true; // just wrote the current one
-            }
-            Err(e) => {
-                warn!(
-                    "could not generate delay script at {} — using built-in model: {e}",
-                    path.display()
-                );
-                self.generate_failed = true;
-            }
-        }
+    /// Drop policy state after a reported manifest/source resolution failure.
+    /// PacingPolicy can still use its built-in model for the selected action.
+    pub fn clear(&mut self) {
+        self.script = None;
+        self.attempted_source = None;
+        self.attempted_stamp = None;
+        self.load_error = None;
     }
-
-    /// Overwrite `path` with [`DEFAULT_SCRIPT`] iff its content is an
-    /// unmodified copy of an earlier bundled default. User-edited
-    /// scripts never match and are left alone.
-    fn refresh_superseded_default(&mut self, path: &Path) {
-        if self.superseded_checked {
-            return;
-        }
-        self.superseded_checked = true;
-        let Ok(existing) = std::fs::read_to_string(path) else {
-            return; // unreadable — maybe_reload logs that case
-        };
-        if existing == DEFAULT_SCRIPT || !is_superseded_default(&existing) {
-            return;
-        }
-        match write_atomic(path, DEFAULT_SCRIPT) {
-            Ok(()) => info!(
-                "delay script was an outdated bundled default — updated: {}",
-                path.display()
-            ),
-            Err(e) => warn!(
-                "could not update outdated delay script at {} — keeping it: {e}",
-                path.display()
-            ),
-        }
-    }
-
-    /// (Re)load the script when the file at `path` appeared, changed or
-    /// vanished. A missing file is the normal no-script state.
-    pub fn maybe_reload(&mut self, path: &Path, enabled: bool) {
+    /// Reload a changed source. On failure the caller receives its provenance
+    /// and script() is empty, so the public PacingPolicy uses the built-in model.
+    pub fn reload(&mut self, source: &PolicySource, enabled: bool) -> Result<(), String> {
         if !enabled {
-            self.script = None;
-            self.attempted_stamp = None;
-            self.attempted_path = None;
-            return;
+            self.clear();
+            return Ok(());
         }
-        let stamp = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| Some((m.modified().ok()?, m.len())));
-        let path_changed = self.attempted_path.as_deref() != Some(path);
-        if !path_changed && stamp == self.attempted_stamp {
-            return; // nothing new — keep current state (script or None)
+        let stamp = source
+            .path()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        if self.attempted_source.as_ref() == Some(source) && stamp == self.attempted_stamp {
+            return self.load_error.clone().map_or(Ok(()), Err);
         }
-        self.attempted_path = Some(path.to_path_buf());
+        self.attempted_source = Some(source.clone());
         self.attempted_stamp = stamp;
-
-        let Some(_) = stamp else {
-            if self.script.is_some() {
-                info!("delay script removed — using built-in model");
+        let label = source.label();
+        let loaded = match source.path() {
+            Some(path) => {
+                std::fs::read_to_string(path).map_err(|error| format!("{label}: {error}"))
             }
-            self.script = None;
-            return;
-        };
-        match std::fs::read_to_string(path) {
-            Ok(source) => match DelayScript::compile(&source, &path.display().to_string()) {
-                Ok(script) => {
-                    info!("delay script loaded: {}", path.display());
-                    self.script = Some(script);
-                }
-                Err(e) => {
-                    warn!("delay script rejected ({}): {e}", path.display());
-                    self.script = None;
-                }
-            },
-            Err(e) => {
-                warn!("delay script unreadable ({}): {e}", path.display());
+            None => Ok(DEFAULT_SCRIPT.to_owned()),
+        }
+        .and_then(|text| {
+            DelayScript::compile(&text, &label).map_err(|error| format!("{label}: {error}"))
+        });
+        match loaded {
+            Ok(script) => {
+                info!("loaded {label}");
+                self.script = Some(script);
+                self.load_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                warn!("{error} — using built-in pacing model");
                 self.script = None;
+                self.load_error = Some(error.clone());
+                Err(error)
             }
         }
     }
-
     pub fn script(&self) -> Option<&DelayScript> {
         self.script.as_ref()
     }
-}
-
-/// Write-then-rename: a crash or full disk mid-write must not leave a
-/// truncated delay.lua that the exists/superseded gates in
-/// [`ScriptHost::ensure_default`] would then treat as the user's file
-/// forever.
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let tmp = path.with_extension("lua.tmp");
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::{BudgetSnapshot, DecisionKind, DelayInput};
     use super::*;
-    use crate::config::{DelayModelConfig, MajsoulAutoplayConfig};
+    use crate::config::{DelayModelConfig, InputConfig};
 
-    fn base_input<'a>(
-        cfg: &'a MajsoulAutoplayConfig,
-        delay_cfg: &'a DelayModelConfig,
-    ) -> DelayInput<'a> {
+    fn base_input<'a>(cfg: &'a InputConfig, delay_cfg: &'a DelayModelConfig) -> DelayInput<'a> {
         DelayInput {
             kind: DecisionKind::Dahai,
             is_tsumogiri: false,
@@ -559,7 +479,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let dec = s.try_decide(&base_input(&cfg, &d)).unwrap();
         assert_eq!(dec.total_target_ms, 2300);
@@ -586,7 +506,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let mut i = base_input(&cfg, &d);
         i.budget = Some(BudgetSnapshot {
@@ -614,7 +534,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let mut i = base_input(&cfg, &d);
         // A bot that reports no probabilities: nothing to read, nothing asked.
@@ -657,7 +577,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let mut i = base_input(&cfg, &d);
         assert_eq!(s.try_decide(&i).unwrap().total_target_ms, 1000);
@@ -676,7 +596,7 @@ mod tests {
 
     #[test]
     fn a_script_may_say_how_long_a_look_rests() {
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let ask = |answer: &str| {
             let source = format!("function decide_delay(ctx) return {answer} end");
@@ -704,7 +624,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         assert!(s.try_decide(&base_input(&cfg, &d)).is_none());
     }
@@ -722,7 +642,7 @@ mod tests {
     fn runtime_error_falls_back() {
         let s =
             DelayScript::compile("function decide_delay(ctx) error('boom') end", "test").unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         assert!(s.try_decide(&base_input(&cfg, &d)).is_none());
     }
@@ -738,7 +658,7 @@ mod tests {
             "function decide_delay(ctx) return { delay_ms = 0/0 } end",
         ] {
             let s = DelayScript::compile(src, "test").unwrap();
-            let cfg = MajsoulAutoplayConfig::default();
+            let cfg = InputConfig::default();
             let d = DelayModelConfig::default();
             assert!(
                 s.try_decide(&base_input(&cfg, &d)).is_none(),
@@ -751,7 +671,7 @@ mod tests {
     fn infinite_loop_is_aborted() {
         let s = DelayScript::compile("function decide_delay(ctx) while true do end end", "test")
             .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let start = Instant::now();
         assert!(s.try_decide(&base_input(&cfg, &d)).is_none());
@@ -788,7 +708,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let start = Instant::now();
         assert!(s.try_decide(&base_input(&cfg, &d)).is_none());
@@ -818,7 +738,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         assert!(s.try_decide(&base_input(&cfg, &d)).is_some());
     }
@@ -839,7 +759,7 @@ mod tests {
             "test",
         )
         .unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let start = Instant::now();
         assert!(s.try_decide(&base_input(&cfg, &d)).is_none());
@@ -856,7 +776,7 @@ mod tests {
     #[test]
     fn bundled_default_survives_tiny_fixed_budget() {
         let s = DelayScript::compile(DEFAULT_SCRIPT, "default").unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let mut i = base_input(&cfg, &d);
         i.budget = Some(BudgetSnapshot {
@@ -877,7 +797,7 @@ mod tests {
     /// a script bug → fallback; nil stays "false".
     #[test]
     fn allow_bank_must_be_boolean() {
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let bad = DelayScript::compile(
             "function decide_delay(ctx) return { delay_ms = 2000, allow_bank = 0 } end",
@@ -899,7 +819,7 @@ mod tests {
     /// value cannot overrun the server window.
     #[test]
     fn script_cannot_break_floor_or_cap() {
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
 
         let zero = DelayScript::compile(
@@ -958,7 +878,7 @@ mod tests {
     #[test]
     fn bundled_default_script_works() {
         let s = DelayScript::compile(DEFAULT_SCRIPT, "delay_default.lua").unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
 
         // Plain tedashi: calibrated median ~2.4s. The script rng is not
@@ -1039,7 +959,7 @@ mod tests {
     #[test]
     fn bundled_default_flat_probs_keep_routine_fraction() {
         let s = DelayScript::compile(DEFAULT_SCRIPT, "delay_default.lua").unwrap();
-        let cfg = MajsoulAutoplayConfig::default();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
 
         // Tsumogiri honor: the bucket with the largest routine weight
@@ -1072,130 +992,17 @@ mod tests {
         );
     }
 
-    /// `ensure_default` generates the bundled script once and never
-    /// overwrites user edits.
     #[test]
-    fn ensure_default_generates_once_and_preserves_edits() {
+    fn host_hot_reloads_and_reports_missing_declared_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("delay.lua");
         let mut host = ScriptHost::default();
 
-        host.ensure_default(&path);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            DEFAULT_SCRIPT,
-            "missing file must be created from the bundled default"
-        );
-
-        std::fs::write(
-            &path,
-            "-- user edit\nfunction decide_delay(c) return { delay_ms = 1 } end",
-        )
-        .unwrap();
-        host.ensure_default(&path);
-        assert!(
-            std::fs::read_to_string(&path)
-                .unwrap()
-                .starts_with("-- user edit"),
-            "an existing file must never be overwritten"
-        );
-
-        // Same for a fresh host (no superseded_checked short-circuit):
-        // a user script simply doesn't match any old default.
-        let mut fresh = ScriptHost::default();
-        fresh.ensure_default(&path);
-        assert!(
-            std::fs::read_to_string(&path)
-                .unwrap()
-                .starts_with("-- user edit"),
-            "a user-edited file must survive the superseded-default check"
-        );
-    }
-
-    /// Regression (issue #231): a delay.lua auto-generated by an older
-    /// version must be replaced by the current bundled default on the
-    /// next run — updates used to leave the stale script in place until
-    /// the user deleted it by hand.
-    #[test]
-    fn outdated_bundled_default_is_refreshed() {
-        for old in SUPERSEDED_DEFAULT_SCRIPTS {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("delay.lua");
-            std::fs::write(&path, old).unwrap();
-
-            let mut host = ScriptHost::default();
-            host.ensure_default(&path);
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                DEFAULT_SCRIPT,
-                "an unmodified older default must be updated in place"
-            );
-        }
-    }
-
-    /// A pure CRLF re-encoding of an old default (Windows editors,
-    /// autocrlf checkouts) is still not a user edit.
-    #[test]
-    fn outdated_default_with_crlf_is_refreshed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("delay.lua");
-        let old = SUPERSEDED_DEFAULT_SCRIPTS.last().unwrap();
-        // Normalize first: on an autocrlf checkout the compiled-in old
-        // default already carries CRLF, and a blind `\n → \r\n` pass would
-        // double the carriage returns into something no editor produces.
-        let crlf = old.replace("\r\n", "\n").replace('\n', "\r\n");
-        std::fs::write(&path, crlf).unwrap();
-
-        let mut host = ScriptHost::default();
-        host.ensure_default(&path);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_SCRIPT);
-    }
-
-    /// The check runs once per host: rewriting the old script back mid-
-    /// session is treated as a (bizarre) user edit until the next start.
-    #[test]
-    fn superseded_check_runs_once_per_host() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("delay.lua");
-        let old = SUPERSEDED_DEFAULT_SCRIPTS.last().unwrap();
-        std::fs::write(&path, old).unwrap();
-
-        let mut host = ScriptHost::default();
-        host.ensure_default(&path);
-        std::fs::write(&path, old).unwrap();
-        host.ensure_default(&path);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap().as_str(),
-            *old,
-            "the whole-file comparison must not repeat every hand"
-        );
-    }
-
-    /// Maintenance guard: the superseded list must contain real *old*
-    /// versions — each one detected, none of them the current default
-    /// (copying the wrong file into the superseded directory would
-    /// otherwise go unnoticed).
-    #[test]
-    fn superseded_list_is_distinct_from_current_default() {
-        for old in SUPERSEDED_DEFAULT_SCRIPTS {
-            assert!(is_superseded_default(old));
-            assert_ne!(
-                old.replace("\r\n", "\n"),
-                DEFAULT_SCRIPT.replace("\r\n", "\n"),
-                "the current default must never be listed as superseded"
-            );
-        }
-        assert!(!is_superseded_default(DEFAULT_SCRIPT));
-    }
-
-    #[test]
-    fn host_hot_reloads_and_tolerates_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("delay.lua");
-        let mut host = ScriptHost::default();
-
-        // Missing file: normal no-script state.
-        host.maybe_reload(&path, true);
+        let error = host
+            .reload(&PolicySource::Profile { path: path.clone() }, true)
+            .unwrap_err();
+        assert!(error.contains("profile pacing override"));
+        assert!(!path.exists(), "loading must not generate a profile script");
         assert!(host.script().is_none());
 
         std::fs::write(
@@ -1203,7 +1010,8 @@ mod tests {
             "function decide_delay(ctx) return { delay_ms = 1111 } end",
         )
         .unwrap();
-        host.maybe_reload(&path, true);
+        host.reload(&PolicySource::Profile { path: path.clone() }, true)
+            .unwrap();
         assert!(host.script().is_some());
 
         // Rewrite with a different value (bump mtime explicitly — some
@@ -1218,8 +1026,9 @@ mod tests {
         // read-only `File::open` yields ERROR_ACCESS_DENIED.
         let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.set_modified(bumped).unwrap();
-        host.maybe_reload(&path, true);
-        let cfg = MajsoulAutoplayConfig::default();
+        host.reload(&PolicySource::Profile { path: path.clone() }, true)
+            .unwrap();
+        let cfg = InputConfig::default();
         let d = DelayModelConfig::default();
         let dec = host
             .script()
@@ -1229,7 +1038,42 @@ mod tests {
         assert_eq!(dec.total_target_ms, 2222, "reload must pick up the edit");
 
         // Disabled: script dropped.
-        host.maybe_reload(&path, false);
+        host.reload(&PolicySource::Profile { path: path.clone() }, false)
+            .unwrap();
         assert!(host.script().is_none());
+    }
+
+    #[test]
+    fn source_switch_and_failure_cannot_reuse_a_previous_accounts_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let bot = PolicySource::Bot {
+            path: dir.path().join("bot.lua"),
+        };
+        std::fs::write(
+            bot.path().unwrap(),
+            "function decide_delay(ctx) return {delay_ms=1111} end",
+        )
+        .unwrap();
+        let mut host = ScriptHost::default();
+        host.reload(&bot, true).unwrap();
+        assert!(host.script().is_some());
+        let override_source = PolicySource::Profile {
+            path: dir.path().join("missing.lua"),
+        };
+        let error = host.reload(&override_source, true).unwrap_err();
+        assert!(host.script().is_none());
+        assert_eq!(host.reload(&override_source, true).unwrap_err(), error);
+        std::fs::write(override_source.path().unwrap(), "function decide_delay(").unwrap();
+        assert!(host
+            .reload(&override_source, true)
+            .unwrap_err()
+            .contains("profile pacing override"));
+        assert!(host.script().is_none());
+        host.reload(&PolicySource::Bundled, true).unwrap();
+        assert!(host.script().is_some());
+        assert_eq!(
+            std::fs::read_to_string(bot.path().unwrap()).unwrap(),
+            "function decide_delay(ctx) return {delay_ms=1111} end"
+        );
     }
 }

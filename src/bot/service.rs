@@ -25,6 +25,7 @@
 //! One service runs at a time: the active four-player bot's, or else the
 //! active three-player bot's.
 
+use crate::bot::lifecycle::{cancelled, stop_child, stopping, ReleaseFailure};
 use crate::bot::manifest::{self, Manifest};
 use crate::bot::registry::BotRegistry;
 use crate::bot::runtime::{self, PythonRuntime};
@@ -40,8 +41,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{Mutex, RwLock};
-use tracing::{info, warn};
+use tokio::sync::{watch, Mutex, RwLock};
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 
 /// How often the choice of bot is looked at again.
 const RECHECK: Duration = Duration::from_secs(5);
@@ -97,6 +99,7 @@ struct Target {
 /// How one run of a service ended.
 #[derive(Debug, PartialEq)]
 enum End {
+    Stopped,
     /// Another bot became the active one; nothing went wrong.
     Retargeted,
     Failed {
@@ -112,36 +115,85 @@ struct Ready {
     facts: Vec<Fact>,
 }
 
-/// Run the active bot's service until the app exits.
-pub async fn run(
+/// Owns the service task through installation, loading, ready and retry waits.
+/// Dropping the handle also signals cancellation; normal shutdown must await it.
+pub struct ServiceHandle {
+    stop: watch::Sender<bool>,
+    task: JoinHandle<Result<()>>,
+}
+
+impl ServiceHandle {
+    pub async fn shutdown(self) -> Result<()> {
+        let _ = self.stop.send(true);
+        self.task.await.context("model service task failed")?
+    }
+}
+
+pub fn start(
     config: Arc<RwLock<AppConfig>>,
     runtime: Option<PythonRuntime>,
     syncs_in_flight: Arc<Mutex<HashSet<String>>>,
     monitor: MonitorHandle,
-) {
+) -> ServiceHandle {
+    let (stop, signal) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let result = run(config, runtime, syncs_in_flight, monitor, signal).await;
+        if let Err(error) = &result {
+            error!(%error, "model service cleanup failed; account must remain held");
+        }
+        result
+    });
+    ServiceHandle { stop, task }
+}
+
+async fn run(
+    config: Arc<RwLock<AppConfig>>,
+    runtime: Option<PythonRuntime>,
+    syncs_in_flight: Arc<Mutex<HashSet<String>>>,
+    monitor: MonitorHandle,
+    mut stop: watch::Receiver<bool>,
+) -> Result<()> {
     let mut delay = RETRY_FIRST;
     loop {
-        let target = match active_target(&config).await {
+        let target = tokio::select! {
+            biased;
+            _ = cancelled(&mut stop) => return Ok(()),
+            target = active_target(&config) => target,
+        };
+        let target = match target {
             Ok(Some(target)) => target,
             Ok(None) => {
                 monitor.set_server(ServiceStatus::None);
-                tokio::time::sleep(RECHECK).await;
+                tokio::select! { biased; _ = cancelled(&mut stop) => return Ok(()), _ = tokio::time::sleep(RECHECK) => {} }
                 continue;
             }
             Err(e) => {
                 warn!("bot service: {e:#}");
                 monitor.set_server(ServiceStatus::None);
-                tokio::time::sleep(RECHECK).await;
+                tokio::select! { biased; _ = cancelled(&mut stop) => return Ok(()), _ = tokio::time::sleep(RECHECK) => {} }
                 continue;
             }
         };
         let end = match &runtime {
-            Some(runtime) => serve(&target, runtime, &syncs_in_flight, &monitor, &config).await,
+            Some(runtime) => {
+                serve(
+                    &target,
+                    runtime,
+                    &syncs_in_flight,
+                    &monitor,
+                    &config,
+                    &mut stop,
+                )
+                .await?
+            }
             None => End::Failed {
                 error: "no python3+uv runtime found to run the service with".into(),
                 was_ready: false,
             },
         };
+        if matches!(end, End::Stopped) || stopping(&stop) {
+            return Ok(());
+        }
         let End::Failed { error, was_ready } = end else {
             delay = RETRY_FIRST;
             continue;
@@ -155,7 +207,7 @@ pub async fn run(
             error,
             retry_at_ms: now_ms() + delay.as_millis() as i64,
         });
-        tokio::time::sleep(delay).await;
+        tokio::select! { biased; _ = cancelled(&mut stop) => return Ok(()), _ = tokio::time::sleep(delay) => {} }
         delay = next_delay(delay);
     }
 }
@@ -246,7 +298,8 @@ async fn serve(
     syncs_in_flight: &Arc<Mutex<HashSet<String>>>,
     monitor: &MonitorHandle,
     config: &Arc<RwLock<AppConfig>>,
-) -> End {
+    stop: &mut watch::Receiver<bool>,
+) -> Result<End> {
     let bot = target.bot.clone();
     let failed = |error: String, was_ready: bool| End::Failed { error, was_ready };
 
@@ -256,11 +309,25 @@ async fn serve(
     {
         // The same lock a bot's own install takes, under the service's name.
         let slot = format!("{bot}/service");
-        let Some(_installing) = SyncGuard::acquire(syncs_in_flight, &slot).await else {
-            return failed("its environment is already being installed".into(), false);
+        let installing = tokio::select! { biased; _ = cancelled(stop) => return Ok(End::Stopped), guard = SyncGuard::acquire(syncs_in_flight, &slot) => guard };
+        let Some(_installing) = installing else {
+            return Ok(failed(
+                "its environment is already being installed".into(),
+                false,
+            ));
         };
-        if let Err(e) = runtime.ensure_synced(&target.dir).await {
-            return failed(format!("installing its environment failed: {e:#}"), false);
+        match runtime.ensure_synced_until(&target.dir, stop).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(End::Stopped),
+            Err(e) if stopping(stop) || e.is::<ReleaseFailure>() => {
+                return Err(e.context("stopping the service installer"))
+            }
+            Err(e) => {
+                return Ok(failed(
+                    format!("installing its environment failed: {e:#}"),
+                    false,
+                ))
+            }
         }
     }
 
@@ -268,8 +335,16 @@ async fn serve(
         .and_then(|values| manifest::write_resolved(&target.bot_dir, &values))
     {
         Ok(path) => path,
-        Err(e) => return failed(format!("its settings could not be read: {e:#}"), false),
+        Err(e) => {
+            return Ok(failed(
+                format!("its settings could not be read: {e:#}"),
+                false,
+            ))
+        }
     };
+    if stopping(stop) {
+        return Ok(End::Stopped);
+    }
 
     let mut command = runtime.command_for(&target.dir, &["-u", &target.script]);
     command
@@ -282,10 +357,10 @@ async fn serve(
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(e) => return failed(format!("it could not be started: {e}"), false),
+        Err(e) => return Ok(failed(format!("it could not be started: {e}"), false)),
     };
     let started = Instant::now();
-    info!(bot = %bot, dir = %target.dir.display(), "bot service started");
+    info!(bot = %bot, pid = ?child.id(), dir = %target.dir.display(), "bot service started");
     monitor.set_server(ServiceStatus::Starting {
         bot: bot.clone(),
         since_ms: now_ms(),
@@ -293,9 +368,10 @@ async fn serve(
 
     // Held and never written: the service exits when this closes, which is
     // when this function returns or the app goes away.
-    let _stdin = child.stdin.take();
+    let stdin = child.stdin.take();
     let Some(stdout) = child.stdout.take() else {
-        return failed("its stdout is missing".into(), false);
+        stop_child(&mut child, stdin, "model service").await?;
+        return Ok(failed("its stdout is missing".into(), false));
     };
     let mut stdout = BufReader::new(stdout).lines();
     let last_log = Arc::new(std::sync::Mutex::new(String::new()));
@@ -316,18 +392,23 @@ async fn serve(
     let mut recheck = tokio::time::interval(RECHECK);
     let mut was_ready = false;
     let mut stdout_open = true;
-    loop {
+    let end = loop {
         tokio::select! {
+            biased;
+            _ = cancelled(stop) => break End::Stopped,
             status = child.wait() => {
                 // Its last words say why it left; give the copy a moment to
                 // reach the end of what it wrote.
-                if let Some(log) = log.as_mut() {
-                    let _ = tokio::time::timeout(LAST_WORDS, log).await;
+                if let Some(mut log) = log.take() {
+                    if tokio::time::timeout(LAST_WORDS, &mut log).await.is_err() {
+                        log.abort();
+                        let _ = log.await;
+                    }
                 }
                 let said = last_log.lock().expect("service log lock poisoned").clone();
                 let status = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
                 let error = if said.is_empty() { format!("it exited ({status})") } else { format!("it exited ({status}): {said}") };
-                return failed(error, was_ready);
+                break failed(error, was_ready);
             }
             line = stdout.next_line(), if stdout_open => match line {
                 Ok(Some(line)) => {
@@ -352,12 +433,25 @@ async fn serve(
                 let still = matches!(active_target(config).await, Ok(Some(now)) if now.bot == bot && now.dir == target.dir);
                 if !still {
                     info!(bot = %bot, "bot service stopped: its bot is no longer the active one");
-                    return End::Retargeted;
+                    break End::Retargeted;
                 }
             }
         }
+    };
+    // This is also required on retarget: the replacement must not race the
+    // old process for its port, even if the old service ignores stdin EOF.
+    stop_child(&mut child, stdin, "model service").await?;
+    if let Some(mut log) = log {
+        if tokio::time::timeout(LAST_WORDS, &mut log).await.is_err() {
+            log.abort();
+            let _ = log.await;
+        }
     }
+    Ok(end)
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

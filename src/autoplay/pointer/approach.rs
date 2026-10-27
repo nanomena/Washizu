@@ -25,28 +25,6 @@ pub const LOOK_MS: u32 = 800;
 /// tiles by waving between the ends of their hand.
 pub const LOOK_REACH: f64 = 2.7;
 
-/// Hold the pointer still for at least `see_ms` before it sets off: a hand
-/// does not move for a tile it has not yet seen (`humanize::SEE`). A think
-/// too short for that lands its press later by what it lacked; a longer one
-/// is as it was.
-pub fn wait_to_see(approach: &mut Approach, see_ms: u32) {
-    approach.pause_ms = approach.pause_ms.max(see_ms);
-}
-
-/// How much of `think_ms` is waited out before the way to the press is
-/// planned at all: at a deal (`dealt`), the time until the new hand can have
-/// been seen, `see_ms`, when the think outlasts it — nobody weighs tiles that
-/// are still being dealt, so the way, looks and all, is made in the time
-/// after. Anything else waits for its frame only in the pause
-/// ([`wait_to_see`]).
-pub fn dealt_lead(dealt: bool, see_ms: u32, think_ms: u32) -> u32 {
-    if dealt && see_ms < think_ms {
-        see_ms
-    } else {
-        0
-    }
-}
-
 /// The pointer's way to a press: wait `pause_ms`, then walk `legs`. The last
 /// leg ends on the press point; one that dwells there settles on the target
 /// before pressing it, one that does not presses as it arrives — the press's
@@ -290,78 +268,6 @@ mod tests {
     const NEAR: Point = (1012.0, 836.0);
     /// The other end of the hand.
     const FAR: Point = (300.0, 836.0);
-
-    /// A press is not set off for before its tile is seen; one set off for
-    /// later anyway keeps its way.
-    #[test]
-    fn the_pointer_waits_to_see_the_tile_before_it_sets_off() {
-        let mut rng = StdRng::seed_from_u64(11);
-        let mut quick = approach(400, FAR, PRESS, None, LOOK_MS, UNIT, &mut rng);
-        let legs = quick.legs.clone();
-        wait_to_see(&mut quick, 700);
-        assert_eq!(quick.pause_ms, 700);
-        assert_eq!(quick.legs, legs, "the way itself is unchanged");
-        assert!(
-            quick.total_ms() > 700,
-            "the press lands after the tile is seen"
-        );
-
-        let mut slow = approach(5000, FAR, PRESS, None, LOOK_MS, UNIT, &mut rng);
-        let before = slow.clone();
-        wait_to_see(&mut slow, 700);
-        assert_eq!(slow, before, "a long think already waited");
-    }
-
-    /// A hand still being dealt is not weighed: at a deal the way, looks and
-    /// all, comes after the hand can have been seen, and still takes exactly
-    /// the think. Planned over the whole think, a look would stop on tiles
-    /// that are not laid out yet.
-    #[test]
-    fn a_dealt_hand_is_weighed_only_once_it_is_seen() {
-        let mut rng = StdRng::seed_from_u64(29);
-        let (think, see) = (7_000, 3_400);
-        let mut looked = 0;
-        for _ in 0..300 {
-            let lead = dealt_lead(true, see, think);
-            assert_eq!(lead, see);
-            let mut plan = approach(
-                think - lead,
-                (700.0, 700.0),
-                PRESS,
-                Some(NEAR),
-                LOOK_MS,
-                UNIT,
-                &mut rng,
-            );
-            plan.pause_ms += lead;
-            wait_to_see(&mut plan, see);
-            assert_eq!(plan.total_ms(), think, "{plan:?}");
-            assert!(plan.pause_ms >= see, "{plan:?}");
-            looked += usize::from(plan.looks_elsewhere());
-        }
-        assert!(looked > 100, "{looked} looked");
-
-        let early = (0..300)
-            .filter(|_| {
-                let plan = approach(
-                    think,
-                    (700.0, 700.0),
-                    PRESS,
-                    Some(NEAR),
-                    LOOK_MS,
-                    UNIT,
-                    &mut rng,
-                );
-                plan.looks_elsewhere() && plan.pause_ms < see
-            })
-            .count();
-        assert!(early > 100, "{early} looks set off during the deal");
-
-        // Nothing is held back off a deal, nor when the think cannot hold the
-        // wait (that press lands late instead, as any too-short think does).
-        assert_eq!(dealt_lead(false, see, think), 0);
-        assert_eq!(dealt_lead(true, see, see), 0);
-    }
 
     fn discard(pai: &str, prob: f64) -> Candidate {
         Candidate {

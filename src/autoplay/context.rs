@@ -20,11 +20,16 @@
 
 use chromiumoxide::page::Page;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Default)]
 pub struct AutoplayContext {
+    /// Input ownership generation, not a model/request epoch. Profile and
+    /// capture/tab replacement retire the old UI session here.
+    ui_session: AtomicU64,
+    ui_settings: AtomicU64,
     pub page: Arc<RwLock<Option<Page>>>,
     pub canvas_rect: Arc<RwLock<Option<CanvasRect>>>,
     /// Server-granted time budget for the current decision window.
@@ -32,15 +37,15 @@ pub struct AutoplayContext {
     /// the manager's delay model. Uses a `std::sync::RwLock` (not tokio)
     /// because the writer is the bridge's synchronous `parse()` path.
     pub time_budget: crate::autoplay::budget::SharedTimeBudget,
-    /// Counter of the client's own uplink input commands, bumped by the
-    /// Majsoul bridge as it parses. The manager takes a ticket before a
+    /// Counter of the client's own uplink input commands, bumped by both
+    /// website bridges as they parse. The controller takes a ticket before a
     /// click and asks afterwards whether the count moved — the proof that
     /// the click registered (see `autoplay::verify`).
     pub input_watch: crate::autoplay::verify::SharedInputWatch,
     /// Tenhou's hand at tile-index resolution plus its current decision
     /// window, written by the Tenhou bridge (see `autoplay::tenhou_state`).
-    /// Read by the Tenhou autoplay planner, which encodes a client frame
-    /// rather than synthesising clicks.
+    /// Read privately by the Tenhou adapter to match physical targets;
+    /// playing input uses the shared mouse controller.
     pub tenhou_state: crate::autoplay::tenhou_state::SharedTenhouState,
     /// Frame injection channel for platforms whose client is not a browser
     /// page (Riichi City): the manager sends built wire frames, the MITM
@@ -52,6 +57,29 @@ pub struct AutoplayContext {
 impl AutoplayContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn invalidate_ui(&self) {
+        self.ui_session.fetch_add(1, Ordering::SeqCst);
+        // Both slots belong to the retired capture/tab session. A late bot
+        // answer must not bind to a stale window after the page changes.
+        *self.time_budget.write().expect("budget lock poisoned") = None;
+        *self
+            .tenhou_state
+            .write()
+            .expect("Tenhou state lock poisoned") = None;
+    }
+
+    pub fn ui_session(&self) -> u64 {
+        self.ui_session.load(Ordering::SeqCst)
+    }
+
+    pub fn settings_changed(&self) {
+        self.ui_settings.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn ui_settings(&self) -> u64 {
+        self.ui_settings.load(Ordering::SeqCst)
     }
 }
 
@@ -95,6 +123,33 @@ impl CanvasRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retiring_a_capture_clears_both_platform_windows() {
+        use crate::autoplay::budget::{BudgetSource, TimeBudget};
+        use crate::autoplay::tenhou_state::{DecisionWindow, TenhouState, TurnClock};
+        let context = AutoplayContext::new();
+        let opened_at = std::time::Instant::now();
+        *context.time_budget.write().unwrap() = Some(TimeBudget {
+            fixed_ms: 5_000,
+            add_ms: 10_000,
+            opened_at,
+            source: BudgetSource::DealTile,
+        });
+        *context.tenhou_state.write().unwrap() = Some(TenhouState {
+            window: Some(DecisionWindow {
+                ops: 0,
+                opened_at,
+                clock: Some(TurnClock::NORMAL),
+            }),
+            ..Default::default()
+        });
+        let session = context.ui_session();
+        context.invalidate_ui();
+        assert_ne!(context.ui_session(), session);
+        assert!(context.time_budget.read().unwrap().is_none());
+        assert!(context.tenhou_state.read().unwrap().is_none());
+    }
 
     #[test]
     fn pixel_translation_centre() {

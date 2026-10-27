@@ -46,6 +46,7 @@ impl Direction {
 /// frame (handshake, unsupported method, malformed payload) return `None`.
 #[derive(Debug, Clone, Default)]
 pub struct ParseResult {
+    pub window: Option<crate::bot::control::InputWindow>,
     pub events: Vec<MjaiEvent>,
     pub parsed: Option<ParsedFrame>,
 }
@@ -56,9 +57,21 @@ impl ParseResult {
     }
     pub fn just_events(events: Vec<MjaiEvent>) -> Self {
         Self {
+            window: None,
             events,
             parsed: None,
         }
+    }
+
+    pub fn into_captured(self) -> impl Iterator<Item = crate::event_bus::CapturedEvent> {
+        let last = self.events.len().checked_sub(1);
+        self.events
+            .into_iter()
+            .enumerate()
+            .map(move |(i, event)| crate::event_bus::CapturedEvent {
+                event,
+                window: (Some(i) == last).then_some(self.window).flatten(),
+            })
     }
 }
 
@@ -131,10 +144,41 @@ pub fn for_platform(
         crate::config::Platform::Tenhou => Box::new(
             TenhouBridge::new(flow_log, session)
                 .with_shared_state(hooks.tenhou_state)
+                .with_input_watch(hooks.input_watch)
                 .with_notify(hooks.notify),
         ),
         crate::config::Platform::RiichiCity => {
             Box::new(RiichiCityBridge::new(flow_log, session).with_inject(hooks.riichi_inject))
+        }
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+    #[test]
+    fn only_the_complete_frame_prefix_gets_the_producer_window() {
+        use crate::autoplay::{BudgetSource, TimeBudget};
+        let window = crate::bot::control::InputWindow::Majsoul(TimeBudget {
+            fixed_ms: 5000,
+            add_ms: 0,
+            opened_at: std::time::Instant::now(),
+            source: BudgetSource::DealTile,
+        });
+        for tail in [
+            r#"{"type":"dora","dora_marker":"9p"}"#,
+            r#"{"type":"reach_accepted","actor":1}"#,
+        ] {
+            let last = serde_json::from_str(tail).unwrap();
+            let captured: Vec<_> = ParseResult {
+                events: vec![MjaiEvent::None, last],
+                parsed: None,
+                window: Some(window),
+            }
+            .into_captured()
+            .collect();
+            assert_eq!(captured[0].window, None);
+            assert_eq!(captured[1].window, Some(window));
         }
     }
 }

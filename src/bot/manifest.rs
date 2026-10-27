@@ -50,6 +50,11 @@ pub struct Manifest {
     /// [`crate::bot::service`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<ForecastSpec>,
+    /// Site-independent turn pacing, relative to this bot's directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pacing: Option<PacingSpec>,
     pub settings: BTreeMap<String, FieldSpec>,
 }
 
@@ -60,6 +65,8 @@ impl Default for Manifest {
             bot: ManifestBot::default(),
             source: None,
             service: None,
+            forecast: None,
+            pacing: None,
             settings: BTreeMap::new(),
         }
     }
@@ -70,6 +77,9 @@ impl Default for Manifest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManifestBot {
+    /// Only a positioned transport can prove the replayed prefix needed
+    /// for automatic standby arbitration. Plain mjai remains its own API.
+    pub protocol: BotProtocol,
     /// Subdir name under `mjai_bot/`. Should match the directory name.
     pub name: String,
     /// Human-readable label rendered in the UI bot picker.
@@ -89,6 +99,7 @@ pub struct ManifestBot {
 impl Default for ManifestBot {
     fn default() -> Self {
         Self {
+            protocol: BotProtocol::Mjai,
             name: String::new(),
             display: None,
             description: None,
@@ -98,12 +109,32 @@ impl Default for ManifestBot {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotProtocol {
+    #[default]
+    Mjai,
+    PositionedMjai,
+}
+
 /// The `[service]` table: a script Akagi keeps running while the bot is the
 /// active one, where the bot's own `bot.py` runs once per game.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceSpec {
     /// The script, relative to the bot directory. Its directory holds the
     /// service's own `pyproject.toml`, so its environment is not the bot's.
+    pub entry: String,
+}
+
+/// Lightweight optional relay in the bot's own environment. It owns no model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForecastSpec {
+    pub entry: String,
+}
+
+/// Optional Lua policy shared by every website running this bot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PacingSpec {
     pub entry: String,
 }
 
@@ -351,6 +382,15 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    #[test]
+    fn pacing_is_an_optional_bot_owned_capability() {
+        let manifest: Manifest = toml::from_str("[pacing]\nentry = 'delay.lua'\n").unwrap();
+        assert_eq!(manifest.pacing.as_ref().unwrap().entry, "delay.lua");
+        let encoded = toml::to_string(&manifest).unwrap();
+        assert_eq!(toml::from_str::<Manifest>(&encoded).unwrap(), manifest);
+        assert!(Manifest::default().pacing.is_none());
+    }
+
     fn write(p: &Path, body: &str) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
@@ -414,6 +454,16 @@ mod tests {
         let body = toml::to_string_pretty(&m).unwrap();
         let back: Manifest = toml::from_str(&body).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn positioned_mjai_requires_an_explicit_transport_contract() {
+        let plain: Manifest = toml::from_str("[bot]\nname = 'demo'\n").unwrap();
+        assert_eq!(plain.bot.protocol, BotProtocol::Mjai);
+        let positioned: Manifest =
+            toml::from_str("[bot]\nname = 'miai'\nprotocol = 'positioned_mjai'\n").unwrap();
+        assert_eq!(positioned.bot.protocol, BotProtocol::PositionedMjai);
+        assert!(toml::from_str::<Manifest>("[bot]\nprotocol = 'unknown'\n").is_err());
     }
 
     #[test]

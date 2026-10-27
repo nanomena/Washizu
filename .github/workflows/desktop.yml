@@ -103,7 +103,8 @@ jobs:
       - name: Shell — smoke
         if: runner.os == 'Linux'
         working-directory: desktop
-        run: xvfb-run -a npm run smoke
+        # At scale 1.5 the display must fit the fixed 1280x720 CSS game surface.
+        run: xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke
 
       - name: Restore bundled runtime cache
         uses: actions/cache@v4
@@ -137,16 +138,16 @@ jobs:
       # modes and the links a macOS bundle and a Python tree are made of.
       - name: Archive (Linux)
         if: runner.os == 'Linux'
-        run: tar -C dist/desktop -czf "dist/${{ matrix.archive }}" Akagi-linux-x64
+        run: tar -C dist/desktop -czf "dist/${{ matrix.archive }}" Washizu-linux-x64
 
       - name: Archive (macOS)
         if: runner.os == 'macOS'
-        run: ditto -c -k --keepParent dist/desktop/Akagi-darwin-arm64 "dist/${{ matrix.archive }}"
+        run: ditto -c -k --keepParent dist/desktop/Washizu-darwin-arm64 "dist/${{ matrix.archive }}"
 
       - name: Archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/desktop/Akagi-win32-x64 -DestinationPath "dist/${{ matrix.archive }}"
+        run: Compress-Archive -Path dist/desktop/Washizu-win32-x64 -DestinationPath "dist/${{ matrix.archive }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

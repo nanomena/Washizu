@@ -1,8 +1,15 @@
 # The interface
 
-One page: the monitor's dock, with the stage above it that the desktop shell
-puts the game on. React, TypeScript and Vite; the page's own CSS, no component
-library.
+Two views of the same React/TypeScript/Vite frontend: the account chooser
+(`?view=profiles`) and the monitor's dock with the game's stage above it.
+Both use the monitor's palette, type and controls, without a component library.
+The monitor keeps its 1280×960 canvas and `hooks/useCanvasScale.ts`. The chooser
+is a compact floating guide with unscaled type, separate from that game canvas.
+`routes/Profiles.css` documents its fixed Grid slots and `desktop/src/profile-layout.js`
+derives the native size from those slots and two to four visible account rows;
+only the profile list scrolls. All its words go through the same `tr`
+and language tables as the monitor. The chooser subscribes before reading its
+initial state and uses `revision` to discard late snapshots.
 
 The page draws what the core's monitor snapshot says and nothing else. It
 reaches the application through `src/lib/host.ts` — commands by name, events by
@@ -10,6 +17,12 @@ name — which the desktop shell answers (`desktop/`). It knows the game and the
 mjai actions, and nothing about any bot: what a bot wants shown about itself
 arrives as words in the snapshot (see "What a bot says about itself" in
 `src/bot/README.md`).
+
+An inference/sync fault replaces the fixed decision-status card on every tab.
+`sync_error` invalidates the current hand; `sync_fault` keeps the unresolved
+fault visible across deals and reconnects. A new deal or a `none` reply is not
+proof of recovery: only a fresh actionable reply or displayed model PASS in a valid hand clears the
+latched fault. The autoplay setting remains visible beside it.
 
 ```text
 src/

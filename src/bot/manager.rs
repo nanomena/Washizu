@@ -78,7 +78,8 @@ pub struct BotManager {
     /// Player count of the in-progress game (from `start_game.num_players`).
     /// Used to construct the built-in native bot for the right mode.
     game_num_players: u8,
-    runner: Option<Box<dyn BotRunner>>,
+    runner: Option<ManagedBot>,
+    recovery_clock: Option<Arc<crate::autoplay::AutoplayContext>>,
     /// Events seen since the last `react()` call.
     pending: Vec<MjaiEvent>,
     /// Bot's seat in the current game; set on `start_game`.
@@ -86,17 +87,7 @@ pub struct BotManager {
     /// What a subprocess bot is told of the current game in `AKAGI_GAME`
     /// (see [`game_description`]); set on `start_game`.
     game: Option<serde_json::Value>,
-    /// One-shot: drop the next own-seat bridge `reach` echo before it is
-    /// fed to the runner. Set after an autoplay reach follow-up (see
-    /// [`Self::handle_tracked`]) has already fed this runner a synthetic
-    /// `reach` to resolve the declaring discard; the bridge's later real
-    /// reach echo for the same declaration would otherwise be a *second*
-    /// `reach` and desync a stateful bot. The tracker and history still see
-    /// the echo on their own bus subscriptions — only the runner's view is
-    /// deduplicated. Cleared when consumed, or on any kyoku/game boundary so
-    /// a lost declaration (whose echo never arrives) can't leak the flag
-    /// into the next hand.
-    drop_next_own_reach: bool,
+    direct_through: u64,
     out_tx: BotResponseBus,
     status_tx: BotStatusBus,
     notify_tx: NotifyBus,
@@ -108,6 +99,26 @@ pub struct BotManager {
     /// and an in-flight game-start sync can't run `uv sync` against the same
     /// venv simultaneously.
     syncs_in_flight: Arc<Mutex<HashSet<String>>>,
+}
+
+enum ManagedBot {
+    Direct(Box<dyn BotRunner>, Option<super::forecast::ForecastWorker>),
+    Coordinated {
+        game_id: Option<u64>,
+        handle: super::recovery::RecoveryHandle,
+        forecast: Option<super::forecast::ForecastWorker>,
+    },
+}
+
+impl ManagedBot {
+    fn forecast(&self) -> Option<&super::forecast::ForecastWorker> {
+        match self {
+            Self::Direct(_, worker)
+            | Self::Coordinated {
+                forecast: worker, ..
+            } => worker.as_ref(),
+        }
+    }
 }
 
 /// What a subprocess bot is told of the game it is started for, in
@@ -127,6 +138,18 @@ fn game_description(num_players: u8, meta: Option<&GameMeta>) -> Option<serde_js
                 .our_level
                 .as_ref()
                 .map(|level| serde_json::json!({ "id": level.id, "score": level.score })),
+        })),
+        MatchInfo::Tenhou {
+            go_type,
+            lobby,
+            dan,
+            ..
+        } => Some(serde_json::json!({
+            "platform": "tenhou",
+            "num_players": num_players,
+            "go_type": go_type,
+            "lobby": lobby,
+            "dan": dan,
         })),
         _ => None,
     }
@@ -152,10 +175,11 @@ impl BotManager {
             active_name: String::new(),
             game_num_players: 4,
             runner: None,
+            recovery_clock: None,
             pending: Vec::new(),
             actor_id: None,
             game: None,
-            drop_next_own_reach: false,
+            direct_through: 0,
             out_tx,
             status_tx,
             notify_tx,
@@ -170,6 +194,11 @@ impl BotManager {
 
     pub fn with_monitor(mut self, monitor: Option<crate::monitor::MonitorHandle>) -> Self {
         self.monitor = monitor;
+        self
+    }
+
+    pub fn with_recovery_clock(mut self, clock: Arc<crate::autoplay::AutoplayContext>) -> Self {
+        self.recovery_clock = Some(clock);
         self
     }
 
@@ -221,6 +250,7 @@ impl BotManager {
     /// event stream.
     pub async fn handle(&mut self, event: MjaiEvent) -> Result<()> {
         self.handle_tracked(TrackedEvent {
+            window: None,
             event,
             can_act: None,
             context: None,
@@ -231,21 +261,53 @@ impl BotManager {
     /// Drive one tracked event through the manager.
     pub async fn handle_tracked(&mut self, tracked: TrackedEvent) -> Result<()> {
         let TrackedEvent {
+            window,
             event,
             can_act,
             context,
         } = tracked;
-        // Kyoku/game boundaries clear the one-shot reach-echo drop: a lost
-        // declaration never produces the echo it was waiting for, so the flag
-        // must not survive into the next hand and eat a real reach there.
-        if matches!(
-            event,
-            MjaiEvent::StartGame { .. }
-                | MjaiEvent::StartKyoku { .. }
-                | MjaiEvent::EndKyoku
-                | MjaiEvent::EndGame { .. }
-        ) {
-            self.drop_next_own_reach = false;
+        let requested = {
+            let cfg = self.config.read().await;
+            cfg.monitor.pointer_lean && cfg.autoplay.enabled
+        };
+        if let (Some(context), Some(worker)) =
+            (context, self.runner.as_ref().and_then(ManagedBot::forecast))
+        {
+            worker.input.advance(context, requested);
+        }
+        if let MjaiEvent::StartGame {
+            id: Some(seat),
+            num_players,
+            game_meta,
+            ..
+        } = &event
+        {
+            if let Some(ManagedBot::Coordinated {
+                game_id: Some(current),
+                handle,
+                ..
+            }) = &self.runner
+            {
+                if game_meta.as_ref().and_then(|m| m.game_id) == Some(*current)
+                    && self.actor_id == Some(*seat)
+                    && self.game_num_players == *num_players
+                {
+                    // Same provider game: reconcile its restored real prefix;
+                    // retain the original model/standby and all earlier hands.
+                    handle.feed(TrackedEvent {
+                        window,
+                        event,
+                        can_act,
+                        context,
+                    })?;
+                    return Ok(());
+                }
+            }
+        }
+        if matches!(event, MjaiEvent::StartGame { .. }) {
+            if let Some(worker) = self.runner.as_ref().and_then(ManagedBot::forecast) {
+                worker.stop();
+            }
         }
         // Spawn the runner the moment we see the bot's seat in start_game.
         if let MjaiEvent::StartGame {
@@ -280,7 +342,8 @@ impl BotManager {
                 return Ok(());
             }
             self.active_name = chosen;
-            self.spawn_runner().await?;
+            self.spawn_runner(game_meta.as_ref().and_then(|m| m.game_id))
+                .await?;
             self.pending.clear();
         }
 
@@ -290,43 +353,60 @@ impl BotManager {
             return Ok(());
         }
 
-        // Deduplicate the bridge's own-seat reach echo when an autoplay
-        // follow-up already fed this runner a synthetic reach for the same
-        // declaration (see the follow-up below and #257). Only the runner's
-        // view is affected; the tracker/history saw the echo on their own
-        // subscriptions.
-        if self.drop_next_own_reach {
-            if let MjaiEvent::Reach { actor, .. } = &event {
-                if Some(*actor) == self.actor_id {
-                    self.drop_next_own_reach = false;
-                    debug!(
-                        "bot manager: dropped duplicate bridge reach echo for seat {actor} \
-                         (already resolved via autoplay follow-up)"
-                    );
-                    return Ok(());
-                }
+        if let (Some(context), Some(worker)) =
+            (context, self.runner.as_ref().and_then(ManagedBot::forecast))
+        {
+            worker.input.advance(context, requested);
+            if matches!(event, MjaiEvent::EndGame { .. }) {
+                worker.stop();
             }
         }
 
-        self.pending.push(event.clone());
-
-        if !self.is_decision_point(&event, can_act) {
-            if self.peeks(&event).await {
-                return self.peek().await;
+        if let Some(ManagedBot::Coordinated { handle, .. }) = &self.runner {
+            // The coordinator receives each real tracked event exactly once,
+            // including confirmed standby moves. It never sees the direct
+            // runner's speculative reach follow-up or echo-dedup branch.
+            let ended = matches!(event, MjaiEvent::EndGame { .. });
+            handle.feed(TrackedEvent {
+                window,
+                event,
+                can_act,
+                context,
+            })?;
+            if ended {
+                self.actor_id = None;
+                self.emit_status(BotStatus::Stopped {
+                    bot: self.active_name.clone(),
+                });
             }
             return Ok(());
         }
 
-        // Read once, before borrowing the runner: whether autoplay is on
-        // gates the reach follow-up below. Runtime-toggled — the same flag
-        // the autoplay manager re-reads on every response.
-        let autoplay_enabled = self.config.read().await.autoplay.enabled;
-        let our_seat = self.actor_id;
+        if matches!(event, MjaiEvent::StartGame { .. }) {
+            self.direct_through = 0;
+        }
 
-        let runner = self
-            .runner
-            .as_mut()
-            .expect("runner is Some — checked above");
+        self.pending.push(event.clone());
+
+        let boundary = matches!(
+            event,
+            MjaiEvent::Hora { .. }
+                | MjaiEvent::Ryukyoku { .. }
+                | MjaiEvent::EndKyoku
+                | MjaiEvent::EndGame { .. }
+        );
+        let deciding = if context.is_some() {
+            boundary || (window.is_some() && can_act == Some(true))
+        } else {
+            self.is_decision_point(&event, can_act)
+        };
+        if !deciding {
+            return Ok(());
+        }
+
+        let Some(ManagedBot::Direct(runner, _)) = self.runner.as_mut() else {
+            unreachable!("coordinator returned above");
+        };
         let batch = std::mem::take(&mut self.pending);
         let started = Instant::now();
         let decision_id = self
@@ -349,61 +429,60 @@ impl BotManager {
                 return Err(e).context("bot react failed");
             }
         };
+        let available = resp.unavailable_reason().is_none();
 
-        // Autoplay reach follow-up (#257). A bot that declares riichi as
-        // plain mjai — `reach` with no `pai` — leaves the declaring discard
-        // unresolved, and Majsoul fuses declaration + discard into one action
-        // so autoplay needs the tile up front. Ask the same runner for it now
-        // by feeding it the reach, exactly as the mjai protocol prescribes
-        // (declare → the engine echoes reach → the bot answers with the
-        // dahai). This is what the built-in native bot already does
-        // internally; here it is generalised to any runner.
-        //
-        // Gated on autoplay because the follow-up mutates a stateful bot's
-        // state as though riichi were declared. Under autoplay we commit that
-        // declaration, so it holds; in analysis mode the human may decline,
-        // and a speculative reach that never happens would desync the bot.
-        // The bridge's later real reach echo for this declaration is dropped
-        // from the runner's view (`drop_next_own_reach`) so it isn't a second
-        // reach.
-        let mut did_reach_followup = false;
-        if autoplay_enabled {
-            if let MjaiEvent::Reach { pai: None, .. } = &resp.action {
-                if let Some(seat) = our_seat {
-                    let reach_ev = MjaiEvent::Reach {
-                        actor: seat,
-                        pai: None,
-                        tsumogiri: None,
-                    };
-                    match runner.react(std::slice::from_ref(&reach_ev)).await {
-                        Ok(follow) => match follow.action {
-                            MjaiEvent::Dahai { pai, tsumogiri, .. } => {
-                                resp.action = MjaiEvent::Reach {
-                                    actor: seat,
-                                    pai: Some(pai),
-                                    tsumogiri: Some(tsumogiri),
-                                };
-                                did_reach_followup = true;
-                            }
-                            other => warn!(
-                                "bot manager: reach follow-up returned {other:?}, not a dahai; \
-                                 leaving the reach unresolved (autoplay will decline it)"
-                            ),
-                        },
-                        Err(e) => warn!(
-                            "bot manager: reach follow-up react failed ({e:#}); \
-                             leaving the reach unresolved"
-                        ),
-                    }
+        self.direct_through += batch.len() as u64;
+        // An unexecuted declaration must never enter the runner's real prefix.
+        // All executable riichi replies name their discard and physical copy.
+        let available = available
+            && !(context.is_some()
+                && matches!(
+                    resp.action,
+                    MjaiEvent::Reach { pai: None, .. }
+                        | MjaiEvent::Reach {
+                            tsumogiri: None,
+                            ..
+                        }
+                ));
+        if !available && resp.unavailable_reason().is_none() {
+            resp.meta.get_or_insert_with(|| serde_json::json!({}))["unavailable"] = serde_json::json!(
+                "Riichi requires a complete declaring discard; no speculative reach was applied."
+            );
+        }
+        if let Some(context) = context {
+            resp.request = Some(super::control::DecisionRequest { context, window });
+            let health = if available {
+                super::control::RunnerHealth::DirectReady {
+                    delivered: self.direct_through,
                 }
+            } else {
+                super::control::RunnerHealth::DirectUnavailable {
+                    delivered: self.direct_through,
+                    reason: resp
+                        .unavailable_reason()
+                        .unwrap_or("Direct runner unavailable")
+                        .into(),
+                }
+            };
+            let control = super::control::DecisionControl {
+                context,
+                window: window.map(|w| w.proof()),
+                source: if available {
+                    super::control::DecisionSource::Primary
+                } else {
+                    super::control::DecisionSource::Unavailable
+                },
+                primary: health,
+                standby: super::control::RunnerHealth::Blocked {
+                    through: 0,
+                    reason: "No standby worker in direct mode.".into(),
+                },
+            };
+            resp.set_control(control.clone());
+            if let Some(monitor) = &self.monitor {
+                monitor.set_control(control);
             }
         }
-        // The follow-up fed the runner a reach; drop the bridge's later echo
-        // of the same declaration so a stateful bot doesn't apply reach twice.
-        if did_reach_followup {
-            self.drop_next_own_reach = true;
-        }
-
         let reaction_ms = started.elapsed().as_millis() as u64;
         if let (Some(m), Some(id)) = (&self.monitor, decision_id) {
             m.complete(id, &resp, reaction_ms);
@@ -430,6 +509,8 @@ impl BotManager {
                 });
             }
         }
+        // A reply marked unavailable is recorded above but never reaches
+        // autoplay: its none means no model decision, not a chosen PASS.
         // MjaiEvent::None still goes on the bus — downstream consumers
         // decide whether to render. Centralizes the "skip" decision.
         // Except at a boundary: that batch is how the bot learns the hand or
@@ -444,7 +525,7 @@ impl BotManager {
                 | MjaiEvent::EndKyoku
                 | MjaiEvent::EndGame { .. }
         );
-        if !(boundary && matches!(resp.action, MjaiEvent::None)) {
+        if available && !(boundary && matches!(resp.action, MjaiEvent::None)) {
             let _ = self.out_tx.send(resp);
         }
 
@@ -460,57 +541,11 @@ impl BotManager {
         Ok(())
     }
 
-    /// Whether to ask the bot at an event that is no decision of ours: with
-    /// the pointer's lean on, at every other seat's discard, so that a bot
-    /// playing its next turn out ahead can say what it expects of it (see
-    /// `autoplay::pointer::lean`).
-    async fn peeks(&mut self, e: &MjaiEvent) -> bool {
-        let Some(me) = self.actor_id else {
-            return false;
-        };
-        if !matches!(e, MjaiEvent::Dahai { actor, .. } if *actor != me) {
-            return false;
-        }
-        let config = self.config.read().await;
-        config.monitor.pointer_lean && config.autoplay.enabled
-    }
-
-    /// Ask the bot between our turns, for nothing but what it expects of the
-    /// next one. The answer is no decision: it goes to
-    /// `autoplay::pointer::lean` and nowhere else — never onto the response
-    /// bus, where a `none` would read as a pass — and nothing records or
-    /// shows it.
-    async fn peek(&mut self) -> Result<()> {
-        let Some(runner) = self.runner.as_mut() else {
-            return Ok(());
-        };
-        let batch = std::mem::take(&mut self.pending);
-        let resp = runner
-            .react(&batch)
-            .await
-            .context("bot react failed (between turns)")?;
-        if !matches!(resp.action, MjaiEvent::None) {
-            warn!(
-                "bot manager: the bot answered {:?} where our seat had nothing to answer; ignored",
-                resp.action
-            );
-        }
-        let lean = resp
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("lean"))
-            .and_then(|lean| serde_json::from_value(lean.clone()).ok());
-        if let Some(lean) = lean {
-            crate::autoplay::pointer::lean::publish(lean);
-        }
-        Ok(())
-    }
-
     /// Two-phase spawn so the IPC layer can show a "Syncing deps…" spinner
     /// during the slow first-run path before the subprocess actually
     /// starts. Each branch publishes status + notification before
     /// returning so the UI never sees a stuck `Loading` state.
-    async fn spawn_runner(&mut self) -> Result<()> {
+    async fn spawn_runner(&mut self, game_id: Option<u64>) -> Result<()> {
         let bot_name = self.active_name.clone();
         let actor_id = self
             .actor_id
@@ -543,7 +578,13 @@ impl BotManager {
                         bot: bot_name.clone(),
                         actor_id,
                     });
-                    self.runner = Some(runner);
+                    let worker = super::forecast::ForecastWorker::spawn(
+                        Ok(None),
+                        self.config.clone(),
+                        self.notify_tx.clone(),
+                        bot_name.clone(),
+                    );
+                    self.runner = Some(ManagedBot::Direct(runner, Some(worker)));
                     return Ok(());
                 }
                 Err(e) => {
@@ -566,7 +607,7 @@ impl BotManager {
                 bail!(msg);
             }
         };
-        let entry = match registry.find(&bot_name) {
+        let mut entry = match registry.find(&bot_name) {
             Some(e) => e.clone(),
             None => {
                 let msg = format!(
@@ -575,6 +616,16 @@ impl BotManager {
                     registry.root().display()
                 );
                 self.fail_load(&bot_name, &msg, "Bot not found");
+                bail!(msg);
+            }
+        };
+        // Registry keeps malformed bots visible for settings repair, but a
+        // bad declared transport must never silently become plain MJAI.
+        entry.manifest = match manifest::Manifest::load(&entry.dir) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                let msg = format!("invalid bot manifest: {error:#}");
+                self.fail_load(&bot_name, &msg, "Bot misconfigured");
                 bail!(msg);
             }
         };
@@ -703,7 +754,7 @@ impl BotManager {
         if let Some(m) = entry.manifest.as_ref() {
             // What Akagi asks of the bot beyond its settings, in a section
             // of its own (`akagi`, beside whatever the bot calls its own
-            // keys): `lean`, to be asked between turns as well (see `peeks`).
+            // keys): `lean`, the preference for a separate forecast relay.
             let lean = {
                 let config = self.config.read().await;
                 config.monitor.pointer_lean && config.autoplay.enabled
@@ -766,7 +817,52 @@ impl BotManager {
         // Reuse the loading id so the sticky toast is replaced, not
         // duplicated. Frontend treats same-id as a swap.
         self.emit_notify(Notification::success(format!("{bot_name} ready")).id(load_id));
-        self.runner = Some(Box::new(bot));
+        let protocol = entry
+            .manifest
+            .as_ref()
+            .map(|m| m.bot.protocol)
+            .unwrap_or_default();
+        let forecast_command = if protocol == manifest::BotProtocol::PositionedMjai
+            && self.recovery_clock.is_some()
+            && self.monitor.is_some()
+        {
+            entry
+                .manifest
+                .as_ref()
+                .and_then(|m| m.forecast.as_ref())
+                .map(|spec| bot.forecast_command(&spec.entry))
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        let forecast = super::forecast::ForecastWorker::spawn(
+            forecast_command,
+            self.config.clone(),
+            self.notify_tx.clone(),
+            bot_name.clone(),
+        );
+        let forecast_input = forecast.input.clone();
+        self.runner = Some(match (protocol, &self.recovery_clock, &self.monitor) {
+            (manifest::BotProtocol::PositionedMjai, Some(clock), Some(monitor)) => {
+                ManagedBot::Coordinated {
+                    game_id,
+                    handle: super::recovery::RecoveryHandle::spawn(
+                        Box::new(bot),
+                        actor_id,
+                        self.game_num_players,
+                        bot_name,
+                        self.config.clone(),
+                        clock.clone(),
+                        monitor.clone(),
+                        self.out_tx.clone(),
+                        self.inspector.clone(),
+                        Some(forecast_input),
+                    ),
+                    forecast: Some(forecast),
+                }
+            }
+            _ => ManagedBot::Direct(Box::new(bot), Some(forecast)),
+        });
         Ok(())
     }
 
@@ -909,6 +1005,7 @@ mod tests {
             let mut q = self.next.lock().await;
             if q.is_empty() {
                 Ok(BotResponse {
+                    request: None,
                     action: MjaiEvent::None,
                     meta: None,
                 })
@@ -995,7 +1092,7 @@ mod tests {
         // mirror that invariant here for status emissions to be realistic.
         mgr.actor_id = Some(2);
         mgr.active_name = "mock".into();
-        mgr.runner = Some(Box::new(mock));
+        mgr.runner = Some(ManagedBot::Direct(Box::new(mock), None));
         (mgr, calls, resp_rx, status_rx, notify_rx)
     }
 
@@ -1054,6 +1151,7 @@ mod tests {
 
     fn tracked(event: MjaiEvent, can_act: Option<bool>) -> TrackedEvent {
         TrackedEvent {
+            window: None,
             event,
             can_act,
             context: None,
@@ -1189,6 +1287,42 @@ mod tests {
         assert!(
             resp_rx.try_recv().is_err(),
             "a boundary's none stays off the bus"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_reply_never_becomes_pass_but_normal_declines_still_do() {
+        let plain: BotResponse = serde_json::from_str(r#"{"type":"none"}"#).unwrap();
+        let fault: BotResponse = serde_json::from_str(
+            r#"{"type":"none","meta":{"unavailable":"Model synchronization is lost for this hand."}}"#,
+        ).unwrap();
+        let decline: BotResponse =
+            serde_json::from_str(r#"{"type":"none","meta":{"show":{"items":[]}}}"#).unwrap();
+        let (mut mgr, calls, mut responses, _, _) = manager_with_mock(vec![
+            plain.clone(),
+            fault.clone(),
+            fault,
+            decline.clone(),
+            plain.clone(),
+        ]);
+        // No stderr notification is sent: the reply must gate itself, even
+        // if the notification pump runs after stdout has delivered it.
+        for expected in [Some(plain.clone()), None, None, Some(decline), Some(plain)] {
+            mgr.handle_tracked(tracked(dahai(0), Some(true)))
+                .await
+                .unwrap();
+            match expected {
+                Some(reply) => assert_eq!(responses.try_recv().unwrap(), reply),
+                None => assert!(
+                    responses.try_recv().is_err(),
+                    "no autoplay input for unavailable model"
+                ),
+            }
+        }
+        assert_eq!(
+            calls.lock().await.len(),
+            5,
+            "all real event batches still reach the same runner"
         );
     }
 
@@ -1331,44 +1465,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_the_lean_on_an_unanswerable_discard_is_asked_and_its_lean_reaches_autoplay_alone()
-    {
-        let lean = serde_json::json!({"lines": 12, "options": [{"discard": true, "pai": "6s", "share": 0.8}]});
-        let reply = BotResponse {
-            action: MjaiEvent::None,
-            meta: Some(serde_json::json!({ "lean": lean })),
-        };
-        let (mut mgr, calls, mut resp_rx, _, _) = manager_with_mock(vec![reply]);
+    async fn enabling_pointer_forecasts_never_peeks_on_the_formal_direct_pipe() {
+        let (mut mgr, calls, mut responses, _, _) = manager_with_mock(vec![]);
         {
-            let mut config = mgr.config.write().await;
-            config.monitor.pointer_lean = true;
-            config.autoplay.enabled = true;
+            let mut cfg = mgr.config.write().await;
+            cfg.monitor.pointer_lean = true;
+            cfg.autoplay.enabled = true;
         }
-        let mut leans = crate::autoplay::pointer::lean::subscribe();
-        mgr.handle_tracked(tracked(dahai(0), Some(false)))
-            .await
-            .unwrap();
-        assert_eq!(
-            calls.lock().await.len(),
-            1,
-            "asked at the other seat's discard"
-        );
-        assert!(
-            resp_rx.try_recv().is_err(),
-            "no decision goes on the response bus"
-        );
-        let got = leans.try_recv().expect("the lean goes to autoplay");
-        assert_eq!(
-            got.first(),
-            Some(crate::autoplay::pointer::lean::Spot::Hand("6s".into()))
-        );
-
-        // With the lean off the same discard asks nothing.
-        let (mut off, calls, _, _, _) = manager_with_mock(vec![]);
-        off.handle_tracked(tracked(dahai(0), Some(false)))
+        mgr.handle_tracked(tracked(dahai(1), Some(false)))
             .await
             .unwrap();
         assert!(calls.lock().await.is_empty());
+        assert!(responses.try_recv().is_err());
+        assert_eq!(mgr.pending.len(), 1);
     }
 
     #[tokio::test]
@@ -1391,6 +1500,7 @@ mod tests {
     #[tokio::test]
     async fn bot_response_broadcast_to_subscribers() {
         let scripted = BotResponse {
+            request: None,
             action: dahai(2),
             meta: None,
         };
@@ -1435,7 +1545,10 @@ mod tests {
         );
         mgr.actor_id = Some(2);
         mgr.active_name = "mock".into();
-        mgr.runner = Some(Box::new(MockBotRunner::failing("kaboom")));
+        mgr.runner = Some(ManagedBot::Direct(
+            Box::new(MockBotRunner::failing("kaboom")),
+            None,
+        ));
 
         // Trigger a decision point — react() returns error.
         let err = mgr.handle(dahai(0)).await.unwrap_err();
@@ -1493,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn a_game_the_bridge_said_nothing_of_is_not_described() {
+    fn descriptions_require_platform_metadata_and_preserve_tenhou_values() {
         assert_eq!(game_description(4, None), None);
         assert_eq!(game_description(4, Some(&GameMeta::default())), None);
         let tenhou = GameMeta {
@@ -1501,10 +1614,31 @@ mod tests {
                 log_id: None,
                 go_type: Some(0x89),
                 lobby: Some(0),
+                dan: Some(15),
             }),
             ..GameMeta::default()
         };
-        assert_eq!(game_description(4, Some(&tenhou)), None);
+        assert_eq!(
+            game_description(4, Some(&tenhou)),
+            Some(serde_json::json!({
+                "platform": "tenhou", "num_players": 4, "go_type": 0x89, "lobby": 0, "dan": 15
+            }))
+        );
+        let unknown = GameMeta {
+            match_info: Some(MatchInfo::Tenhou {
+                log_id: None,
+                go_type: None,
+                lobby: None,
+                dan: None,
+            }),
+            ..GameMeta::default()
+        };
+        assert_eq!(
+            game_description(4, Some(&unknown)),
+            Some(serde_json::json!({
+                "platform": "tenhou", "num_players": 4, "go_type": null, "lobby": null, "dan": null
+            }))
+        );
     }
 
     #[tokio::test]
@@ -1576,6 +1710,30 @@ mod tests {
         let n = notify_rx.try_recv().unwrap();
         assert_eq!(n.level, crate::schema::NotifyLevel::Error);
         assert!(n.title.contains("Bot not found"));
+    }
+
+    #[tokio::test]
+    async fn malformed_transport_manifest_cannot_silently_start_a_direct_runner() {
+        let root = tempfile::tempdir().unwrap();
+        let bot = root.path().join("broken");
+        std::fs::create_dir(&bot).unwrap();
+        std::fs::write(bot.join("bot.py"), "").unwrap();
+        std::fs::write(bot.join("pyproject.toml"), "").unwrap();
+        std::fs::write(bot.join("manifest.toml"), "[bot]\nprotocol = 'unknown'\n").unwrap();
+        let mut mgr = BotManager::new(
+            Some(dummy_runtime()),
+            root.path().into(),
+            cfg_with("broken"),
+            bot_response_bus(),
+            bot_status_bus(),
+            notify_bus(),
+            dummy_inspector(),
+            fresh_syncs(),
+        );
+        let start = serde_json::from_str(r#"{"type":"start_game","id":0,"names":[]}"#).unwrap();
+        let error = mgr.handle(start).await.unwrap_err();
+        assert!(format!("{error:#}").contains("invalid bot manifest"));
+        assert!(mgr.runner.is_none());
     }
 
     /// Regression (issue #157): switching the active bot after the manager
@@ -1866,7 +2024,7 @@ mod tests {
         );
         mgr.actor_id = Some(2);
         let (mock, _calls) = MockBotRunner::new(vec![]);
-        mgr.runner = Some(Box::new(mock));
+        mgr.runner = Some(ManagedBot::Direct(Box::new(mock), None));
 
         let handle = tokio::spawn(async move { mgr.run(rx).await });
         drop(events); // last sender → channel closes
@@ -1881,21 +2039,11 @@ mod tests {
 
     fn reach_none(actor: u8) -> BotResponse {
         BotResponse {
+            request: None,
             action: MjaiEvent::Reach {
                 actor,
                 pai: None,
                 tsumogiri: None,
-            },
-            meta: None,
-        }
-    }
-
-    fn dahai_reply(actor: u8, pai: &str) -> BotResponse {
-        BotResponse {
-            action: MjaiEvent::Dahai {
-                actor,
-                pai: pai.into(),
-                tsumogiri: false,
             },
             meta: None,
         }
@@ -1908,47 +2056,12 @@ mod tests {
         }
     }
 
-    /// A stateful third-party bot declares riichi as plain mjai (`reach` with
-    /// no `pai`). Under autoplay the manager resolves the declaring discard by
-    /// feeding the runner a synthetic reach, fills `pai`, and then drops the
-    /// bridge's own-seat reach echo so the runner never sees a second reach.
     #[tokio::test]
-    async fn autoplay_reach_followup_fills_pai_and_dedups_bridge_echo() {
-        let (mut mgr, calls, mut resp_rx, _, _) =
-            manager_with_mock(vec![reach_none(2), dahai_reply(2, "3p")]);
+    async fn an_unexecuted_direct_reach_does_not_mutate_the_runner_or_drop_its_real_echo() {
+        let (mut mgr, calls, _, _, _) = manager_with_mock(vec![reach_none(2)]);
         mgr.config.write().await.autoplay.enabled = true;
-
-        // Own draw → decision point → bot declares bare reach → follow-up.
         mgr.handle(our_tsumo()).await.unwrap();
-
-        {
-            let c = calls.lock().await;
-            assert_eq!(c.len(), 2, "tsumo react + reach follow-up react");
-            assert!(matches!(c[0].as_slice(), [MjaiEvent::Tsumo { .. }]));
-            assert!(
-                matches!(
-                    c[1].as_slice(),
-                    [MjaiEvent::Reach {
-                        actor: 2,
-                        pai: None,
-                        ..
-                    }]
-                ),
-                "follow-up feeds the runner the reach"
-            );
-        }
-
-        let emitted = resp_rx.try_recv().expect("a bot response");
-        assert!(
-            matches!(emitted.action, MjaiEvent::Reach { actor: 2, pai: Some(ref t), .. } if t == "3p"),
-            "the emitted reach carries the resolved riichi tile"
-        );
-        assert!(
-            mgr.drop_next_own_reach,
-            "the bridge echo is now armed to drop"
-        );
-
-        // The bridge's later reach echo for our seat must not reach the runner.
+        assert_eq!(calls.lock().await.len(), 1);
         mgr.handle(MjaiEvent::Reach {
             actor: 2,
             pai: None,
@@ -1956,101 +2069,194 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(
-            calls.lock().await.len(),
-            2,
-            "bridge reach echo dropped — no third react call"
-        );
-        assert!(!mgr.drop_next_own_reach, "drop flag consumed by the echo");
+        assert!(mgr
+            .pending
+            .iter()
+            .any(|e| matches!(e, MjaiEvent::Reach { actor: 2, .. })));
     }
 
-    /// Analysis mode (autoplay off): the bare reach is forwarded unchanged and
-    /// the bridge echo is NOT dropped — mutating a stateful bot with a
-    /// speculative reach the human may decline is exactly what we must avoid.
     #[tokio::test]
-    async fn analysis_mode_leaves_bare_reach_and_forwards_bridge_echo() {
-        let (mut mgr, calls, mut resp_rx, _, _) = manager_with_mock(vec![reach_none(2)]);
-        // autoplay.enabled stays false (default).
-
-        mgr.handle(our_tsumo()).await.unwrap();
-        assert_eq!(
-            calls.lock().await.len(),
-            1,
-            "no reach follow-up when autoplay is off"
-        );
-        let emitted = resp_rx.try_recv().expect("a bot response");
-        assert!(
-            matches!(
-                emitted.action,
-                MjaiEvent::Reach {
-                    actor: 2,
-                    pai: None,
-                    ..
-                }
-            ),
-            "bare reach forwarded unchanged"
-        );
-        assert!(!mgr.drop_next_own_reach);
-
-        // Bridge reach echo is buffered for the runner, not eaten.
-        mgr.handle(MjaiEvent::Reach {
-            actor: 2,
-            pai: None,
-            tsumogiri: None,
+    async fn an_own_tenhou_reach_confirmation_never_asks_a_second_strategy_decision() {
+        use crate::bot::control::InputWindow;
+        let full =
+            serde_json::from_str(r#"{"type":"reach","actor":2,"pai":"3p","tsumogiri":true}"#)
+                .unwrap();
+        let (mut mgr, calls, mut replies, _, _) = manager_with_mock(vec![full]);
+        let original = crate::monitor::DecisionContext {
+            game: 1,
+            round: 1,
+            event_seq: 3,
+        };
+        let window = InputWindow::Tenhou(crate::autoplay::tenhou_state::DecisionWindow {
+            ops: 32,
+            opened_at: Instant::now(),
+            clock: Some(crate::autoplay::tenhou_state::TurnClock::NORMAL),
+        });
+        mgr.handle_tracked(TrackedEvent {
+            event: our_tsumo(),
+            window: Some(window),
+            context: Some(original),
+            can_act: Some(true),
         })
         .await
         .unwrap();
-        assert_eq!(calls.lock().await.len(), 1, "reach is not a decision point");
-        assert!(
-            mgr.pending
-                .iter()
-                .any(|e| matches!(e, MjaiEvent::Reach { actor: 2, .. })),
-            "echo buffered for the next flush, not dropped"
-        );
-    }
-
-    /// A bot that pre-fills `pai` (the built-in native bot, or a V3-aware
-    /// bot) needs no follow-up even under autoplay, and arms no echo drop.
-    #[tokio::test]
-    async fn autoplay_prefilled_reach_pai_skips_followup() {
-        let prefilled = BotResponse {
-            action: MjaiEvent::Reach {
+        assert!(matches!(
+            replies.try_recv().unwrap().action,
+            MjaiEvent::Reach { pai: Some(_), .. }
+        ));
+        mgr.handle_tracked(TrackedEvent {
+            event: MjaiEvent::Reach {
                 actor: 2,
-                pai: Some("3p".into()),
+                pai: None,
                 tsumogiri: None,
             },
-            meta: None,
-        };
-        let (mut mgr, calls, mut resp_rx, _, _) = manager_with_mock(vec![prefilled]);
-        mgr.config.write().await.autoplay.enabled = true;
-
-        mgr.handle(our_tsumo()).await.unwrap();
-        assert_eq!(
-            calls.lock().await.len(),
-            1,
-            "pre-filled pai needs no follow-up"
-        );
-        let emitted = resp_rx.try_recv().expect("a bot response");
+            window: None,
+            context: Some(crate::monitor::DecisionContext {
+                event_seq: 4,
+                ..original
+            }),
+            can_act: Some(true),
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.lock().await.len(), 1);
         assert!(
-            matches!(emitted.action, MjaiEvent::Reach { actor: 2, pai: Some(ref t), .. } if t == "3p")
+            replies.try_recv().is_err(),
+            "no second discard proposal for the acknowledgment"
         );
-        assert!(
-            !mgr.drop_next_own_reach,
-            "no follow-up ran, so the bridge echo must still reach the runner"
-        );
+        assert!(matches!(
+            mgr.pending.as_slice(),
+            [MjaiEvent::Reach { actor: 2, .. }]
+        ));
     }
 
-    /// Leak guard: a declaration whose reach press is lost never produces the
-    /// echo the drop flag waits for, so a kyoku/game boundary must clear it or
-    /// it would eat the next hand's real reach.
+    async fn feed_direct(
+        mgr: &mut BotManager,
+        tracker: &mut crate::game_state::GameTracker,
+        monitor: &crate::monitor::MonitorHandle,
+        event: MjaiEvent,
+        window: Option<super::super::control::InputWindow>,
+    ) {
+        tracker.handle(&event).unwrap();
+        let context = monitor.game_event(&event, tracker.snapshot(), None);
+        mgr.handle_tracked(TrackedEvent {
+            event,
+            context: Some(context),
+            window,
+            can_act: tracker.our_seat_can_act(),
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn stale_reach_drop_flag_clears_on_kyoku_boundary() {
-        let (mut mgr, _calls, _, _, _) = manager_with_mock(vec![]);
-        mgr.drop_next_own_reach = true;
-        mgr.handle(MjaiEvent::EndKyoku).await.unwrap();
-        assert!(
-            !mgr.drop_next_own_reach,
-            "a kyoku boundary clears a stale drop flag"
+    async fn direct_native_and_plain_pass_share_the_original_core_contract() {
+        use crate::autoplay::{BudgetSource, TimeBudget};
+        use crate::bot::control::{DecisionSource, InputWindow, RunnerHealth};
+        let bus = bot_response_bus();
+        let mut replies = bus.subscribe();
+        let monitor = crate::monitor::MonitorHandle::default();
+        let mut mgr = BotManager::new(
+            None,
+            empty_bot_dir(),
+            cfg_with(crate::bot::native::NATIVE_4P),
+            bus,
+            bot_status_bus(),
+            notify_bus(),
+            dummy_inspector(),
+            fresh_syncs(),
+        )
+        .with_monitor(Some(monitor.clone()));
+        let mut tracker = crate::game_state::GameTracker::new();
+        let original = InputWindow::Majsoul(TimeBudget {
+            fixed_ms: 5000,
+            add_ms: 0,
+            opened_at: Instant::now(),
+            source: BudgetSource::DealTile,
+        });
+        for event in crate::bot::recovery::tests::opening() {
+            let window = matches!(event, MjaiEvent::Tsumo { actor: 0, .. }).then_some(original);
+            feed_direct(&mut mgr, &mut tracker, &monitor, event, window).await;
+        }
+        let native = replies.try_recv().unwrap();
+        assert_eq!(native.request.unwrap().window, Some(original));
+        assert_eq!(native.request.unwrap().context, monitor.snapshot().context);
+        assert_eq!(
+            native.control().unwrap().unwrap().source,
+            DecisionSource::Primary
         );
+        assert!(matches!(
+            native.control().unwrap().unwrap().primary,
+            RunnerHealth::DirectReady { delivered: 3 }
+        ));
+        // A known valid decline on a real pon window, then an unavailable result.
+        let (runner, _) = MockBotRunner::new(vec![
+            serde_json::from_str(r#"{"type":"none"}"#).unwrap(),
+            serde_json::from_str(
+                r#"{"type":"none","meta":{"unavailable":"injected direct outage"}}"#,
+            )
+            .unwrap(),
+        ]);
+        mgr.runner = Some(ManagedBot::Direct(Box::new(runner), None));
+        feed_direct(
+            &mut mgr,
+            &mut tracker,
+            &monitor,
+            serde_json::from_str(r#"{"type":"dahai","actor":0,"pai":"N","tsumogiri":true}"#)
+                .unwrap(),
+            None,
+        )
+        .await;
+        for actor in [1, 2] {
+            feed_direct(
+                &mut mgr,
+                &mut tracker,
+                &monitor,
+                MjaiEvent::Tsumo {
+                    actor,
+                    pai: "?".into(),
+                },
+                None,
+            )
+            .await;
+            let claim = InputWindow::Majsoul(TimeBudget {
+                opened_at: Instant::now(),
+                source: BudgetSource::DiscardTile,
+                ..match original {
+                    InputWindow::Majsoul(b) => b,
+                    _ => unreachable!(),
+                }
+            });
+            feed_direct(
+                &mut mgr,
+                &mut tracker,
+                &monitor,
+                MjaiEvent::Dahai {
+                    actor,
+                    pai: "F".into(),
+                    tsumogiri: false,
+                },
+                Some(claim),
+            )
+            .await;
+            assert_eq!(tracker.our_seat_can_act(), Some(true));
+            if actor == 1 {
+                let pass = replies.try_recv().unwrap();
+                assert_eq!(pass.action, MjaiEvent::None);
+                assert_eq!(pass.request.unwrap().window, Some(claim));
+                assert!(matches!(
+                    pass.control().unwrap().unwrap().primary,
+                    RunnerHealth::DirectReady { delivered: 6 }
+                ));
+            } else {
+                assert!(replies.try_recv().is_err());
+                let control = monitor.snapshot().control.unwrap();
+                assert_eq!(control.source, DecisionSource::Unavailable);
+                assert!(matches!(
+                    control.primary,
+                    RunnerHealth::DirectUnavailable { delivered: 8, .. }
+                ));
+            }
+        }
     }
 }

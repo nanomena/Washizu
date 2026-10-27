@@ -13,7 +13,7 @@ const READY_TIMEOUT_MS = 30_000
 const STDERR_KEPT = 4_000
 
 /**
- * @typedef {{ brand: string, monitor: { always_on_top: boolean, pointer_trail?: boolean, pointer_lean?: boolean, quick_confirm?: boolean, auto_win?: boolean, auto_continue?: boolean }, version: string }} Ready
+ * @typedef {{ brand: string, platform: 'Majsoul' | 'Tenhou', monitor: { pointer_trail?: boolean, pointer_lean?: boolean, quick_confirm?: boolean, auto_win?: boolean, auto_continue?: boolean }, version: string }} Ready
  * @typedef {{ done: (value: unknown) => void, fail: (reason: Error) => void }} Waiting
  */
 
@@ -34,6 +34,10 @@ export class Core extends EventEmitter {
     this.next = 0
     this.stderr = ''
     this.gone = false
+    this.released = false
+    this.shutdownError = ''
+    /** @type {number | null} */
+    this.exitCode = null
     this.child = spawn(command, args, { ...options, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     /** @type {Promise<Ready>} */
     this.ready = new Promise((done, fail) => {
@@ -51,7 +55,7 @@ export class Core extends EventEmitter {
     this.child.stdin.on('error', () => {})
     this.child.on('error', error => this.#end(`The core could not be started: ${error.message}`))
     // `close`, not `exit`: by then everything it wrote has been read.
-    this.child.on('close', (code, signal) => this.#end(`The core stopped (${signal ?? `exit ${code}`}).`))
+    this.child.on('close', (code, signal) => { this.exitCode = code; this.#end(`The core stopped (${signal ?? `exit ${code}`}).`) })
   }
 
   /**
@@ -75,6 +79,19 @@ export class Core extends EventEmitter {
     this.child.stdin.end()
   }
 
+  /** @returns {Promise<void>} */
+  async stop() {
+    if (!this.gone) await new Promise((done, fail) => {
+      const timer = setTimeout(() => {
+        this.child.kill()
+        fail(new Error('The core did not release the account within 10 seconds.'))
+      }, 10_000)
+      this.once('exit', () => { clearTimeout(timer); done(undefined) })
+      this.close()
+    })
+    if (!this.released || this.exitCode !== 0) throw new Error(this.shutdownError || 'The core did not confirm that its managed service was released. Account switching remains blocked.')
+  }
+
   /** @param {string} line */
   #read(line) {
     /** @type {any} */
@@ -82,6 +99,10 @@ export class Core extends EventEmitter {
     try { message = JSON.parse(line) } catch { return }
     if (!message || typeof message !== 'object') return
     if (typeof message.event === 'string') {
+      if (message.event === 'shutdown-complete') {
+        this.released = message.payload?.ok === true
+        this.shutdownError = typeof message.payload?.error === 'string' ? message.payload.error : ''
+      }
       if (message.event === 'ready') this.emit('ready', message.payload)
       else this.emit('event', message.event, message.payload)
       return

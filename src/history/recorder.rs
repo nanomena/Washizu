@@ -44,12 +44,12 @@ pub async fn drive_loop(
     store: Arc<HistoryStore>,
     history_bus: HistoryBus,
     platform: SharedPlatform,
-    mut mjai_rx: Receiver<MjaiEvent>,
+    mut mjai_rx: Receiver<crate::event_bus::CapturedEvent>,
 ) {
     let mut state = RecorderState::new(platform);
     loop {
         match mjai_rx.recv().await {
-            Ok(ev) => state.handle(ev, &store, &history_bus),
+            Ok(ev) => state.handle(ev.event, &store, &history_bus),
             Err(RecvError::Lagged(n)) => {
                 // Lagged consumers must reset — we've lost events that
                 // belonged to the in-flight game.
@@ -317,7 +317,7 @@ mod tests {
     async fn complete_game_writes_record() {
         let tmp = TempDir::new().unwrap();
         let store = Arc::new(HistoryStore::new(tmp.path().to_path_buf()).unwrap());
-        let (tx, rx) = broadcast::channel::<MjaiEvent>(DEFAULT_CAPACITY);
+        let (tx, rx) = broadcast::channel::<crate::event_bus::CapturedEvent>(DEFAULT_CAPACITY);
         let (history_tx, _history_rx): (HistoryBus, _) = broadcast::channel(8);
 
         let store_clone = store.clone();
@@ -332,21 +332,24 @@ mod tests {
             .await
         });
 
-        tx.send(start_game()).unwrap();
-        tx.send(start_kyoku()).unwrap();
-        tx.send(MjaiEvent::Hora {
-            score: None,
-            actor: 0,
-            target: 1,
-            deltas: Some(vec![8000, -8000, 0, 0]),
-            ura_markers: None,
-            pai: None,
-            tehai: None,
-            scores: None,
-        })
+        tx.send((start_game()).into()).unwrap();
+        tx.send((start_kyoku()).into()).unwrap();
+        tx.send(
+            (MjaiEvent::Hora {
+                score: None,
+                actor: 0,
+                target: 1,
+                deltas: Some(vec![8000, -8000, 0, 0]),
+                ura_markers: None,
+                pai: None,
+                tehai: None,
+                scores: None,
+            })
+            .into(),
+        )
         .unwrap();
-        tx.send(MjaiEvent::EndKyoku).unwrap();
-        tx.send(MjaiEvent::end_game()).unwrap();
+        tx.send((MjaiEvent::EndKyoku).into()).unwrap();
+        tx.send((MjaiEvent::end_game()).into()).unwrap();
 
         // Give the loop a tick to drain.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -364,7 +367,7 @@ mod tests {
     async fn disconnect_without_end_game_drops_buffer() {
         let tmp = TempDir::new().unwrap();
         let store = Arc::new(HistoryStore::new(tmp.path().to_path_buf()).unwrap());
-        let (tx, rx) = broadcast::channel::<MjaiEvent>(DEFAULT_CAPACITY);
+        let (tx, rx) = broadcast::channel::<crate::event_bus::CapturedEvent>(DEFAULT_CAPACITY);
         let (history_tx, _history_rx): (HistoryBus, _) = broadcast::channel(8);
 
         let store_clone = store.clone();
@@ -379,18 +382,21 @@ mod tests {
             .await
         });
 
-        tx.send(start_game()).unwrap();
-        tx.send(start_kyoku()).unwrap();
-        tx.send(MjaiEvent::Hora {
-            score: None,
-            actor: 0,
-            target: 1,
-            deltas: Some(vec![8000, -8000, 0, 0]),
-            ura_markers: None,
-            pai: None,
-            tehai: None,
-            scores: None,
-        })
+        tx.send((start_game()).into()).unwrap();
+        tx.send((start_kyoku()).into()).unwrap();
+        tx.send(
+            (MjaiEvent::Hora {
+                score: None,
+                actor: 0,
+                target: 1,
+                deltas: Some(vec![8000, -8000, 0, 0]),
+                ura_markers: None,
+                pai: None,
+                tehai: None,
+                scores: None,
+            })
+            .into(),
+        )
         .unwrap();
         // Channel closes without an EndGame.
         drop(tx);
@@ -404,7 +410,7 @@ mod tests {
     async fn second_start_game_resets_buffer() {
         let tmp = TempDir::new().unwrap();
         let store = Arc::new(HistoryStore::new(tmp.path().to_path_buf()).unwrap());
-        let (tx, rx) = broadcast::channel::<MjaiEvent>(DEFAULT_CAPACITY);
+        let (tx, rx) = broadcast::channel::<crate::event_bus::CapturedEvent>(DEFAULT_CAPACITY);
         let (history_tx, _history_rx): (HistoryBus, _) = broadcast::channel(8);
 
         let store_clone = store.clone();
@@ -420,24 +426,27 @@ mod tests {
         });
 
         // First game starts but never ends.
-        tx.send(start_game()).unwrap();
-        tx.send(start_kyoku()).unwrap();
+        tx.send((start_game()).into()).unwrap();
+        tx.send((start_kyoku()).into()).unwrap();
 
         // Second game starts cleanly and ends.
-        tx.send(start_game()).unwrap();
-        tx.send(start_kyoku()).unwrap();
-        tx.send(MjaiEvent::Hora {
-            score: None,
-            actor: 0,
-            target: 1,
-            deltas: Some(vec![8000, -8000, 0, 0]),
-            ura_markers: None,
-            pai: None,
-            tehai: None,
-            scores: None,
-        })
+        tx.send((start_game()).into()).unwrap();
+        tx.send((start_kyoku()).into()).unwrap();
+        tx.send(
+            (MjaiEvent::Hora {
+                score: None,
+                actor: 0,
+                target: 1,
+                deltas: Some(vec![8000, -8000, 0, 0]),
+                ura_markers: None,
+                pai: None,
+                tehai: None,
+                scores: None,
+            })
+            .into(),
+        )
         .unwrap();
-        tx.send(MjaiEvent::end_game()).unwrap();
+        tx.send((MjaiEvent::end_game()).into()).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         drop(tx);

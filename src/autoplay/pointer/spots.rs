@@ -11,12 +11,7 @@ use super::aim::Reach;
 use super::Point;
 use crate::autoplay::context::CanvasRect;
 use crate::autoplay::humanize::{self, Spread};
-use crate::autoplay::majsoul::coords::TILES;
 use rand::Rng;
-
-/// The top of the hand's tiles, as a normalised height: their middle less
-/// half the face (some 1.13 high).
-const TILES_TOP: f64 = TILES[0].1 - 0.57;
 
 /// Where the hand waits between presses, by the buttons (see
 /// [`humanize::rest_spot`]), in CSS pixels.
@@ -29,9 +24,8 @@ pub fn rest<R: Rng + ?Sized>(rect: CanvasRect, rng: &mut R) -> Point {
 /// tiles by [`humanize::LIFT_UP`], drifting [`humanize::LIFT_SIDE`] to
 /// either side, in CSS pixels. Clear of the tiles, and so of where the next
 /// draw lands.
-pub fn lift<R: Rng + ?Sized>(from: Point, rect: CanvasRect, rng: &mut R) -> Point {
+pub fn lift<R: Rng + ?Sized>(from: Point, top: f64, rect: CanvasRect, rng: &mut R) -> Point {
     let unit = rect.width / 16.0;
-    let (_, top) = rect.pixel(0.0, TILES_TOP);
     let up = humanize::LIFT_UP.draw(rng);
     let side = humanize::LIFT_SIDE.draw(rng);
     (from.0 + side * unit, top - up * unit)
@@ -46,12 +40,11 @@ pub fn on_tile<R: Rng + ?Sized>(middle: (f64, f64), rect: CanvasRect, rng: &mut 
     )
 }
 
-/// Where the next draw lands on a hand at rest of `count` tiles, in CSS
-/// pixels, and the canvas's 16:9 unit in pixels: what [`super::rules`]
-/// keeps the pointer off until the tile is there.
-pub fn draw_slot(count: usize, rect: CanvasRect) -> (Point, f64) {
-    let (x, y) = crate::autoplay::majsoul::draw_point(count);
-    (rect.pixel(x, y), rect.width / 16.0)
+/// A hover point kept inside an actual measured tile of any size.
+pub fn inside_tile<R: Rng + ?Sized>(bounds: CanvasRect, rng: &mut R) -> Point {
+    let x = (0.5 + humanize::LOOK_OFF_X.draw(rng) * 0.5).clamp(0.15, 0.85);
+    let y = (0.25 + humanize::normal(rng) * 0.05).clamp(0.15, 0.45);
+    (bounds.x + bounds.width * x, bounds.y + bounds.height * y)
 }
 
 /// A press on the same spot again, moved a little as a hand pressing in
@@ -90,14 +83,20 @@ mod tests {
     #[test]
     fn a_lift_clears_where_the_next_draw_lands() {
         let mut rng = StdRng::seed_from_u64(43);
-        let (slot, unit) = draw_slot(13, RECT);
+        let slot = (1050.0, 660.0);
+        let unit = RECT.width / 16.0;
+        let top = 610.0;
         let sight = Sight {
-            draw_slot: Some((slot, unit)),
+            draw_slot: Some(CanvasRect {
+                x: 1005.0,
+                y: top,
+                width: 90.0,
+                height: 100.0,
+            }),
         };
-        let (_, top) = RECT.pixel(0.0, TILES_TOP);
         for _ in 0..2000 {
             let pressed = (slot.0, slot.1 + humanize::on_tile_y(&mut rng) * unit);
-            let to = lift(pressed, RECT, &mut rng);
+            let to = lift(pressed, top, RECT, &mut rng);
             assert_eq!(refusal(to, Bound::Errand, &sight), None, "{to:?}");
             assert!(to.1 < top, "above the tiles: {to:?}");
             assert!((to.0 - pressed.0).abs() <= humanize::LIFT_SIDE.most * unit + 1e-9);
@@ -108,7 +107,7 @@ mod tests {
     #[test]
     fn a_look_rests_on_its_tile() {
         let mut rng = StdRng::seed_from_u64(47);
-        let middle = TILES[4];
+        let middle = (4.0, 8.0);
         let unit = RECT.width / 16.0;
         let (mx, my) = RECT.pixel(middle.0, middle.1);
         for _ in 0..2000 {

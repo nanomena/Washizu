@@ -23,7 +23,7 @@ pub fn brand(config: &crate::config::AppConfig) -> String {
                 .and_then(|manifest| manifest.bot.display)
                 .unwrap_or(bot.name)
         })
-        .unwrap_or_else(|| "Akagi".into())
+        .unwrap_or_else(|| "Washizu".into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +126,9 @@ pub struct HandSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MonitorSnapshot {
+    pub control: Option<crate::bot::control::DecisionControl>,
+    /// Optional pointer prediction; never a decision source or primary health.
+    pub forecast: crate::bot::forecast::ForecastStatus,
     pub revision: u64,
     pub context: DecisionContext,
     pub names: Vec<String>,
@@ -143,6 +146,9 @@ pub struct MonitorSnapshot {
     /// not whether the bot has reached it.
     pub server: ServiceStatus,
     pub sync_error: Option<String>,
+    /// Last unresolved sync fault. Unlike the current hand's `sync_error`,
+    /// this survives deals/reconnects until a fresh actionable model reply.
+    pub sync_fault: Option<String>,
     /// The name the window goes by: the active bot's display name.
     pub brand: String,
     /// What the bot's latest reply said about itself (`meta.facts`).
@@ -166,6 +172,8 @@ pub struct MonitorSnapshot {
 impl Default for MonitorSnapshot {
     fn default() -> Self {
         Self {
+            control: None,
+            forecast: crate::bot::forecast::status(),
             revision: 0,
             context: DecisionContext {
                 game: 0,
@@ -184,7 +192,8 @@ impl Default for MonitorSnapshot {
             service_error: None,
             server: ServiceStatus::None,
             sync_error: None,
-            brand: "Akagi".into(),
+            sync_fault: None,
+            brand: "Washizu".into(),
             facts: vec![],
             autoplay_enabled: false,
             decision: None,
@@ -276,6 +285,7 @@ impl MonitorHandle {
             } = event
             {
                 s.context.game += 1;
+                s.control = None;
                 s.context.round = 0;
                 s.names = names.clone();
                 s.red_fives = *aka_flag;
@@ -345,7 +355,8 @@ impl MonitorHandle {
             s.view = game.as_ref().map(MahgenView::from_snapshot);
             s.game = game;
             if let Some(error) = error {
-                s.sync_error = Some(error);
+                s.sync_error = Some(error.clone());
+                s.sync_fault = Some(error);
                 expire(&mut s.decision);
             }
             match event {
@@ -534,13 +545,19 @@ impl MonitorHandle {
             d.completed_ms = Some(chrono::Local::now().timestamp_millis());
             d.reaction_ms = Some(reaction_ms);
             d.response = Some(response.clone());
+            d.error = response.unavailable_reason().map(String::from);
             d.state = if s.round_ended || s.sync_error.is_some() {
                 "expired"
+            } else if response.unavailable_reason().is_some() {
+                "unavailable"
             } else if matches!(response.action, MjaiEvent::None) {
                 if response
                     .meta
                     .as_ref()
                     .is_some_and(|m| m.get("show").is_some())
+                    || response.control().ok().flatten().is_some_and(|c| {
+                        c.source != crate::bot::control::DecisionSource::Unavailable
+                    })
                 {
                     "declined"
                 } else {
@@ -555,10 +572,26 @@ impl MonitorHandle {
                 if meta.get("facts").is_some() {
                     s.facts = facts_of(meta.get("facts"));
                 }
-                if meta.get("show").is_some() {
+                if meta.get("show").is_some()
+                    && response
+                        .control()
+                        .ok()
+                        .flatten()
+                        .is_none_or(|c| c.source == crate::bot::control::DecisionSource::Primary)
+                {
                     s.service = "connected".into();
                     s.service_error = None;
                 }
+            }
+            if matches!(d.state.as_str(), "awaiting" | "declined")
+                && s.service != "error"
+                && response
+                    .control()
+                    .ok()
+                    .flatten()
+                    .is_none_or(|c| c.source == crate::bot::control::DecisionSource::Primary)
+            {
+                s.sync_fault = None;
             }
             confirm(s);
         });
@@ -575,9 +608,33 @@ impl MonitorHandle {
         });
     }
 
+    pub fn set_control(&self, control: crate::bot::control::DecisionControl) {
+        self.update(|inner| {
+            inner.snapshot.control = Some(control);
+        });
+    }
+
+    pub fn set_forecast(&self, status: crate::bot::forecast::ForecastStatus) {
+        self.update(|inner| inner.snapshot.forecast = status);
+    }
+
+    pub fn set_runner_health(
+        &self,
+        primary: crate::bot::control::RunnerHealth,
+        standby: crate::bot::control::RunnerHealth,
+    ) {
+        self.update(|inner| {
+            if let Some(control) = &mut inner.snapshot.control {
+                control.primary = primary;
+                control.standby = standby;
+            }
+        });
+    }
+
     pub fn gap(&self, detail: String) {
         self.update(|i| {
-            i.snapshot.sync_error = Some(detail);
+            i.snapshot.sync_error = Some(detail.clone());
+            i.snapshot.sync_fault = Some(detail);
             expire(&mut i.snapshot.decision);
         });
     }
@@ -632,6 +689,18 @@ impl MonitorHandle {
         self.update(|i| {
             let s = &mut i.snapshot;
             let fault = matches!(notice.level, NotifyLevel::Error | NotifyLevel::Warn);
+            // In coordinated mode typed worker health owns primary failure.
+            // A primary stderr notice must not expire a valid standby action
+            // or become a fault in the independent real-event tracker.
+            if s.control.is_some() && ["server", "desync", "unsupported", "error"].contains(&suffix)
+            {
+                if suffix == "server" {
+                    s.service = if fault { "error" } else { "connected" }.into();
+                }
+                s.service_error =
+                    fault.then(|| notice.body.clone().unwrap_or_else(|| notice.title.clone()));
+                return;
+            }
             if suffix == "server" {
                 s.service = if fault { "error" } else { "connected" }.into();
                 s.service_error =
@@ -640,7 +709,9 @@ impl MonitorHandle {
                     expire(&mut s.decision);
                 }
             } else if fault && ["desync", "unsupported", "error"].contains(&suffix) {
-                s.sync_error = Some(notice.body.clone().unwrap_or_else(|| notice.title.clone()));
+                let detail = notice.body.clone().unwrap_or_else(|| notice.title.clone());
+                s.sync_error = Some(detail.clone());
+                s.sync_fault = Some(detail);
                 expire(&mut s.decision);
             }
         });
@@ -777,6 +848,109 @@ mod tests {
     }
     fn response(json: &str) -> BotResponse {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn forecast_updates_change_only_their_field_and_snapshot_revision() {
+        use crate::bot::control::{DecisionControl, DecisionSource, RunnerHealth};
+        use crate::bot::forecast::{ForecastPhase, ForecastStatus};
+        for source in [DecisionSource::Primary, DecisionSource::NativeStandby] {
+            let m = MonitorHandle::default();
+            let context = hand(&m);
+            m.set_bot(BotStatus::Ready {
+                bot: "demo".into(),
+                actor_id: 0,
+            });
+            let control = DecisionControl {
+                context,
+                window: None,
+                source,
+                primary: RunnerHealth::Ready { through: 2 },
+                standby: RunnerHealth::Ready { through: 2 },
+            };
+            m.set_control(control.clone());
+            let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+            let mut reply = response(r#"{"type":"dahai","actor":0,"pai":"9m","tsumogiri":true}"#);
+            reply.set_control(control);
+            m.complete(id, &reply, 10);
+            let before = serde_json::to_value(m.snapshot()).unwrap();
+            for phase in [
+                ForecastPhase::Idle,
+                ForecastPhase::Disabled,
+                ForecastPhase::Unsupported {
+                    reason: "no forecast protocol".into(),
+                },
+                ForecastPhase::Waiting,
+                ForecastPhase::Running {
+                    context,
+                    through: 2,
+                    position: 1,
+                },
+                ForecastPhase::Ready {
+                    context,
+                    through: 2,
+                    position: 1,
+                },
+                ForecastPhase::Unavailable {
+                    reason: "forecast pipe closed".into(),
+                },
+            ] {
+                let status = ForecastStatus { owner: 9, phase };
+                let revision = m.snapshot().revision;
+                m.set_forecast(status.clone());
+                let mut after = serde_json::to_value(m.snapshot()).unwrap();
+                assert_eq!(after["forecast"], serde_json::to_value(status).unwrap());
+                assert_eq!(after["revision"], revision + 1);
+                after["forecast"] = before["forecast"].clone();
+                after["revision"] = before["revision"].clone();
+                assert_eq!(after, before);
+            }
+        }
+    }
+
+    #[test]
+    fn primary_notices_do_not_expire_standby_but_a_real_tracker_gap_does() {
+        use crate::bot::control::{DecisionControl, DecisionSource, RunnerHealth};
+        let m = MonitorHandle::default();
+        let context = hand(&m);
+        m.set_bot(BotStatus::Ready {
+            bot: "demo".into(),
+            actor_id: 0,
+        });
+        let control = DecisionControl {
+            context,
+            window: None,
+            source: DecisionSource::NativeStandby,
+            primary: RunnerHealth::Recovering {
+                through: 2,
+                reason: "pipe lost".into(),
+            },
+            standby: RunnerHealth::Ready { through: 3 },
+        };
+        m.set_control(control.clone());
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        let mut reply = response(r#"{"type":"dahai","actor":0,"pai":"9m","tsumogiri":true}"#);
+        reply.set_control(control);
+        m.complete(id, &reply, 10);
+        m.notification(
+            &Notification::warn("primary down")
+                .body("pipe lost")
+                .id("demo-server"),
+        );
+        assert_eq!(m.snapshot().decision.unwrap().state, "awaiting");
+        assert!(m.snapshot().sync_error.is_none());
+        assert_eq!(m.snapshot().service_error.as_deref(), Some("pipe lost"));
+        assert_eq!(m.snapshot().service, "error");
+        m.set_runner_health(
+            RunnerHealth::Ready { through: 3 },
+            RunnerHealth::Ready { through: 3 },
+        );
+        assert_eq!(
+            m.snapshot().control.unwrap().source,
+            DecisionSource::NativeStandby
+        );
+        m.gap("missing real event".into());
+        assert_eq!(m.snapshot().decision.unwrap().state, "expired");
     }
     fn deal(m: &MonitorHandle, kyoku: u8, honba: u8) -> DecisionContext {
         let dealt = format!(
@@ -1087,6 +1261,57 @@ mod tests {
         m.complete(id, &response(r#"{"type":"none"}"#), 4000);
         assert_eq!(m.snapshot().service, "error");
         assert_eq!(m.snapshot().decision.unwrap().state, "unavailable");
+    }
+
+    #[test]
+    fn sync_fault_survives_deals_until_an_actionable_reply_confirms_recovery() {
+        let m = MonitorHandle::default();
+        let context = hand(&m);
+        m.set_bot(BotStatus::Ready {
+            bot: "demo".into(),
+            actor_id: 0,
+        });
+        m.notification(
+            &Notification::warn("lost this hand")
+                .body("bad discard")
+                .id("demo-desync"),
+        );
+        assert!(m.begin(context, "demo", &MjaiEvent::None).is_none());
+        let context = deal(&m, 2, 0);
+        assert!(m.snapshot().sync_error.is_none());
+        assert_eq!(m.snapshot().sync_fault.as_deref(), Some("bad discard"));
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        m.complete(id, &response(r#"{"type":"none"}"#), 10);
+        assert!(m.snapshot().sync_fault.is_some());
+        // A reconnect/new start_game is not proof of restored inference either.
+        let context = hand(&m);
+        assert!(m.snapshot().sync_fault.is_some());
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        m.complete(
+            id,
+            &response(r#"{"type":"dahai","actor":0,"pai":"9m","tsumogiri":true}"#),
+            10,
+        );
+        assert!(m.snapshot().sync_fault.is_none());
+        m.gap("another lost hand".into());
+        let context = deal(&m, 3, 0);
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        m.complete(
+            id,
+            &response(r#"{"type":"none","meta":{"unavailable":"still lost"}}"#),
+            10,
+        );
+        assert!(m.snapshot().sync_fault.is_some());
+        let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+        m.complete(
+            id,
+            &response(r#"{"type":"none","meta":{"show":{"items":[]}}}"#),
+            10,
+        );
+        assert!(
+            m.snapshot().sync_fault.is_none(),
+            "an actual model PASS also confirms recovery"
+        );
     }
     #[test]
     fn notices_require_the_current_bot_namespace() {

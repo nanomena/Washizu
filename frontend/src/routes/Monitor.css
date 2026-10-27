@@ -197,7 +197,6 @@
 .mbtn--primary { height: 42px; width: 100%; font-size: 14px; font-weight: 600; color: #fff; background: var(--m-cta); border-color: transparent; }
 .mbtn--primary:hover:not(:disabled) { color: #fff; background: hsl(209 79% 43%); border-color: transparent; }
 
-.mtools { display: flex; flex: none; gap: 2px; }
 .mtool { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; color: var(--m-ink2); }
 .mtool:hover:not(:disabled) { color: var(--m-ink); background: hsl(35 20% 14% / 0.07); }
 .mtool[aria-pressed='true'] { color: var(--m-ink); background: var(--m-panel); box-shadow: var(--m-shadow); }
@@ -265,6 +264,8 @@
 .mdec-mark { flex: none; width: 10ch; overflow: hidden; text-overflow: ellipsis; }
 .mdec-kicker i { overflow: hidden; text-overflow: ellipsis; }
 .mdec-kicker i::before { content: '·'; margin-right: 6px; opacity: 0.6; }
+.mdec-msg .mdec-source { flex: 0 1 auto; max-width: 60%; font-weight: 600; }
+.mdec-msg .mdec-source[data-source='native_standby'] { color: var(--m-wait); }
 
 .mdec-main { display: flex; align-items: center; min-width: 0; min-height: 0; }
 .mdec-empty { font-size: 14px; color: var(--m-dim); }
@@ -376,7 +377,7 @@
 /* The reason there are no candidates, in the candidates' own slot. */
 .mfault {
   --tone: var(--m-bad);
-  display: grid; grid-template-rows: minmax(0, 1fr) var(--line); min-width: 0; min-height: 0; padding: 7px 14px; border-radius: 10px;
+  display: grid; grid-template: minmax(0, 1fr) var(--line) / minmax(0, 1fr); min-width: 0; min-height: 0; padding: 7px 14px; border-radius: 10px;
   background: color-mix(in srgb, var(--m-bad) 8%, var(--m-panel)); border: 1px solid hsl(0 60% 50% / 0.35); box-shadow: var(--m-shadow);
 }
 .mfault ul { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden; }
@@ -552,16 +553,16 @@
 /* One grid for the bar and the panels over it: twelve columns, 93 wide and 12
  * apart, 16 in from either edge. Every panel runs from one column's edge to
  * another's, so every edge stands over an edge of the bar. The bar is in three
- * parts — the round on 1 to 4, what the window may do on 5 to 7, the tabs on 8
- * to 12 — under the decision tab's three panels. */
+ * parts — the round on 1 to 4, autoplay on 5 to 8, the tabs on 9
+ * to 12. The panels above keep their own column spans. */
 .md-bar { grid-row: 2; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: center; column-gap: 12px; min-width: 0; padding: 0 16px; }
 .md-bar > .mround { grid-column: 1 / 5; }
 /* The middle part ends with what the window may do: autoplay, and the tools. */
-.md-controls { grid-column: 5 / 8; display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.md-controls { grid-column: 5 / 9; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
 /* The round's dora indicators: five fit, the most a hand turns over. */
 .mround .mdora { --th: 20px; height: 20px; }
 /* The segmented control: a grey well, the chosen segment a white pill. */
-.md-tabs { grid-column: 8 / 13; display: flex; justify-self: stretch; gap: 2px; padding: 3px; border-radius: 8px; background: var(--m-well); }
+.md-tabs { grid-column: 9 / 13; display: flex; justify-self: stretch; gap: 2px; padding: 3px; border-radius: 8px; background: var(--m-well); }
 .md-tabs button { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 1 1 auto; white-space: nowrap; height: 22px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--m-ink2); }
 /* The links' one light sits after their tab's name, always there: it changes colour, not the tab's width. */
 .md-tab-dot { margin-left: 6px; }
@@ -573,6 +574,7 @@
  * decision's own tab: the candidates 5 to 7, the hand and the scores 8 to 12,
  * the round's result across both. */
 .md-body > .mdec { grid-column: 1 / 5; }
+.md-fault { grid-column: 1 / 5; display: grid; min-width: 0; min-height: 0; }
 .md-body > :is(.mcands, .mfault) { grid-column: 5 / 8; }
 .md-body > :is(.md-side, .mslot-empty) { grid-column: 8 / 13; }
 .md-body > :is(.md-wide, .mresult) { grid-column: 5 / 13; }
@@ -584,13 +586,12 @@
 
 /* 1280 × 720: where the game goes. Until it is there, a front page:
  * a title, a white card, one blue button. */
-.mon-stage-start, .mon-stage-idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.mon-stage-start { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .mon-stage-start { gap: 0; }
 .mon-stage-start h2 { width: 440px; font: 500 30px/1.2 var(--m-display); }
 .mon-stage-start > p { width: 440px; margin: 6px 0 18px; font-size: 14px; color: var(--m-ink2); }
 .mon-start-card { display: flex; flex-direction: column; gap: 14px; width: 440px; padding: 20px; border-radius: 8px; }
 .mon-start-card p { font-size: 13px; line-height: 1.5; color: var(--m-ink2); }
-.mon-stage-idle { gap: 14px; color: var(--m-ink2); font-size: 14px; }
 /* The game drawn offscreen: its frames fill the stage, which is its exact ratio. */
 .mon-game { position: absolute; inset: 0; background: #000; touch-action: none; user-select: none; }
 .mon-game-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
@@ -698,25 +699,21 @@
 .mset-grid > * { scroll-snap-align: start; }
 .mset-facts { display: grid; grid-template: repeat(7, var(--line)) / repeat(2, minmax(0, 1fr)); column-gap: 28px; align-content: start; min-height: 0; overflow: hidden; }
 .mset-facts > .mfact:nth-child(-n + 2) { border-top: 0; }
+.mset-account { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; height: 20px; }
+.mset-account span { overflow: hidden; text-overflow: ellipsis; }
+.mset-account svg { flex-shrink: 0; }
 .mset-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; min-width: 0; min-height: 0; }
 .mset-row + .mset-row { border-top: 1px solid var(--m-line); }
 /* A setting is one line: its name in a column of names, the line about it as far as it goes (whole on hover), its control. */
 .mset-row > div { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: baseline; column-gap: 12px; min-width: 0; }
 .mset-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .mset-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--m-dim); }
-.mset-row small[data-value] { color: var(--m-ink2); font-variant-numeric: tabular-nums; user-select: text; }
 .mset-row :is(.mswitch, .mselect, .mlevel) { justify-self: end; }
 .mset-row .mswitch { height: 21px; }
 .mset-row .mselect { height: 20px; }
 .mset-row .mlevel { padding: 1px; }
 .mset-row .mlevel button { height: 18px; line-height: 18px; }
-.mset-row .mset-copy { width: 22px; height: 21px; }
-/* The stream's row has a cell for its copy button, kept while there is nothing to copy. */
-.mset-row--extra { grid-template-columns: minmax(0, 1fr) 22px auto; }
-.mset-row--extra > div { grid-column: 1; }
-.mset-row--extra .mset-copy { grid-column: 2; }
-.mset-row--extra .mswitch { grid-column: 3; }
-.mset-copy[data-empty] { visibility: hidden; }
+.mset-help { margin: 0; align-self: center; color: var(--m-dim); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The links, a line each: the light, the name, the state, and what it is doing or the error it gave (whole on hover). */
 .mset-links { display: grid; grid-auto-rows: var(--line); align-content: start; min-height: 0; }
 .mset-link { display: grid; grid-template-columns: 7px 96px 88px minmax(0, 1fr); align-items: center; column-gap: 10px; min-width: 0; min-height: 0; }

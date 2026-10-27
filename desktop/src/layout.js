@@ -90,6 +90,18 @@ export function trailBounds(content, game) {
   return { x: content.x + game.x, y: content.y + game.y, width: game.width, height: game.height }
 }
 
+/** Only the focused account can attribute the physical cursor to its game.
+ * Overlapping background windows must not report another window's manual input.
+ * @param {Rect} content
+ * @param {Rect | null} game
+ * @param {boolean} focused
+ * @param {boolean} minimized
+ * @returns {Rect | null}
+ */
+export function manualPointerArea(content, game, focused, minimized) {
+  return focused && !minimized && game ? trailBounds(content, game) : null
+}
+
 /**
  * Whether the user's own mouse is at work over the game: the system cursor
  * is inside the game view and moved within the last `stillMs`. Input sent

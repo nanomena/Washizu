@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 /// Stop capture, if it is running, and wait briefly for its task to say it has
 /// stopped — so that a [`start`] that follows begins on a clean slate.
 pub async fn stop_and_wait(state: &AppState, max_wait: Duration) {
+    state.autoplay_context.invalidate_ui();
     // Subscribe *before* signalling shutdown so we can't lose the
     // resulting status emission to a race.
     let mut rx = state.capture_status_bus.subscribe();
@@ -50,6 +51,7 @@ pub async fn start(state: AppState) -> Result<()> {
     let Some(game) = state.embedded_game.lock().await.clone() else {
         bail!("there is no game view to capture from");
     };
+    state.autoplay_context.invalidate_ui();
     let (platform, http) = {
         let cfg = state.config.read().await;
         (cfg.platform.kind, cfg.capture.http.clone())
@@ -86,6 +88,7 @@ pub async fn start(state: AppState) -> Result<()> {
     info!("capture supervisor: capturing from the game view at {address}");
     tokio::spawn(async move {
         let result = game.run(ctx, shutdown).await;
+        state.autoplay_context.invalidate_ui();
         // Input must never be left pointed at a page capture has let go of.
         *state.autoplay_context.page.write().await = None;
         *state.autoplay_context.canvas_rect.write().await = None;

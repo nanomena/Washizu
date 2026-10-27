@@ -1,6 +1,6 @@
 //! The pointer over one hand, and the one place it is moved and pressed.
 //!
-//! [`Hand`] keeps where the pointer is and what the bot expects of the seat's
+//! [`PointerController`] keeps where the pointer is and what the bot expects of the seat's
 //! next turn, and makes every move and every press autoplay makes — no other
 //! code sends the pointer anywhere. Others say what they want: the way to a
 //! decision's press ([`super::approach`]), a plan's next press, a press made
@@ -8,37 +8,43 @@
 //! a tsumogiri, the looks between turns ([`super::lean`]). Where each ends is
 //! [`super::spots`]'s and [`super::aim`]'s, every time and distance
 //! `humanize`'s, and every move passes [`super::rules`] here, in-line or
-//! queued ([`super::queue`]), whoever planned it: [`Hand::go`] for a move
-//! made at once, [`Hand::step`] for one that waited its turn, [`Hand::press`]
+//! queued ([`super::queue`]), whoever planned it: [`PointerController::go`] for a move
+//! made at once, [`PointerController::step`] for one that waited its turn, [`PointerController::press_when`]
 //! for a press.
 //!
 //! What it knows belongs to one hand, but for where the pointer is: the
 //! manager resets it at every hand's start and end, and the pointer stays
 //! where it was.
 
-use super::approach::{
-    approach, changed_mind, dealt_lead, wait_to_see, Approach, LOOK_MS, LOOK_REACH,
-};
+use super::approach::{approach, changed_mind, Approach, LOOK_MS, LOOK_REACH};
+use super::layout::{center, PointerLayout};
 use super::lean::{self, Lean, Spot};
 use super::queue::{self, Errand, Motion, Queue};
 use super::rules::{self, Bound, Sight};
 use super::{along, distance, leave, spots, Point};
 use crate::autoplay::context::{AutoplayContext, CanvasRect};
 use crate::autoplay::humanize;
-use crate::autoplay::platform::{PlanResult, Step};
 use crate::schema::MjaiEvent;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-pub struct Hand {
+pub struct ApproachInput {
+    pub think_ms: u32,
+    pub target: Point,
+    pub glance: Option<Point>,
+    pub look_ms: Option<u32>,
+    pub rect: CanvasRect,
+}
+
+pub struct PointerController {
     ctx: Arc<AutoplayContext>,
     /// Where the pointer was last put, in CSS pixels. `None` until its first
     /// move of the hand.
     at: Option<Point>,
     /// What the bot expects of the seat's next turn, and when the pointer
     /// next looks at it. `None` on the seat's own turn and outside a hand.
-    lean: Option<Lean>,
+    lean: Option<crate::bot::forecast::ForecastLean>,
     glance_at: Option<Instant>,
     /// When our draw came, the bot expected to throw it: a tsumogiri then
     /// lifts the pointer straight up off the hand rather than taking it to
@@ -55,9 +61,10 @@ pub struct Hand {
     /// The rest and the looks waiting their turn, and the one under way.
     queue: Queue,
     moving: Option<Moving>,
+    layout: Option<PointerLayout>,
 }
 
-/// An unhurried move under way, made a frame at a time by [`Hand::step`].
+/// An unhurried move under way, made a frame at a time by [`PointerController::step`].
 #[derive(Debug)]
 struct Moving {
     motion: Motion,
@@ -69,7 +76,14 @@ struct Moving {
     last: (Point, Instant),
 }
 
-impl Hand {
+impl PointerController {
+    /// Ownership/phase loss cancels all queued execution progress. Ordinary
+    /// hand reset deliberately preserves a rest; suspension must not.
+    pub fn cancel(&mut self) {
+        self.queue = Queue::default();
+        self.moving = None;
+        self.stop_glances();
+    }
     pub fn new(ctx: Arc<AutoplayContext>) -> Self {
         Self {
             ctx,
@@ -82,6 +96,7 @@ impl Hand {
             sight: Sight::default(),
             queue: Queue::default(),
             moving: None,
+            layout: None,
         }
     }
 
@@ -130,56 +145,30 @@ impl Hand {
         self.glance_at
     }
 
-    /// Plan the pointer's way to the plan's first press and take its time
-    /// out of the pause that leads the plan. `None` for a plan that does not
-    /// open with a pause and a press: there is no thinking time to move in.
-    /// `glance` is the runner-up to look at, as a normalised point; `shown_at`
-    /// when what the decision answers came on screen, before which the
-    /// pointer cannot have seen it (see [`wait_to_see`]); after a deal the
-    /// whole way is made once the hand can have been seen ([`dealt_lead`]).
-    /// A decision
-    /// that presses another tile than the one the pointer rests on after its
-    /// looks between turns is a changed mind ([`changed_mind`]).
-    pub fn plan_approach(
-        &mut self,
-        plan: &mut PlanResult,
-        rect: CanvasRect,
-        glance: Option<(f64, f64)>,
-        shown_at: Option<Instant>,
-        action: &MjaiEvent,
-    ) -> Option<Approach> {
+    /// Allocate the granted pacing interval across motion and dwell. Readiness
+    /// and deadlines belong to the turn controller; pointer style adds no time.
+    pub fn plan_approach(&mut self, input: ApproachInput, action: &MjaiEvent) -> Approach {
+        let ApproachInput {
+            think_ms,
+            target: press,
+            glance,
+            look_ms,
+            rect,
+        } = input;
         self.sync_with_user();
         let looked_at = self.looked_at.take();
-        let rest_ms = plan.look_ms.unwrap_or(LOOK_MS);
-        let dealt = plan.dealt;
-        let [Step::Sleep { duration_ms }, Step::Click { x_norm, y_norm }, ..] =
-            plan.steps.as_mut_slice()
-        else {
-            return None;
-        };
+        let rest_ms = look_ms.unwrap_or(LOOK_MS);
         let mut rng = rand::rng();
-        // How long from now until what it answers can have been seen.
-        let see_ms = shown_at.map(|shown_at| {
-            let seen_at =
-                shown_at + Duration::from_millis(u64::from(humanize::SEE.draw_ms(&mut rng)));
-            let ms = seen_at
-                .saturating_duration_since(Instant::now())
-                .as_millis();
-            u32::try_from(ms).unwrap_or(u32::MAX)
-        });
-        let lead = see_ms.map_or(0, |see_ms| dealt_lead(dealt, see_ms, *duration_ms));
-        let think_ms = *duration_ms - lead;
         // A pointer that has not been anywhere yet starts from where it
         // would have been resting.
         let from = *self.at.get_or_insert_with(|| spots::rest(rect, &mut rng));
         // The runner-up is rested on where a tile is: high on it, as a press.
-        let glance = glance.map(|at| spots::on_tile(at, rect, &mut rng));
-        let press = rect.pixel(*x_norm, *y_norm);
-        let mut approach = match (looked_at, pressed_spot(action)) {
+        match (looked_at, pressed_spot(action)) {
             (Some(old), Some(new)) if old != new => {
                 info!("autoplay: a changed mind: the pointer was on {old:?}, pressing {new:?}");
-                let think = think_ms + humanize::CHANGED_MIND.draw_ms(&mut rng);
-                changed_mind(think, from, press, rest_ms, rect.width / 16.0, &mut rng)
+                // A changed mind spends the already-granted pacing interval.
+                // Pointer style cannot silently extend the decision deadline.
+                changed_mind(think_ms, from, press, rest_ms, rect.width / 16.0, &mut rng)
             }
             _ => approach(
                 think_ms,
@@ -190,13 +179,7 @@ impl Hand {
                 rect.width / 16.0,
                 &mut rng,
             ),
-        };
-        approach.pause_ms += lead;
-        if let Some(see_ms) = see_ms {
-            wait_to_see(&mut approach, see_ms);
         }
-        *duration_ms = approach.pause_ms;
-        Some(approach)
     }
 
     /// Walk the pointer along `approach`. False when it could not be moved.
@@ -214,11 +197,49 @@ impl Hand {
 
     /// A new lean from the bot. The pointer keeps its own pace; only a
     /// changed mind brings its next look forward, by a reaction time.
-    pub fn take_lean(&mut self, lean: Lean) {
-        let changed = self.lean.as_ref().and_then(|l| l.first()) != lean.first();
+    pub fn take_lean(&mut self, lean: crate::bot::forecast::ForecastLean) {
+        if !lean.is_live() {
+            return;
+        }
+        if self.lean.as_ref().is_some_and(|old| old.key != lean.key) {
+            self.drop_forecast_looks();
+        }
+        let changed = self.live_lean().and_then(|l| l.first()) != lean.lean.first();
         self.lean = Some(lean);
         if let (true, Some(at)) = (changed, self.glance_at) {
             self.glance_at = Some(at.min(after_a_reaction()));
+        }
+    }
+
+    fn live_lean(&self) -> Option<&Lean> {
+        self.lean
+            .as_ref()
+            .filter(|forecast| forecast.is_live())
+            .map(|forecast| &forecast.lean)
+    }
+
+    pub fn forecast_current(&self, context: Option<crate::monitor::DecisionContext>) -> bool {
+        self.lean
+            .as_ref()
+            .is_some_and(|forecast| forecast.is_current(context))
+    }
+
+    pub fn retain_current_forecast(&mut self, context: Option<crate::monitor::DecisionContext>) {
+        if self.lean.is_some() && !self.forecast_current(context) {
+            self.lean = None;
+            self.looked_at = None;
+            self.drop_forecast_looks();
+        }
+    }
+
+    fn drop_forecast_looks(&mut self) {
+        self.queue.drop_looks();
+        if self
+            .moving
+            .as_ref()
+            .is_some_and(|moving| matches!(moving.motion.errand, Errand::Look(_)))
+        {
+            self.moving = None;
         }
     }
 
@@ -227,14 +248,24 @@ impl Hand {
     /// longer kept clear.
     pub fn drew(&mut self) {
         self.expected_tsumogiri =
-            self.lean.as_ref().and_then(|lean| lean.first()) == Some(Spot::Draw);
+            self.live_lean().and_then(|lean| lean.first()) == Some(Spot::Draw);
         self.sight.draw_slot = None;
     }
 
-    /// The seat's hand at rest holds `count` tiles, on the canvas at `rect`:
-    /// where its next draw lands is kept clear until the tile is there.
-    pub fn saw_hand(&mut self, count: usize, rect: CanvasRect) {
-        self.sight.draw_slot = Some(spots::draw_slot(count, rect));
+    /// Replace measured geometry. Queued moves cannot follow an old layout.
+    pub fn set_layout(&mut self, layout: PointerLayout) -> bool {
+        if !layout.valid() {
+            self.layout = None;
+            self.cancel();
+            return false;
+        }
+        if self.layout.as_ref() != Some(&layout) {
+            self.queue = Queue::default();
+            self.moving = None;
+        }
+        self.sight.draw_slot = layout.next_draw;
+        self.layout = Some(layout);
+        true
     }
 
     /// Start looking at the next turn, a while after the pointer was last
@@ -247,7 +278,7 @@ impl Hand {
     pub fn stop_glances(&mut self) {
         self.glance_at = None;
         self.lean = None;
-        self.queue.drop_looks();
+        self.drop_forecast_looks();
     }
 
     /// The spot this look goes to, if it goes anywhere (see
@@ -255,46 +286,48 @@ impl Hand {
     pub fn next_glance(&mut self) -> Option<Spot> {
         let mut rng = rand::rng();
         let spot = self
-            .lean
-            .as_ref()
+            .live_lean()
             .and_then(|lean| lean::glance(lean, &mut rng));
-        let wait = lean::wait_ms(self.lean.as_ref(), &mut rng);
+        let wait = lean::wait_ms(self.live_lean(), &mut rng);
         self.glance_at = Some(Instant::now() + Duration::from_millis(u64::from(wait)));
         spot
     }
 
-    /// Look at `spot` of a hand at rest holding `tehai`, on the canvas at
+    /// Look at `spot` using the currently measured tile layout on the canvas at
     /// `rect`: the look waits its turn in the queue.
-    pub fn look_at(&mut self, mut spot: Spot, tehai: &[String], rect: CanvasRect) {
+    pub fn look_at(&mut self, mut spot: Spot) {
+        if self.live_lean().is_none() {
+            return;
+        }
         self.sync_with_user();
-        let pointer = self.at.map(|(x, y)| rect.norm(x, y));
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let rect = layout.viewport;
+        let pointer = self.at;
         let leg = {
             let mut rng = rand::rng();
-            let point = |spot: &Spot, rng: &mut rand::rngs::ThreadRng| match spot {
-                Spot::Hand(pai) => crate::autoplay::majsoul::hand_point(pai, tehai, pointer, rng),
-                Spot::Draw => Some(crate::autoplay::majsoul::draw_point(tehai.len())),
-            };
-            let Some(mut at) = point(&spot, &mut rng) else {
+            let Some(mut target) = layout.target(&spot, pointer) else {
                 return;
             };
             // Weighing two tiles is a look between neighbours: one far from
             // the likeliest is not looked at, the likeliest is.
-            let first = self.lean.as_ref().and_then(|lean| lean.first());
+            let first = self.live_lean().and_then(|lean| lean.first());
             if let Some(likeliest) = first.filter(|main| *main != spot) {
-                if let Some(main) = point(&likeliest, &mut rng) {
-                    if (at.0 - main.0).abs() > LOOK_REACH {
-                        at = main;
+                if let Some(main) = layout.target(&likeliest, pointer) {
+                    if (center(target).0 - center(main).0).abs() > LOOK_REACH * rect.width / 16.0 {
+                        target = main;
                         spot = likeliest;
                     }
                 }
             }
             // A look at the tile the hand is already on is a look that stays.
-            if crate::autoplay::majsoul::on_tile(at, pointer) {
+            if pointer.is_some_and(|p| target.contains(p.0, p.1)) {
                 self.looked_at = Some(spot);
                 return;
             }
             // Not the middle of the tile every time, and high on it, as a press.
-            let to = spots::on_tile(at, rect, &mut rng);
+            let to = spots::inside_tile(target, &mut rng);
             // A look the rules would refuse — where the draw lands, with a
             // tsumogiri the likeliest — is no look, and not queued to be
             // refused again and again; the rules still have the last word
@@ -324,7 +357,7 @@ impl Hand {
     /// but never where the next draw lands before the tile is there. Not after
     /// a call: the seat's own discard comes next, and a hand goes from the
     /// button to the tile it throws, not up to wait and straight back down.
-    pub fn rest_after(&mut self, rect: CanvasRect, plan: &PlanResult, action: &MjaiEvent) {
+    pub fn rest_after(&mut self, rect: CanvasRect, action: &MjaiEvent) {
         let threw_draw = matches!(
             action,
             MjaiEvent::Dahai {
@@ -336,13 +369,9 @@ impl Hand {
         if discards_next(action) {
             return;
         }
-        let Some(pressed) = plan.steps.iter().rev().find_map(|s| match s {
-            Step::Click { x_norm, y_norm } => Some((*x_norm, *y_norm)),
-            _ => None,
-        }) else {
+        let Some(from) = self.at else {
             return;
         };
-        let from = self.at.unwrap_or_else(|| rect.pixel(pressed.0, pressed.1));
         if lift {
             self.queue_lift(from, rect);
         } else {
@@ -353,9 +382,13 @@ impl Hand {
     /// Queue the hand lifting straight up off the tile it threw at `from`,
     /// after lingering on it, and the looks at the next turn once it is up.
     fn queue_lift(&mut self, from: Point, rect: CanvasRect) {
+        let Some(top) = self.layout.as_ref().and_then(PointerLayout::hand_top) else {
+            self.queue_rest(from, rect, true);
+            return;
+        };
         let leg = {
             let mut rng = rand::rng();
-            let to = spots::lift(from, rect, &mut rng);
+            let to = spots::lift(from, top, rect, &mut rng);
             leave(from, to, rect.width / 16.0, &mut rng)
         };
         self.queue.push(Motion {
@@ -382,7 +415,10 @@ impl Hand {
     fn queue_rest(&mut self, from: Point, rect: CanvasRect, settle: bool) {
         let leg = {
             let mut rng = rand::rng();
-            let to = spots::rest(rect, &mut rng);
+            let to = self
+                .layout
+                .as_ref()
+                .map_or_else(|| spots::rest(rect, &mut rng), |layout| center(layout.rest));
             leave(from, to, rect.width / 16.0, &mut rng)
         };
         self.queue.push(Motion {
@@ -407,6 +443,9 @@ impl Hand {
     /// start of the next waiting. Nothing of ours moves while the user's hand
     /// is on the mouse.
     pub async fn step(&mut self) {
+        if self.live_lean().is_none() {
+            self.drop_forecast_looks();
+        }
         if crate::autoplay::cdp_input::user_active() {
             if let Some(moving) = self.moving.take() {
                 info!(
@@ -486,7 +525,12 @@ impl Hand {
         } else {
             along(moving.from, moving.motion.to, moving.motion.bend, t)
         };
-        if !self.send(point).await {
+        let forecast = if matches!(moving.motion.errand, Errand::Look(_)) {
+            self.lean.clone()
+        } else {
+            None
+        };
+        if !self.send_for(point, forecast.as_ref()).await {
             self.moving = None;
             return;
         }
@@ -527,6 +571,14 @@ impl Hand {
         let Some(moving) = self.moving.take() else {
             return;
         };
+        if matches!(moving.motion.errand, Errand::Look(_)) && self.live_lean().is_none() {
+            return;
+        }
+        let forecast = if matches!(moving.motion.errand, Errand::Look(_)) {
+            self.lean.clone()
+        } else {
+            None
+        };
         // Cut short, the pointer is on neither what it left nor what it went for.
         self.looked_at = None;
         let (at, then) = moving.last;
@@ -560,7 +612,7 @@ impl Hand {
             } else {
                 queue::braking(at, stop, u)
             };
-            if !self.send(point).await {
+            if !self.send_for(point, forecast.as_ref()).await {
                 break;
             }
             self.at = Some(point);
@@ -577,7 +629,18 @@ impl Hand {
 
     /// Put the pointer at `point` in one frame. False when it could not be.
     async fn send(&self, point: Point) -> bool {
+        self.send_for(point, None).await
+    }
+
+    async fn send_for(
+        &self,
+        point: Point,
+        forecast: Option<&crate::bot::forecast::ForecastLean>,
+    ) -> bool {
         let page_guard = self.ctx.page.read().await;
+        if forecast.is_some_and(|forecast| !forecast.is_live()) {
+            return false;
+        }
         let Some(page) = page_guard.as_ref() else {
             return false;
         };
@@ -596,7 +659,20 @@ impl Hand {
     /// is not there ([`Self::go`]), then rests on it about `touch.hover_ms`
     /// and holds the button about `touch.hold_ms` (`cdp_input`). False when
     /// the pointer could not be moved there or the press failed.
-    pub async fn press(&mut self, why: &str, to: Point, rect: CanvasRect, touch: Touch) -> bool {
+    /// A required final permission check runs after travel and hover. This
+    /// executor never advances a UI phase. Only a dispatched press returns true.
+    pub async fn press_when<F, Fut>(
+        &mut self,
+        why: &str,
+        to: Point,
+        rect: CanvasRect,
+        touch: Touch,
+        check: F,
+    ) -> bool
+    where
+        F: FnOnce(chromiumoxide::page::Page) -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         if !self.reach(why, to, rect).await {
             return false;
         }
@@ -605,22 +681,25 @@ impl Hand {
             warn!("autoplay: no page handle — cannot press ({why})");
             return false;
         };
-        if let Err(e) = crate::autoplay::cdp_input::dispatch_click_shaped(
+        let pressed = crate::autoplay::cdp_input::dispatch_click_guarded(
             page,
             to.0,
             to.1,
             touch.hover_ms,
             touch.hold_ms,
             touch.jiggle,
+            check,
         )
-        .await
-        {
-            warn!("autoplay: a press ({why}) failed: {e:#}");
-            return false;
-        }
+        .await;
         drop(page_guard);
         self.at = Some(to);
-        true
+        match pressed {
+            Ok(pressed) => pressed,
+            Err(e) => {
+                warn!("autoplay: a press ({why}) failed: {e:#}");
+                false
+            }
+        }
     }
 
     /// Take the pointer to `to` for a press, along an arc ([`super::leave`])
@@ -663,7 +742,9 @@ impl Hand {
             self.at = Some(to);
             return true;
         }
-        let wait = rules::turn_wait(self.last_move, from, to, Instant::now(), &mut rand::rng());
+        let wait = rules::turn_wait(self.last_move, from, to, Instant::now(), &mut rand::rng())
+            .map(|wait| wait.min(Duration::from_millis(u64::from(travel_ms))));
+        let travel_ms = travel_ms.saturating_sub(wait.map_or(0, |wait| wait.as_millis() as u32));
         if let Some(wait) = wait {
             tokio::time::sleep(wait).await;
         }

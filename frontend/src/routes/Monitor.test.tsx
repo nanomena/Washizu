@@ -1,35 +1,42 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { MonitorEvent, MonitorSnapshot } from '@/lib/monitor'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { ForecastStatus, MonitorConfig, MonitorEvent, MonitorSnapshot } from '@/lib/monitor'
 import { setLang } from '@/lib/i18n'
 
 const fixture = vi.hoisted(() => ({
   snapshot: null as MonitorSnapshot | null,
-  options: { always_on_top: false } as { always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean; quick_confirm?: boolean; auto_win?: boolean; auto_continue?: boolean; stream_output?: boolean; stream_url?: string },
+  options: {} as MonitorConfig,
   calls: [] as Array<[string, unknown]>,
   /** What the core answers when an earlier hand's events are asked for. */
   handEvents: [] as MonitorEvent[],
   /** The games on record. */
   history: [] as unknown[],
+  optionsListener: null as ((options: MonitorConfig) => void) | null,
+  obsFailure: '',
+  inputs: [] as unknown[],
 }))
 vi.mock('@/hooks/useMonitor', () => ({ useMonitor: () => ({ snapshot: fixture.snapshot, error: null }) }))
 vi.mock('@/lib/host', () => ({
-  listen: vi.fn(() => () => {}),
+  listen: vi.fn((name: string, callback: (options: MonitorConfig) => void) => {
+    if (name === 'monitor-options') fixture.optionsListener = callback
+    return () => { if (name === 'monitor-options') fixture.optionsListener = null }
+  }),
+  gameInput: vi.fn((input: unknown) => fixture.inputs.push(input)),
   invoke: vi.fn(async (cmd: string, args?: unknown) => {
     fixture.calls.push([cmd, args])
-    if (cmd === 'set_monitor_pinned') fixture.options = { ...fixture.options, always_on_top: (args as { pinned: boolean }).pinned }
     if (cmd === 'set_monitor_trail') fixture.options = { ...fixture.options, pointer_trail: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_lean') fixture.options = { ...fixture.options, pointer_lean: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_confirm') fixture.options = { ...fixture.options, quick_confirm: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_auto_win') fixture.options = { ...fixture.options, auto_win: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_continue') fixture.options = { ...fixture.options, auto_continue: (args as { enabled: boolean }).enabled }
-    if (cmd === 'set_monitor_stream') {
+    if (cmd === 'set_obs_output') {
+      if (fixture.obsFailure) throw new Error(fixture.obsFailure)
       const enabled = (args as { enabled: boolean }).enabled
-      fixture.options = { ...fixture.options, stream_output: enabled, stream_url: enabled ? 'http://127.0.0.1:50123/0123456789abcdef01234567/' : undefined }
+      fixture.options = { ...fixture.options, obs_output: enabled, obs_state: enabled ? 'starting' : 'off' }
     }
     if (cmd === 'get_hand_events') return fixture.handEvents
     if (cmd === 'get_history') return fixture.history
-    return ['get_monitor_options', 'set_monitor_pinned', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_monitor_stream'].includes(cmd) ? fixture.options : undefined
+    return ['get_monitor_options', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_obs_output'].includes(cmd) ? fixture.options : undefined
   }),
 }))
 // No canvas under jsdom, so mahgen cannot draw. A tile is then an <img> whose
@@ -40,10 +47,10 @@ import { Monitor } from './Monitor'
 function state(): MonitorSnapshot {
   const context = { game: 1, round: 1, event_seq: 10 }
   return {
-    revision: 1, context, names: [], red_fives: true,
+    control: null, forecast: { owner: 0, state: 'disabled' }, revision: 1, context, names: [], red_fives: true,
     game: null, view: null, round_ended: false, game_ended: false,
     capture: { state: 'running', descriptor: 'test' },
-    bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null,
+    bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null, sync_fault: null,
     brand: 'Demo', facts: [], autoplay_enabled: true,
     previous_decision: null, result: null, previous_result: null, hands: [], events: [], last_event_ms: null,
     decision: { id: 41, number: 1, context, started_ms: Date.now(), completed_ms: Date.now(),
@@ -57,7 +64,158 @@ const decision = () => screen.getByRole('status').closest('section')!
 const candidates = () => screen.queryAllByRole('listitem').filter(li => li.className.includes('mcand'))
 
 describe('monitor user states', () => {
-  beforeEach(() => { fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = [] })
+  beforeEach(() => { fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = [] })
+
+  it('keeps forecast diagnostics out of the interface without changing the formal source or issuing input', async () => {
+    fixture.options = { pointer_lean: true }
+    const context = fixture.snapshot!.context
+    fixture.snapshot!.control = {
+      context, window: null, source: 'native_standby',
+      primary: { state: 'recovering', through: 9, reason: 'primary recovering' }, standby: { state: 'ready', through: 10 },
+    }
+    const phases: Array<[ForecastStatus, string]> = [
+      [{ owner: 8, state: 'idle' }, '等待 Bot'],
+      [{ owner: 8, state: 'disabled' }, '未运行'],
+      [{ owner: 8, state: 'unsupported', reason: 'worker protocol unsupported' }, '不支持'],
+      [{ owner: 8, state: 'waiting' }, '等待中'],
+      [{ owner: 8, state: 'running', context, through: 10, position: 4 }, '计算中'],
+      [{ owner: 8, state: 'ready', context, through: 10, position: 4 }, '可用'],
+      [{ owner: 8, state: 'unavailable', reason: 'forecast pipe closed' }, '不可用'],
+    ]
+    const { rerender } = render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
+    const inputs = fixture.inputs.length
+    for (const [forecast] of phases) {
+      fixture.snapshot = { ...fixture.snapshot!, forecast }
+      rerender(<Monitor />)
+      for (const name of ['决策', '本局', '对局', '统计', '设置']) {
+        fireEvent.click(screen.getByRole('tab', { name }))
+        expect(screen.queryByRole('group', { name: '预推理状态' })).toBeNull()
+        if ('reason' in forecast) expect(screen.queryByText(forecast.reason)).toBeNull()
+        expect(screen.getByText('本地备用 · 主模型恢复中')).toBeTruthy()
+        expect(screen.getByRole('status').textContent).toBe('待确认')
+        expect(screen.queryByRole('alert')).toBeNull()
+      }
+    }
+    fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
+    expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText('别家行动时，光标停在下一手可能要打的牌上')).toBeTruthy()
+    expect(fixture.calls.some(([cmd]) => /source|fallback|recovery|set_monitor_lean/.test(cmd))).toBe(false)
+    expect(fixture.inputs).toHaveLength(inputs)
+  })
+
+  it('does not add a forecast indicator while loading', () => {
+    fixture.snapshot = null
+    fixture.options = { pointer_lean: true }
+    render(<Monitor />)
+    expect(screen.queryByRole('group', { name: '预推理状态' })).toBeNull()
+  })
+
+  it.each(['Majsoul', 'Tenhou'] as const)('keeps only the shared forecast preference and description on %s', async platform => {
+    fixture.options = { platform, pointer_lean: true, pointer_trail: true }
+    fixture.snapshot = { ...state(), forecast: { owner: 0, state: 'idle' }, game_ended: true, bot: { state: 'idle' } }
+    render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
+    expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByRole('switch', { name: '光标轨迹' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText('别家行动时，光标停在下一手可能要打的牌上')).toBeTruthy()
+    fireEvent.click(screen.getByRole('switch', { name: '预推理' }))
+    await waitFor(() => expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('false'))
+    expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: false }])
+  })
+
+
+  it('shows the selected source on every tab and never switches sources in the UI', () => {
+    fixture.snapshot!.control = {
+      context: fixture.snapshot!.context, window: { platform: 'majsoul', opened_ns: '100' }, source: 'native_standby',
+      primary: { state: 'recovering', through: 9, reason: 'primary pipe closed' }, standby: { state: 'ready', through: 10 },
+    }
+    fixture.snapshot!.service = 'error'
+    fixture.snapshot!.service_error = 'primary pipe closed'
+    const { rerender } = render(<Monitor />)
+    for (const name of ['决策', '本局', '对局', '统计', '设置']) {
+      fireEvent.click(screen.getByRole('tab', { name }))
+      expect(screen.getByText('本地备用 · 主模型恢复中')).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.getByRole('status').textContent).toBe('待确认')
+    }
+    // Health may catch up after selection; only the core can select a new source.
+    fixture.snapshot = { ...fixture.snapshot!, control: { ...fixture.snapshot!.control!, primary: { state: 'ready', through: 10 } } }
+    rerender(<Monitor />)
+    expect(screen.getByText('本地备用 · 主模型就绪')).toBeTruthy()
+    expect(fixture.calls.some(([cmd]) => /source|fallback|recovery/.test(cmd))).toBe(false)
+  })
+
+  it('returns to account selection through the shell without navigating the game', async () => {
+    render(<Monitor />)
+    expect(screen.queryByRole('button', { name: '显示账号选择器' })).toBeNull()
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '应用' }))
+    await waitFor(() => expect((screen.getByRole('button', { name: '显示账号选择器' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(screen.getByText('基于 Shinkuan 的 Akagi v3')).toBeTruthy()
+    expect(screen.getByText('Apache-2.0')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '显示账号选择器' }))
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'return_to_profiles')).toBe(true))
+  })
+
+  it('offers Tenhou play and rematch through the shared core settings and keeps both controls in sync', async () => {
+    fixture.options = { platform: 'Tenhou', profile_name: '天凤主号', pointer_lean: false, pointer_trail: false }
+    fixture.snapshot!.autoplay_enabled = false
+    const { rerender } = render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
+    expect(screen.getByText('天凤 Web：首次手动选房，连战沿用上一场实际大厅和规则。')).toBeTruthy()
+    expect(screen.getAllByRole('radio', { name: '连战' })).toHaveLength(2)
+    fireEvent.click(screen.getAllByRole('radio', { name: '打牌' })[0])
+    await waitFor(() => expect(fixture.calls.some(([cmd, params]) => cmd === 'set_monitor_autoplay' && (params as {enabled?: boolean}).enabled === true)).toBe(true))
+    fixture.snapshot = { ...fixture.snapshot!, autoplay_enabled: true }
+    rerender(<Monitor />)
+    const settingsLevels = screen.getAllByRole('radiogroup', { name: '自动操作' }).at(-1)!
+    fireEvent.click(within(settingsLevels).getByRole('radio', { name: '连战' }))
+    await waitFor(() => expect(fixture.calls.slice(-2)).toEqual([['set_monitor_continue', { enabled: true }], ['set_monitor_autoplay', { enabled: true }]]))
+    await waitFor(() => expect(screen.getAllByRole('radio', { name: '连战' }).every(button => button.getAttribute('aria-checked') === 'true')).toBe(true))
+    fireEvent.click(within(settingsLevels).getByRole('radio', { name: '打牌' }))
+    await waitFor(() => expect(fixture.calls.slice(-2)).toEqual([['set_monitor_continue', { enabled: false }], ['set_monitor_autoplay', { enabled: true }]]))
+    await waitFor(() => expect(screen.getAllByRole('radio', { name: '打牌' }).every(button => button.getAttribute('aria-checked') === 'true')).toBe(true))
+    const confirm = screen.getByRole('switch', { name: '快速确认' }) as HTMLButtonElement
+    expect(confirm.disabled).toBe(false)
+    fireEvent.click(confirm)
+    await waitFor(() => expect(fixture.calls).toContainEqual(['set_monitor_confirm', { enabled: true }]))
+      fireEvent.click(screen.getByRole('switch', { name: '预推理' }))
+      await waitFor(() => expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: true }]))
+      fireEvent.click(screen.getByRole('switch', { name: '光标轨迹' }))
+      await waitFor(() => expect(fixture.calls).toContainEqual(['set_monitor_trail', { enabled: true }]))
+      expect(screen.getByText('暂未适配')).toBeTruthy()
+      expect(screen.queryByRole('switch', { name: '客户端自动和牌' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '应用' }))
+    expect(screen.getByText('天凤主号')).toBeTruthy()
+    expect(screen.getByText('天凤')).toBeTruthy()
+    expect(screen.getByText('Washizu')).toBeTruthy()
+
+  })
+
+  it('keeps an unresolved sync fault visible on every tab until recovery is confirmed', () => {
+    fixture.snapshot!.sync_fault = 'The viewer cannot play action 30.'
+    fixture.snapshot!.sync_error = 'The viewer cannot play action 30.'
+    const { rerender } = render(<Monitor />)
+    for (const name of ['决策', '本局', '对局', '统计', '设置']) {
+      fireEvent.click(screen.getByRole('tab', { name }))
+      const alert = screen.getByRole('alert')
+      expect(alert.textContent).toContain('牌局同步异常')
+      expect(alert.textContent).toContain('自动操作等待模型恢复')
+      expect(screen.queryByRole('status')).toBeNull()
+    }
+    // A new deal clears the current-hand gate, not the unresolved fault.
+    fixture.snapshot = { ...fixture.snapshot!, sync_error: null, context: { game: 1, round: 2, event_seq: 20 } }
+    rerender(<Monitor />)
+    expect(screen.getByRole('alert').textContent).toContain('cannot play action 30')
+    fixture.snapshot = { ...fixture.snapshot, sync_fault: null }
+    rerender(<Monitor />)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
 
   it('shows a suggestion the game has not answered yet as pending, never as done', () => {
     render(<Monitor />)
@@ -91,9 +249,8 @@ describe('monitor user states', () => {
     expect(links.querySelector('.mdot')?.getAttribute('data-tone')).toBe('bad')
     expect(links.title).toBe('连接：模型断开')
     expect(screen.getByRole('alert').textContent).toContain('模型服务断开')
-    // The action stays as history; its candidates do not stay as current ones.
-    expect(screen.getByRole('status').textContent).toBe('已失效')
-    expect(within(decision()).getByText('9万')).toBeTruthy()
+    // The permanent status slot explains the fault on every tab.
+    expect(screen.queryByRole('status')).toBeNull()
     expect(candidates()).toHaveLength(0)
   })
 
@@ -127,7 +284,7 @@ describe('monitor user states', () => {
     s.decision = { ...s.decision!, state: 'expired', error: 'The game confirmed a different action.' }
     render(<Monitor />)
     expect(screen.getByRole('status').textContent).toBe('不一致')
-    const actual = screen.getByText('雀魂实际').parentElement!
+    const actual = screen.getByText('客户端实际').parentElement!
     expect(within(actual).getByText('1索')).toBeTruthy()
     // What the model weighed stays as a record, marked void — not as a live suggestion.
     expect(candidates()).toHaveLength(2)
@@ -140,7 +297,7 @@ describe('monitor user states', () => {
     s.events = [{ seq: 11, ts_ms: Date.now(), event: { type: 'dahai', actor: 0, pai: '5pr', tsumogiri: false } }]
     s.decision = { ...s.decision!, state: 'expired', error: 'The game confirmed a different action.' }
     render(<Monitor />)
-    expect(candidates().map(li => li.textContent)).toEqual(['1打模型选择60.0%', '2打雀魂实际25.0%'])
+    expect(candidates().map(li => li.textContent)).toEqual(['1打模型选择60.0%', '2打客户端实际25.0%'])
   })
 
   it('keeps the decision in place on every tab of the dock', () => {
@@ -199,7 +356,7 @@ describe('monitor user states', () => {
 
   it('does not open the game again when capture says its view is already there', async () => {
     render(<Monitor />)
-    await waitFor(() => expect((screen.getByRole('button', { name: '置顶' }) as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
     expect(fixture.calls.some(([cmd]) => cmd === 'open_monitor_game')).toBe(false)
   })
 
@@ -240,18 +397,6 @@ describe('monitor user states', () => {
     expect(shown.filter(alt => alt === '白')).toHaveLength(3)
   })
 
-  it('is one window with one control of its own: staying on top', async () => {
-    render(<Monitor />)
-    const pin = screen.getByRole('button', { name: '置顶' })
-    await waitFor(() => expect((pin as HTMLButtonElement).disabled).toBe(false))
-    expect(pin.getAttribute('aria-pressed')).toBe('false')
-    fireEvent.click(pin)
-    await waitFor(() => expect(pin.getAttribute('aria-pressed')).toBe('true'))
-    expect(fixture.calls).toContainEqual(['set_monitor_pinned', { pinned: true }])
-    // No second shape to fold into, and no other window to go to.
-    expect(screen.queryByRole('button', { name: '收起' })).toBeNull()
-    expect(screen.queryByRole('button', { name: '主界面' })).toBeNull()
-  })
 
   it('puts the game exactly where the stage is once it is open in this window', async () => {
     const stage = { x: 0, y: 0, width: 960, height: 540 }
@@ -268,7 +413,7 @@ describe('monitor user states', () => {
 describe('the game as a whole', () => {
   const draw = { kind: 'draw', hands: [], scores: [25000, 25000, 25000, 25000], deltas: [0, 0, 0, 0] }
   const win = { kind: 'hora', hands: [], scores: [33000, 17000, 25000, 25000], deltas: [8000, -8000, 0, 0] }
-  beforeEach(() => { fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = [] })
+  beforeEach(() => { fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = [] })
 
   it('shows the links as one light that is green when everything the window runs is up', () => {
     const { unmount } = render(<Monitor />)
@@ -342,7 +487,7 @@ describe('the record', () => {
     match_info: { platform: 'majsoul', mode_id: room }, ...(points == null ? {} : { our_rank_points: points }),
   })
   beforeEach(() => {
-    fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = []
+    fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = []
     fixture.history = [
       // A friends' table: no rank points to speak of, and a record from before yaku were kept.
       game(2, 0, 0, { round: 8, agari: 2, houjuu: 0, riichi: 1 }),
@@ -378,6 +523,43 @@ describe('the record', () => {
     fireEvent.click(screen.getByRole('tab', { name: '统计' }))
     expect(await screen.findByText('2 场的段位分变化')).toBeTruthy()
     expect(scope().value).toBe('gold')
+  })
+
+  it('uses the recorded Tenhou table and scheduled length instead of Mahjong Soul rooms', async () => {
+    fixture.options = { platform: 'Tenhou' }
+    fixture.history = [
+      { ...game(1, null, 0, { round: 5 }), id: 'east-overtime', platform: 'tenhou', kyoku_mode: 'east_south', match_info: { platform: 'tenhou', go_type: 1, lobby: 0 } },
+      { ...game(2, null, 0, { round: 4 }), id: 'east', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0 } },
+      { ...game(3, null, 0, { round: 8 }), id: 'south', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 9, lobby: 0 } },
+    ]
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('还没有记录到段位pt')).toBeTruthy()
+    const scope = screen.getByRole('combobox', { name: '统计范围' }) as HTMLSelectElement
+    expect(scope.value).toBe('tenhou:ippan:south:4')
+    expect(within(scope).queryByText('友人场及其他')).toBeNull()
+    expect(within(scope).getByText('一般·东风')).toBeTruthy()
+    expect(within(scope).getByText('一般·东南')).toBeTruthy()
+    fireEvent.change(scope, { target: { value: 'tenhou:ippan:east:4' } })
+    expect(document.querySelector('.mstat-sum')!.textContent).toContain('2 场')
+    expect(screen.getByText('平均顺位').textContent).toBe('平均顺位 1.50')
+    expect(document.querySelector('.mstat-ladder')!.getAttribute('title')).toBe('尚未收到客户端段位数据')
+  })
+
+  it('shows cumulative Tenhou rule pt from the recorded start rank and placement', async () => {
+    fixture.options = { platform: 'Tenhou' }
+    fixture.history = [
+      { ...game(1, null, 0, { round: 4 }), id: 'first', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0, dan: 8 } },
+      { ...game(4, null, 0, { round: 4 }), id: 'fourth', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0, dan: 8 } },
+      { ...game(1, null, 0, { round: 4 }), id: 'missing-dan', platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0 } },
+    ]
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('规则pt · 2 场')).toBeTruthy()
+    expect(screen.getByTitle('按天凤规则计算')).toBeTruthy()
+    expect(screen.getByTitle('所选记录的累计规则pt变化').textContent).toBe('+10')
+    expect(screen.getByRole('img', { name: '段位pt走势' }).querySelector('polyline')).toBeTruthy()
+    expect(document.querySelector('.mstat-sum')!.textContent).toContain('3 场')
   })
 
   it('names the rank the platform last said, with its points toward the next star', async () => {
@@ -438,7 +620,7 @@ describe('the record', () => {
 
 describe('the settings', () => {
   beforeEach(() => {
-    fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = []; fixture.history = []
+    fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = []; fixture.history = []
     localStorage.removeItem('akagi.settings.group')
   })
   const group = (name: string) => fireEvent.click(screen.getByRole('button', { name }))
@@ -479,18 +661,18 @@ describe('the settings', () => {
   it('opens the group last looked at again', () => {
     const { unmount } = render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    group('画面与窗口')
+    group('画面与输出')
     expect(localStorage.getItem('akagi.settings.group')).toBe('view')
     fireEvent.click(screen.getByRole('tab', { name: '决策' }))
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    expect(screen.getByRole('button', { name: '画面与窗口' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: '画面与输出' }).getAttribute('aria-pressed')).toBe('true')
     unmount()
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    expect(screen.getByRole('switch', { name: '窗口置顶' })).toBeTruthy()
+    expect(screen.getByRole('switch', { name: 'OBS 输出' })).toBeTruthy()
   })
 
-  it('has the switches of the window with their words', async () => {
+  it('writes autoplay and pointer settings through the shell', async () => {
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
     // Autoplay's level waits for the first snapshot: it is the core's to say. The bar has the same control.
@@ -512,7 +694,7 @@ describe('the settings', () => {
     expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: true }])
 
     // What autoplay presses between decisions: each its own switch, saved by the core.
-    for (const [name, command] of [['快速确认', 'set_monitor_confirm'], ['自动和牌', 'set_monitor_auto_win']]) {
+    for (const [name, command] of [['快速确认', 'set_monitor_confirm'], ['客户端自动和牌', 'set_monitor_auto_win']]) {
       const row = screen.getByRole('switch', { name })
       expect(row.getAttribute('aria-checked')).toBe('false')
       fireEvent.click(row)
@@ -520,37 +702,102 @@ describe('the settings', () => {
       expect(fixture.calls).toContainEqual([command, { enabled: true }])
     }
 
-    // The same two switches the bar has: one setting, two places to change it.
-    group('画面与窗口')
-    const pin = screen.getByRole('switch', { name: '窗口置顶' })
-    expect(pin.getAttribute('aria-checked')).toBe('false')
-    fireEvent.click(pin)
-    await waitFor(() => expect(screen.getByRole('switch', { name: '窗口置顶' }).getAttribute('aria-checked')).toBe('true'))
-    expect(fixture.calls).toContainEqual(['set_monitor_pinned', { pinned: true }])
+  })
+})
 
-    // The stream: off, its copy button is there but not shown; on, the address is the line under it.
-    const copy = screen.getByRole('button', { name: '复制直播地址', hidden: true })
-    expect(copy.hasAttribute('data-empty')).toBe(true)
-    expect((copy as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(screen.getByRole('switch', { name: '直播输出' }))
-    await waitFor(() => expect(screen.getByRole('switch', { name: '直播输出' }).getAttribute('aria-checked')).toBe('true'))
-    expect(fixture.calls).toContainEqual(['set_monitor_stream', { enabled: true }])
-    expect(screen.getByText('http://127.0.0.1:50123/0123456789abcdef01234567/')).toBeTruthy()
-    const shown = screen.getByRole('button', { name: '复制直播地址' })
-    expect(shown.hasAttribute('data-empty')).toBe(false)
-    fireEvent.click(shown)
-    await waitFor(() => expect(fixture.calls).toContainEqual(['copy_stream_url', undefined]))
-    await waitFor(() => expect(shown.getAttribute('title')).toBe('已复制'))
-    fireEvent.click(screen.getByRole('switch', { name: '直播输出' }))
-    await waitFor(() => expect(screen.getByRole('switch', { name: '直播输出' }).getAttribute('aria-checked')).toBe('false'))
-    expect(screen.queryByText(/127\.0\.0\.1/)).toBeNull()
+describe('OBS output', () => {
+  beforeEach(() => {
+    setLang('zh-CN')
+    fixture.snapshot = state(); fixture.calls = []; fixture.inputs = []; fixture.handEvents = []; fixture.obsFailure = ''
+    fixture.options = { obs_available: true, obs_output: false, obs_state: 'off' }
+  })
+  afterEach(() => { fixture.obsFailure = '' })
+
+  function openOutput() {
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '画面与输出' }))
+    return screen.getByRole('switch', { name: 'OBS 输出' }) as HTMLButtonElement
+  }
+
+  it('uses one OBS protocol and keeps the same playable game picture when output turns on or off', async () => {
+    const { container } = render(<Monitor />)
+    const video = container.querySelector('video')!
+    expect(video).toBeTruthy()
+    fireEvent.playing(video)
+    expect(screen.queryByText('等待游戏画面')).toBeNull()
+    const output = openOutput()
+    await waitFor(() => expect(output.disabled).toBe(false))
+    expect(screen.getAllByRole('switch')).toHaveLength(1)
+    expect(output.getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText(/选择「Washizu」/)).toBeTruthy()
+    for (const removed of ['离屏渲染', 'Spout 输出', '浏览器源输出']) expect(screen.queryByRole('switch', { name: removed })).toBeNull()
+    expect(screen.queryByRole('button', { name: '复制直播地址', hidden: true })).toBeNull()
+
+    fireEvent.click(output)
+    await waitFor(() => expect(output.getAttribute('aria-checked')).toBe('true'))
+    expect(fixture.calls).toContainEqual(['set_obs_output', { enabled: true }])
+    expect(screen.getByText(/正在启动 OBS 输出/)).toBeTruthy()
+    act(() => fixture.optionsListener!({ ...fixture.options, obs_state: 'sending', obs_name: 'Washizu' }))
+    expect(screen.getByText(/正在向 OBS 发送画面/)).toBeTruthy()
+    expect(container.querySelector('video')).toBe(video)
+
+    fireEvent.click(output)
+    await waitFor(() => expect(output.getAttribute('aria-checked')).toBe('false'))
+    expect(fixture.calls).toContainEqual(['set_obs_output', { enabled: false }])
+    expect(screen.getByText(/输出已关闭/)).toBeTruthy()
+    expect(container.querySelector('video')).toBe(video)
+    expect(screen.queryByText('等待游戏画面')).toBeNull()
+    fireEvent.input(screen.getByRole('textbox', { name: '向游戏输入' }), { target: { value: 'a' } })
+    expect(fixture.inputs).toContainEqual({ type: 'text', text: 'a' })
+    expect(fixture.calls.filter(([cmd]) => /set_monitor_(stream|spout|game_view)|copy_stream_url/.test(cmd))).toEqual([])
+  })
+
+  it.each([
+    ['off', '输出已关闭'], ['starting', '正在启动 OBS 输出'], ['sending', '正在向 OBS 发送画面'], ['failed', 'OBS 输出失败'], ['stopped', 'OBS 输出已停止'],
+  ] as const)('shows the actual %s state without inventing a retry', async (obs_state, text) => {
+    fixture.options = { ...fixture.options, obs_output: obs_state !== 'off', obs_state }
+    render(<Monitor />); openOutput()
+    await waitFor(() => expect(screen.getByText(new RegExp(text))).toBeTruthy())
+    expect(screen.queryByText(/正在重试/)).toBeNull()
+  })
+
+  it('disables unavailable output and keeps the game picture', async () => {
+    fixture.options.obs_available = false
+    const { container } = render(<Monitor />)
+    const output = openOutput()
+    await waitFor(() => expect(screen.getByText(/只在 Windows 上可用/)).toBeTruthy())
+    expect(output.disabled).toBe(true)
+    fireEvent.click(output)
+    expect(fixture.calls.some(([cmd]) => cmd === 'set_obs_output')).toBe(false)
+    expect(container.querySelector('video')).toBeTruthy()
+  })
+
+  it('waits for known capability and sender state instead of assuming output is supported', async () => {
+    fixture.options = {}
+    render(<Monitor />)
+    const output = openOutput()
+    await waitFor(() => expect(screen.getByText(/正在读取 OBS 输出状态/)).toBeTruthy())
+    expect(output.disabled).toBe(true)
+  })
+
+  it('reports a rejected output change while preserving the saved setting and game picture', async () => {
+    fixture.obsFailure = 'Sender startup was rejected'
+    const { container } = render(<Monitor />)
+    const video = container.querySelector('video')
+    const output = openOutput()
+    await waitFor(() => expect(output.disabled).toBe(false))
+    fireEvent.click(output)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Sender startup was rejected'))
+    expect(output.getAttribute('aria-checked')).toBe('false')
+    expect(output.disabled).toBe(false)
+    expect(container.querySelector('video')).toBe(video)
   })
 })
 
 describe('another language', () => {
   const chinese = /[\u3400-\u9fff]/
   beforeEach(() => {
-    fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = []
+    fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = []
     fixture.history = [{ id: 'G', ended_at: '2026-01-01T00:00:00Z', platform: 'majsoul', num_players: 4, our_seat: 0, final_scores: [25000, 25000, 25000, 25000],
       our_rank: 1, our_rank_points: 80, stats: { round: 10, agari: 3, houjuu: 1, riichi: 2 }, yaku: { 2: 2, 12: 1, 99: 1 }, match_info: { platform: 'majsoul', mode_id: 9 } }]
     const draw = { kind: 'yao9', hands: [{ seat: 1, tiles: ['1m', '9m', 'E'], winning_tile: null, target: null, ura_markers: [] }], scores: [25000, 25000, 25000, 25000], deltas: [0, 0, 0, 0] }
@@ -585,7 +832,7 @@ describe('another language', () => {
       expect(left, `on the ${name} tab`).toEqual([])
     }
     // Every group of the settings, the links among them.
-    for (const name of ['Display & window', 'Link', 'Model & service', 'App']) {
+    for (const name of ['Display & output', 'Link', 'Model & service', 'App']) {
       fireEvent.click(screen.getByRole('button', { name }))
       expect(shown().split('\n').filter(line => chinese.test(line)), `in ${name}`).toEqual([])
     }
@@ -602,7 +849,7 @@ describe('another language', () => {
   it('is chosen on the settings tab, changes every word at once, and is remembered', async () => {
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    fireEvent.click(screen.getByRole('button', { name: '画面与窗口' }))
+    fireEvent.click(screen.getByRole('button', { name: '画面与输出' }))
     fireEvent.change(screen.getByRole('combobox', { name: '界面语言' }), { target: { value: 'ja' } })
     // The tab stays where it was; its name and everything on it are in the new language.
     expect(screen.getByRole('tab', { name: '設定' }).getAttribute('aria-selected')).toBe('true')

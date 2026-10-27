@@ -1,9 +1,7 @@
 # Majsoul Bridge
 
-Decodes Majsoul's `lq.*` protobuf-over-WebSocket protocol. Parses and logs
-every frame, and currently emits the first mjai event — `start_game` with
-the bot's own seat (`id`). Remaining mjai state-machine phases (kyoku, draws,
-discards, calls, agari/ryukyoku) are still TODO.
+Decodes Majsoul's `lq.*` protobuf-over-WebSocket protocol into MJAI game,
+round, draw, discard, meld and settlement events for the bot's seat.
 
 ## Public hand-end input
 
@@ -13,6 +11,7 @@ remain `5mr/5pr/5sr`. The hand excludes the winning tile for both ron and tsumo;
 public melds continue to arrive through their own events. `ActionHule.scores`
 becomes the shared post-settlement `hora.scores`, including for multi-ron and
 the final hand. Malformed tile data or score-vector shapes reject the frame.
+The dealer's heavenly win uses the opening partition described below.
 
 `ActionNoTile.players[].hand` supplies `ryukyoku.tehais`, with `null` for
 unrevealed/noten seats. This preserves all-tenpai versus no-tenpai even when
@@ -96,6 +95,38 @@ Field mapping from `ActionNewRound`:
 Tile mapping uses `tile::ms_to_mjai` (`0m/0p/0s` → `5mr/5pr/5sr`,
 `1z..7z` → `E S W N P F C`). Unknown tile strings error and the event is
 skipped instead of corrupting the mjai stream.
+
+The dealer's fourteen tiles are one Majsoul opening deal, not a distinct
+thirteen-tile head plus a live draw. The official client `ViewPlayer_Me.NewGame`
+sorts the deal; its first `ActionDiscardTile.moqie=false` can therefore discard
+the tile this bridge chose as synthetic `tsumo`. If that exact tile has no
+copy in the first thirteen, the bridge emits `dahai.tsumogiri=true`, the only
+valid MJAI identity for that discard. With a matching hand copy it preserves
+wire `moqie`; a different tile belongs to the thirteen-tile hand regardless
+of the wire's opening slot flag. Ordinary and red fives are distinct. No tile is moved, invented,
+removed twice, or inferred from an opponent's hand. Non-dealer and subsequent
+discards retain their wire flags. A real draw, kan, kita or hand end retires
+the opening context; double-riichi and GameRestore use the same conversion.
+
+For our dealer's heavenly win, `HuleInfo.hand + hu_tile` must equal the
+fourteen dealt tiles, including exact red identities and multiplicities.
+The bridge emits `hora.pai` as the same synthetic draw and `hora.tehai` as
+the same thirteen-tile head used in `start_kyoku`. This avoids a contradictory
+winning-tile identity when the provider designates another opening tile.
+Missing or contradictory opening reveals are rejected. Other players' wins
+and wins after a discard/kan/real draw keep their supplied identities.
+
+This projection never recomputes `fans`, yakuman units, `delta_scores` or
+post-settlement `scores`: those remain the provider's actual result. Raw
+frames retain the original `hu_tile`. The training/model kernel can keep
+Tenhou scoring, including its single-unit yakuman variants, without replacing
+Majsoul's actual settlement. This does not make its policy values equivalent
+under both rule sets; it makes the observed state and settlement consistent.
+
+This normalization is platform semantics, independent of room/rank/reward
+settings. The single-seat inference rules continue to reject impossible hand
+discards. In particular, loosening native legal-action checks would hide this
+bridge error rather than fix it.
 
 ## Meld actions → chi / pon / daiminkan / ankan / kakan
 

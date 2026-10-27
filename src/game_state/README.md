@@ -70,6 +70,8 @@ engine then had to say about our seat:
 ```rust
 pub struct TrackedEvent {
     pub event: MjaiEvent,
+    pub context: Option<crate::monitor::DecisionContext>,
+    pub window: Option<crate::bot::control::InputWindow>,
     /// Is the engine offering our seat a choice in the state this event
     /// produced? `None` when it has no opinion (no game, no seat).
     pub can_act: Option<bool>,
@@ -128,3 +130,8 @@ add a `GameStateBus` to `crate::event_bus` and have `tracker::run`
 publish a snapshot on every event (or every N events). The current
 design intentionally stops one step short of that — snapshot-on-pull
 is enough for the read-only commands we need first.
+
+Capture publishes `CapturedEvent` with the producer window only on the complete
+frame prefix. Tracker adds context/can_act without sampling a shared window.
+Both facts travel through the decision response and Mahjong Soul final input
+permission unchanged; see [control contract](../bot/CONTROL.md).
