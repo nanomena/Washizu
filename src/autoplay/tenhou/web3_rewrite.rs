@@ -555,8 +555,8 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
         return Err(contract("pointer observer scope changed"));
     }
     edits.push(s.assignment(pointer_object, s.expand("__washizuWeb3Geometry={read:function(){return{ratio:__ratio,stage:__stage,canvas:__table.__canvasContext.canvas,statusCanvas:__status.__statusContext.canvas,left:__stage.offsetLeft+__table.__canvasContext.canvas.offsetLeft,top:__topOffset,width:__layout.__cardWidths[4],height:__layout.__cardHeights[4]+__layout.__cardExtras[4],handPanel:__handPanel.__panelRoot,menuRoot:__menu.__menuRoot,pressed:!!(__pointerBits&6)}}};")));
-    edits.push(s.assignment(popup_object, s.expand("__washizuWeb3Popup={read:function(){return{element:__popup.__element,tag:__currentPopup&&__currentPopup.tag,queued:__popupQueue.length,closing:__washizuWeb3Closing}},ok:function(){__popup.ok()}};")));
-    edits.push(s.assignment(lobby_object, s.expand("__washizuWeb3Lobby={read:function(){return{lobby:__lobby,selected:__selected(),reservationRequested:!!Object.keys(__reservations).length,loaded:__loaded(false)}},join:function(button){__popup.join(button)}};")));
+    edits.push(s.assignment(popup_object, s.expand("__washizuWeb3Popup={read:function(){return{element:__popup.__element,tag:__currentPopup&&__currentPopup.tag,queued:__popupQueue.length,closing:__washizuWeb3Closing}}};")));
+    edits.push(s.assignment(lobby_object, s.expand("__washizuWeb3Lobby={read:function(){return{lobby:__lobby,selected:__selected(),reservationRequested:!!Object.keys(__reservations).length,loaded:__loaded(false)}}};")));
 
     // Native lifecycle calls invalidate identities even if nobody polls during
     // a close/reopen cycle, or if the client reuses every tile/clock DOM node.

@@ -1,6 +1,6 @@
-/* Web3 facts and viewport CSS mouse targets. Playing capabilities are read-only.
- * Only the shared CDP pointer sends playing input. The separate UI FSM retains
- * its native popup/selected-lobby controls. No observation schedules an effect. */
+/* Read-only Web3 facts and viewport CSS mouse targets, including result and
+ * lobby controls. Only the shared pointer sends input. The separate UI FSM
+ * owns UI permissions; observations never invoke handlers or schedule effects. */
 (function createWeb3Bridge(native) {
   'use strict';
 
@@ -273,7 +273,7 @@
       if (typeof current.tag !== 'string' || !u32(current.queued)) return { dto };
       const button = element.querySelector('button[name="ok"]');
       const enabled = allowedPopups.has(current.tag) && !current.closing && !blocked && visible(element) && visible(button) && !button.disabled;
-      dto.popup = { identity: base + ':' + current.tag + ':' + current.queued + ':' + Number(current.closing) + ':' + Number(enabled),
+      dto.popup = { identity: base + ':' + current.tag + ':' + current.queued + ':' + Number(current.closing) + ':' + Number(enabled) + ':' + (button ? nodeId(button) : 'missing'),
         tag: current.tag, enabled, closing: !!current.closing, queued: current.queued };
       return { dto, element, button };
     }
@@ -289,12 +289,12 @@
       const selected = data.selected[Number(match[1])];
       if (typeof selected !== 'string' || !/^[0-9]+$/.test(selected) || !u32(Number(selected))) continue;
       const mode = Number(selected);
-      // A selected-rule button may live on a different lobby pane. P.join
-      // uses that real button's id and stored rule, independent of the pane.
-      const enabled = !current.closing && !blocked && visible(element) && data.loaded && !button.disabled;
+      // Hidden lobby panes cannot supply a mouse target. Prefer a genuinely
+      // visible alias of the exact selected rule; never invoke a hidden control.
+      const enabled = !current.closing && !blocked && visible(element) && visible(button) && data.loaded && !data.reservationRequested && !button.disabled;
       const offer = { identity: identity + ':join:' + nodeId(button) + ':' + mode, mode, enabled: !!enabled };
-      // The official join handler reads selected[slot] and reserves that
-      // exact lobby/mode. Its main rows and shortcut panes may select the
+      // A mouse press lets the official handler read selected[slot] and reserve
+      // that exact lobby/mode. Main rows and shortcut panes may select the
       // same mode; normalize those aliases before the FSM sees a choice.
       // Prefer an enabled control, then the lowest native rule slot. Keep
       // the actual button identity so replacements revoke pending effects.
@@ -311,24 +311,38 @@
     return { dto, element, entries };
   }
 
+  function probeUi(request) {
+    const response = (status, target = null) => ({ client: 'web3', status, target });
+    if (!request || !['popup', 'join'].includes(request.kind) || typeof request.identity !== 'string' || !live()) return response('unavailable');
+    const current = uiSnapshot();
+    let button;
+    if (request.kind === 'popup') {
+      if (!current.dto.popup || current.dto.popup.identity !== request.identity || !current.dto.popup.enabled) return response('changed');
+      button = current.button;
+    } else {
+      const entry = current.entries?.find(entry => entry.offer.identity === request.identity);
+      if (!entry || !entry.offer.enabled) return response('changed');
+      button = entry.button;
+    }
+    if (!visible(button) || button.disabled || !current.element.contains(button)) return response('changed');
+    const view = viewport(), raw = button.getBoundingClientRect();
+    if (!validRect(raw)) return response('unavailable');
+    const bounds = intersection(raw, view);
+    if (!bounds) return response('unavailable');
+    const identity = request.identity + ':mouse:' + nodeId(button) + ':' + canonical({ bounds, viewport: view });
+    const point = 'point' in request ? request.point : center(bounds);
+    if ('point' in request || 'targetIdentity' in request) {
+      if (request.targetIdentity !== identity || !contains(bounds, point)) return response('changed');
+    }
+    const hit = document.elementFromPoint(point.x, point.y);
+    if (hit !== button && !button.contains(hit)) return response('changed');
+    return response('ready', { identity, bounds, viewport: view });
+  }
+
   return Object.freeze({
     client: 'web3',
     readUi() { return uiSnapshot().dto; },
-    pressUi(kind, identity) {
-      if (kind !== 'popup' && kind !== 'join' || typeof identity !== 'string') return 'unavailable';
-      if (!live()) return 'unavailable';
-      const current = uiSnapshot();
-      if (kind === 'popup') {
-        if (!current.dto.popup || current.dto.popup.identity !== identity || !current.dto.popup.enabled) return 'changed';
-        if (native.popup.read().element !== current.element || current.element.querySelector('button[name="ok"]') !== current.button) return 'changed';
-        native.popup.ok();
-      } else {
-        const entry = current.entries && current.entries.find(entry => entry.offer.identity === identity);
-        if (!entry || !entry.offer.enabled || native.popup.read().element !== current.element || !current.element.contains(entry.button)) return 'changed';
-        native.lobby.join(entry.button);
-      }
-      return 'sent';
-    },
+    probeUi,
     readInput() { return geometrySnapshot().dto; },
     probeTarget,
   });

@@ -1,6 +1,6 @@
 //! Tenhou Web observations and transitions of the same `ui::Machine`.
-//! The injected client reports facts and executes a permitted control; it
-//! never chooses a phase, target, retry or recovery path.
+//! The injected client only reports facts and physical mouse targets. This
+//! FSM owns permission; the shared pointer owns execution, never native calls.
 
 use super::{
     Client, Effect, Environment, Input, Machine, State, Suspension, Ticket, WaitingReason,
@@ -130,6 +130,7 @@ pub enum Stage {
     RoundResult,
     FinalResult,
     WaitingLobby,
+    ReservationConfirming,
     ReservationPending,
     Stopped(WaitingReason),
 }
@@ -354,7 +355,10 @@ impl Machine {
         };
         if ownership_changed {
             run.candidate = None;
-            if matches!(run.stage, Stage::WaitingLobby | Stage::ReservationPending) {
+            if matches!(
+                run.stage,
+                Stage::WaitingLobby | Stage::ReservationConfirming | Stage::ReservationPending
+            ) {
                 run.stop(WaitingReason::OwnershipChanged);
             }
         }
@@ -409,7 +413,7 @@ impl Machine {
         let (ticket, input) = self.effects.tick(now)?;
         match input {
             Input::WebObserve => Some(Effect::ObserveWeb(ticket)),
-            Input::WebControl => run.candidate.as_ref().map(|candidate| Effect::InvokeWeb {
+            Input::WebControl => run.candidate.as_ref().map(|candidate| Effect::PressWeb {
                 ticket,
                 control: candidate.control.clone(),
             }),
@@ -480,8 +484,9 @@ impl Machine {
     }
 
     /// The executor re-reads this page under its read lease, synchronizes
-    /// ownership, consumes once, then atomically rechecks the same witness
-    /// inside the client's invoke. Either refusal permanently spends ticket.
+    /// ownership and consumes once immediately before shared mouse-down.
+    /// The read-only DOM probe must retain its target identity and physical
+    /// hit witness. Either refusal permanently spends this ticket.
     pub fn consume_web(
         &mut self,
         ticket: Ticket,
@@ -531,8 +536,8 @@ impl Machine {
                             run.until = Some(now + END_LIMIT);
                         }
                         Control::Reserve { .. } => {
-                            run.stage = Stage::ReservationPending;
-                            run.until = None;
+                            run.stage = Stage::ReservationConfirming;
+                            run.until = Some(now + END_LIMIT);
                         }
                         _ => {}
                     }
@@ -540,7 +545,12 @@ impl Machine {
                 Dispatch::Changed => {} // no invocation; a fresh observation may acquire a new ticket
                 Dispatch::Unavailable => run.stop(WaitingReason::DispatchUnavailable),
             }
-            if run.attempts >= PRESS_LIMIT && !matches!(run.stage, Stage::ReservationPending) {
+            if run.attempts >= PRESS_LIMIT
+                && !matches!(
+                    run.stage,
+                    Stage::ReservationConfirming | Stage::ReservationPending
+                )
+            {
                 run.stop(WaitingReason::PressLimit);
             }
         }

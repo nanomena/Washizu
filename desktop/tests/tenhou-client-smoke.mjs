@@ -54,9 +54,10 @@ try {
   await core.call('open_game', { port: activePort, target: target.id })
   const observed = await until(async () => {
     try {
-      return await game.webContents.executeJavaScript('({url:location.href, ready:document.readyState, client:window.__akagiTenhou?.client, discard:typeof window.__akagiTenhou?.discard, readInput:typeof window.__akagiTenhou?.readInput, readUi:typeof window.__akagiTenhou?.readUi, choose:typeof window.__akagiTenhou?.choose})')
+      return await game.webContents.executeJavaScript('({url:location.href, ready:document.readyState, client:window.__akagiTenhou?.client, discard:typeof window.__akagiTenhou?.discard, readInput:typeof window.__akagiTenhou?.readInput, probeTarget:typeof window.__akagiTenhou?.probeTarget, readUi:typeof window.__akagiTenhou?.readUi, probeUi:typeof window.__akagiTenhou?.probeUi, pressUi:typeof window.__akagiTenhou?.pressUi, choose:typeof window.__akagiTenhou?.choose})')
     } catch { return null }
-  }, value => value?.client === 'web3' && value.discard === 'function' && value.readInput === 'function' && value.readUi === 'function' && value.choose === 'function', 'current client instrumented by actual core')
+  }, value => value?.client === 'web3' && value.discard === 'undefined' && value.choose === 'undefined' && value.pressUi === 'undefined'
+    && ['readInput','probeTarget','readUi','probeUi'].every(key => value[key] === 'function'), 'current client instrumented with read-only capabilities by actual core')
   assert.equal(game.isVisible(), false, 'qualification never presents a window')
   assert.equal(observed.url, 'https://tenhou.net/3/')
   const monitor = /** @type {{autoplay_enabled: boolean, events: unknown[]}} */ (await core.call('get_monitor'))
@@ -64,7 +65,7 @@ try {
   assert.equal(monitor.events.length, 0, 'no game events or login input')
   await core.stop()
   assert.equal(core.released, true)
-  console.log(JSON.stringify({ currentClientBooted: true, actualCoreInterception: true, discardHandler: observed.discard, visibleWindow: false, loggedIn: false, automaticInput: false, modelLoaded: false, cleanupAcknowledged: true, scriptErrors }))
+  console.log(JSON.stringify({ currentClientBooted: true, actualCoreInterception: true, readOnlyInput: true, readOnlyUi: true, visibleWindow: false, loggedIn: false, automaticInput: false, modelLoaded: false, cleanupAcknowledged: true, scriptErrors }))
 } catch (error) {
   console.error(error)
   if (core) console.error(core.stderr)

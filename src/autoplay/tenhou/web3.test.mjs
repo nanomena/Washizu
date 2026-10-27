@@ -13,7 +13,7 @@ class Element {
   getClientRects() { return this.style.display === 'none' ? [] : [this.rect]; }
   getBoundingClientRect() { return this.rect; }
   append(child) { this.children.push(child); child.parentNode = child.parentElement = this; this.firstChild = this.children[0]; }
-  contains(child) { return this.children.includes(child); }
+  contains(child) { return child === this || this.children.some(node => node.contains(child)); }
   querySelector() { return this.children.find(child => child.name === 'ok') || null; }
   querySelectorAll() { return this.children.filter(child => child.name === 'join'); }
 }
@@ -40,14 +40,14 @@ function fixture() {
     menu: { offers: () => state.offers, responseTarget: () => state.response, control: code => state.controls[code],
       reveal: code => state.controls[code & 8192 ? 3670533 : code & 16384 ? 3671045 : -1] },
     geometry: { read: () => ({ ...state, canvas, menuRoot, handPanel }) },
-    popup: { read: () => state.popup, ok: () => state.effects.push('popup') },
-    lobby: { read: () => ({ lobby: 0, selected: state.selected, reservationRequested: state.reservationRequested, loaded: state.loaded }),
-      join: button => { state.effects.push(button.id); state.reservationRequested = true; state.uiEpoch++; } },
+    popup: { read: () => state.popup },
+    lobby: { read: () => ({ lobby: 0, selected: state.selected, reservationRequested: state.reservationRequested, loaded: state.loaded }) },
   };
   const context = vm.createContext({ native, crypto: { randomUUID: () => 'doc-' + ++documentNo }, innerWidth: 800, innerHeight: 600,
     pageXOffset: 0, pageYOffset: 0, getComputedStyle: node => node.style,
     document: { elementFromPoint(x, y) {
       if (state.overlay && contains(state.overlay.rect, { x, y })) return state.overlay;
+      for (const button of state.popup.element?.children || []) if (button.style.display !== 'none' && contains(button.rect, { x, y })) return button;
       for (const outer of menuRoot.children) if (outer.style.display !== 'none' && outer.style.visibility !== 'hidden' && contains(outer.rect, { x, y })) return outer;
       return canvas;
     } } });
@@ -65,7 +65,7 @@ function fixture() {
 
 test('playing API is read-only, exact physical red/plain geometry uses native scale and offsets', () => {
   const { state, api, probeDiscard } = fixture();
-  assert.equal(api.discard, undefined); assert.equal(api.choose, undefined);
+  assert.equal(api.discard, undefined); assert.equal(api.choose, undefined); assert.equal(api.pressUi, undefined);
   const before = { epoch: state.epoch, hand: [...state.hand] };
   const red = probeDiscard(16), normal = probeDiscard(17);
   assert.equal(red.probe.status, 'ready'); assert.equal(normal.probe.status, 'ready');
@@ -143,22 +143,27 @@ test('clock origin and actual granted bank survive repeated reads and bank consu
 
 function lobby(f, selected, slots) {
   const element = new Element();
-  const buttons = slots.map(slot => { const button = new Element('BUTTON'); button.name = 'join'; button.id = 'join' + slot; element.append(button); return button; });
+  const buttons = slots.map(slot => { const button = new Element('BUTTON', {x:20+slot*110,y:120,width:100,height:40}); button.name = 'join'; button.id = 'join' + slot; element.append(button); return button; });
   f.state.selected = selected;
   f.state.popup = { element, tag: 'LOBBY', closing: false, queued: 0 };
   return buttons;
 }
-test('live lobby shortcut aliases reserve one exact rule through a canonical real control', () => {
+test('live lobby aliases expose one exact read-only mouse target without reserving', () => {
   const f = fixture();
   // Actual lobby 0 has three enabled aliases for mode 1, including shortcuts.
   lobby(f, ['1', '0', '0', '1', '1', '9'], [4, 3, 0, 1, 2, 5]);
   const first = f.api.readUi();
   assert.deepEqual(plain(first.lobby.offers.map(offer => offer.mode)), [1, 0, 9]);
   assert.equal(first.lobby.offers.filter(offer => offer.mode === 1).length, 1);
-  assert.equal(f.api.pressUi('join', first.lobby.offers[0].identity), 'sent');
-  assert.deepEqual(f.state.effects, ['join0']);
+  const request = {kind:'join',identity:first.lobby.offers[0].identity};
+  const target = f.api.probeUi(request).target;
+  assert.equal(target.bounds.x, 20);
+  assert.equal(f.api.probeUi({...request,targetIdentity:target.identity,point:middle(target.bounds)}).status, 'ready');
+  assert.deepEqual(f.state.effects, []);
+  assert.equal(f.api.readUi().lobby.reservationRequested, false);
+  f.state.reservationRequested = true; f.state.uiEpoch++;
   assert.equal(f.api.readUi().lobby.reservationRequested, true);
-  assert.equal(f.api.pressUi('join', first.lobby.offers[0].identity), 'changed');
+  assert.equal(f.api.probeUi(request).status, 'changed');
 });
 test('a disabled or replaced lobby alias revokes its old permission without changing rules', () => {
   const f = fixture(), buttons = lobby(f, ['1', '9', '33', '1'], [0, 1, 3]);
@@ -166,9 +171,9 @@ test('a disabled or replaced lobby alias revokes its old permission without chan
   buttons[0].disabled = true;
   const next = f.api.readUi().lobby.offers.find(offer => offer.mode === 1);
   assert.equal(next.enabled, true); assert.notEqual(next.identity, first.identity);
-  assert.equal(f.api.pressUi('join', first.identity), 'changed');
+  assert.equal(f.api.probeUi({kind:'join',identity:first.identity}).status, 'changed');
   f.state.selected[3] = '33';
-  assert.equal(f.api.pressUi('join', next.identity), 'changed');
+  assert.equal(f.api.probeUi({kind:'join',identity:next.identity}).status, 'changed');
   assert.deepEqual(f.state.effects, []);
   const unavailable = f.api.readUi().lobby.offers.find(offer => offer.mode === 1);
   assert.equal(unavailable.enabled, false);
@@ -183,9 +188,32 @@ test('rank notice is an observed UI control while login and unknown prompts stay
     f.state.popup.tag = tag;
     const popup = f.api.readUi().popup;
     assert.equal(popup.enabled, false);
-    assert.equal(f.api.pressUi('popup', popup.identity), 'changed');
+    assert.equal(f.api.probeUi({kind:'popup',identity:popup.identity}).status, 'changed');
   }
   assert.deepEqual(f.state.effects, []);
+});
+
+test('UI probes reject hidden aliases, overlays, changed buttons and moved final hit points', () => {
+  const f = fixture(), buttons = lobby(f, ['1', '9', '33', '1'], [0, 1, 3]);
+  buttons[0].style.display = 'none';
+  const offer = f.api.readUi().lobby.offers.find(offer => offer.mode === 1);
+  const request = {kind:'join',identity:offer.identity}, first = f.api.probeUi(request);
+  assert.equal(first.status, 'ready'); assert.equal(first.target.bounds.x, 350);
+  const witness = {...request,targetIdentity:first.target.identity,point:middle(first.target.bounds)};
+  f.state.overlay = new Element('DIV', buttons[2].rect);
+  assert.equal(f.api.probeUi(witness).status, 'changed'); f.state.overlay = null;
+  buttons[2].rect = {...buttons[2].rect,x:360};
+  assert.equal(f.api.probeUi(witness).status, 'changed');
+  buttons[2].style.display = 'none';
+  assert.equal(f.api.readUi().lobby.offers.find(offer => offer.mode === 1).enabled, false);
+  assert.equal(f.api.probeUi(witness).status, 'changed');
+  const element = new Element(), button = new Element('BUTTON', {x:20,y:40,width:80,height:30});
+  button.name = 'ok'; element.append(button); f.state.popup = {element,tag:'RYUUKYOKU',queued:0,closing:false};
+  const popup = f.api.readUi().popup, popupRequest = {kind:'popup',identity:popup.identity};
+  const target = f.api.probeUi(popupRequest).target; assert.ok(target);
+  const replacement = new Element('BUTTON', button.rect); replacement.name = 'ok'; element.children = []; element.append(replacement);
+  assert.equal(f.api.probeUi({...popupRequest,targetIdentity:target.identity,point:middle(target.bounds)}).status, 'changed');
+  assert.equal(f.api.pressUi, undefined); assert.deepEqual(f.state.effects, []);
 });
 
 test('CDP attach recognizes the read-only playing contract without forcing a reload', () => {
