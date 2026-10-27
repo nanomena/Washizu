@@ -103,6 +103,7 @@ pub enum WaitingReason {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Environment {
+    pub context: Option<crate::monitor::DecisionContext>,
     pub settings: Settings,
     pub generation: Generation,
     pub manual: bool,
@@ -176,6 +177,7 @@ pub struct Ticket {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecisionToken {
+    context: crate::monitor::DecisionContext,
     revision: u64,
     serial: u64,
     window: Window,
@@ -641,8 +643,19 @@ impl Machine {
         );
     }
 
-    pub fn begin_decision(&mut self, window: Window, retries: u32) -> Option<DecisionToken> {
+    pub fn begin_decision(
+        &mut self,
+        request: crate::bot::control::DecisionRequest,
+        retries: u32,
+    ) -> Option<DecisionToken> {
+        let Some(crate::bot::control::InputWindow::Majsoul(budget)) = request.window else {
+            return None;
+        };
+        let window = Window::from(budget);
         let env = self.env?;
+        if env.context != Some(request.context) {
+            return None;
+        }
         if self.suspension.is_some()
             || env.window != Some(window)
             || !self.checked_at.is_some_and(|now| now < window.expires_at)
@@ -664,6 +677,7 @@ impl Machine {
         self.revoke();
         self.serial += 1;
         let token = DecisionToken {
+            context: request.context,
             revision: self.revision,
             serial: self.serial,
             window,
@@ -682,7 +696,9 @@ impl Machine {
     pub fn decision_live(&self, token: DecisionToken) -> bool {
         self.suspension.is_none()
             && self.decision.is_some_and(|r| r.token == token)
-            && self.env.is_some_and(|e| e.window == Some(token.window))
+            && self
+                .env
+                .is_some_and(|e| e.window == Some(token.window) && e.context == Some(token.context))
             && self
                 .checked_at
                 .is_some_and(|now| now < token.window.expires_at)

@@ -67,6 +67,8 @@ export type ServerStatus =
   | { state: 'ready'; bot: string; label: string | null; facts: Fact[]; since_ms: number; startup_ms: number }
   | { state: 'failed'; bot: string; error: string; retry_at_ms: number }
 export type RunnerHealth =
+  | { state: 'direct_ready'; delivered: number }
+  | { state: 'direct_unavailable'; delivered: number; reason: string }
   | { state: 'ready'; through: number }
   | { state: 'recovering' | 'blocked'; through: number; reason: string }
 export type DecisionControl = {
@@ -102,7 +104,7 @@ export function decisionSound(s: MonitorSnapshot | null): boolean {
 export function controlLabel(control: DecisionControl): string {
   const source = control.source === 'native_standby' ? tr('本地备用')
     : control.source === 'primary' ? tr('主模型') : tr('暂无有效来源')
-  const primary = control.primary.state === 'ready' ? tr('主模型就绪')
+  const primary = ['ready', 'direct_ready'].includes(control.primary.state) ? tr('主模型就绪')
     : control.primary.state === 'recovering' ? tr('主模型恢复中') : tr('主模型不可用')
   return `${source} · ${primary}`
 }

@@ -773,6 +773,14 @@ mod tests {
             .iter()
             .position(|s| matches!(s, Step::Discard { tile_index: 4 }))
             .unwrap_or_else(|| panic!("the named tile must follow: {:?}", plan.steps));
+        assert_eq!(
+            plan.steps
+                .iter()
+                .filter(|s| matches!(s, Step::Discard { .. }))
+                .count(),
+            1,
+            "a declared riichi has exactly one original declaring discard"
+        );
         assert!(
             pressed < discarded,
             "declare, then discard: {:?}",

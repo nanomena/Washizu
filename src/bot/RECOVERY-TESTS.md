@@ -9,7 +9,7 @@ Matching Python commit: `62f3370d84752b3ee2cf8c1d14abc42e87201aa7`.
 
 | Boundary | Evidence | Result |
 |---|---|---|
-| Core regression | Windows library test executable, four threads | 858 passed; two environment-dependent tests run separately |
+| Core regression | Windows library test executable, four threads | 859 passed; two environment-dependent tests run separately |
 | Cross-process timeout | Actual Python relay, production socket/delivery/session, tiny JAX actor, embedded NativeBot | Standby owns first window; late primary cannot replace it; primary consumes the actual standby discard and returns at the next legal window |
 | Cross-process model failure | Same real chain, model executes then throws twice | Service rolls back both transactions; local action continues; fresh full-prefix session recovers after backoff and returns a validated action |
 | Prefix identity | Exact delivery receipts, duplicate/out-of-order replies, canonical journal duplicate/rejoin tests | No double application or stale action publication |
@@ -20,7 +20,7 @@ Matching Python commit: `62f3370d84752b3ee2cf8c1d14abc42e87201aa7`.
 | Window lifetime | Real confirmed move, bridge closes before tracker frame, real tracker gap | No executable stale primary or standby response |
 | Python model/session/adapter | Own venv; adapter tests plus actual session hanchans | 62 passed |
 | Repository guardrails | Constructed-only categorization and Python formatting tests | 25 passed; formatter check clean |
-| Frontend | Source survives tabs, late ready health does not switch source, real gap still blocks | 78 passed; typecheck, Vite build and ESLint passed |
+| Frontend | Source survives tabs, late ready health does not switch source, real gap still blocks | 87 passed; typecheck, Vite build and ESLint passed |
 | Windows all targets | Named recovery cache, `--locked --all-targets` | Zero errors/warnings |
 
 The frontend build emits the pre-existing large-chunk advisory. It does not
@@ -48,10 +48,30 @@ compare actual recovered and clean KV arrays exactly and preserve two hand
 boundaries. No performance promise for the full production checkpoint/GPU is
 inferred from the tiny actor.
 
-Integration remains required: the UI FSM must carry the original envelope
-unchanged to final input permission and bind its bridge window to the original
-request as described in [CONTROL.md](CONTROL.md). Automatic-off, stage changes,
-mouse-down, real client rendering and Tenhou's complete live chain are owned
-by that combined regression, not certified here. Rejoins missing an unknown
-completed hand or contradicting the canonical prefix remain explicit gaps.
-Unknown real window budget produces no executable answer.
+Integrated request-binding qualification (based on parent `ba91f78`):
+
+- Raw capture envelopes retain the original producer window; the tracker and
+  coordinator never sample a later slot to assign identity. An ahead slot
+  cannot supply a missing window or relabel a queued old window.
+- Intermediate frame events cannot open a decision. Draw/post-pon frames ending
+  in Dora, plus a restored complete prefix, still admit the legal final decision.
+- Actual embedded Native direct output and considered PASS carry the same core
+  request/control contract. Direct outage is unavailable, with a distinct
+  `delivered` count rather than a claimed positioned acknowledgment.
+- Fast response admission first applies queued protocol boundaries in order.
+- Same-window changes to game/round/event context, including a tracker gap,
+  prevent final mouse-down and retry. The original request survives planning.
+- The old speculative direct plain-reach follow-up/echo-drop path is removed.
+- Tenhou's pre-existing handler/riichi continuation checks are retained; this
+  does not claim its full live chain or create a new Tenhou FSM.
+
+The parent still owns final merged release packaging, real-client input
+qualification and deployment. Rejoins missing an unknown completed hand remain
+explicit gaps; unknown original window budget never creates executable input.
+
+Tenhou REACH confirmation frames still deliver the real event and update the
+shared continuation window, but carry no new decision window in the captured
+envelope. Tests assert zero additional strategy queries and exactly one
+declaring discard in the original plan. Windows all-target check is clean;
+combined library regression is 859 passed plus the two separately passed
+cross-process recovery tests.

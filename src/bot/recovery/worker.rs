@@ -242,6 +242,7 @@ mod tests {
     #[test]
     fn only_the_requested_committed_prefix_can_supply_a_primary_action() {
         let reply = |through| BotResponse {
+            request: None,
             action: MjaiEvent::None,
             meta: Some(json!({"delivery":{"through":through}})),
         };

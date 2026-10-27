@@ -55,7 +55,11 @@ impl LocalStandby {
         let action = self
             .bind_winning_tile(action)
             .ok_or_else(|| anyhow::anyhow!("standby cannot identify the actual winning tile"))?;
-        Ok(BotResponse { action, meta })
+        Ok(BotResponse {
+            request: None,
+            action,
+            meta,
+        })
     }
 
     fn bind_winning_tile(&self, mut event: MjaiEvent) -> Option<MjaiEvent> {

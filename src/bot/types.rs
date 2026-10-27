@@ -28,6 +28,9 @@ use serde::{Deserialize, Serialize};
 /// `none` remains a legitimate decline in a decision window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotResponse {
+    /// Core-owned original identity; bots and JSON cannot manufacture it.
+    #[serde(skip)]
+    pub request: Option<super::control::DecisionRequest>,
     #[serde(flatten)]
     pub action: MjaiEvent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +102,7 @@ mod tests {
     #[test]
     fn dahai_without_meta_skips_field() {
         let resp = BotResponse {
+            request: None,
             action: MjaiEvent::Dahai {
                 actor: 1,
                 pai: "5mr".into(),

@@ -397,7 +397,7 @@ pub fn new_handle() -> Arc<Mutex<GameTracker>> {
 ///
 /// The task ends cleanly when the broadcast channel closes (all
 /// `MjaiBus` senders dropped).
-pub fn spawn(rx: broadcast::Receiver<AkagiEvent>) -> Arc<Mutex<GameTracker>> {
+pub fn spawn(rx: broadcast::Receiver<crate::event_bus::CapturedEvent>) -> Arc<Mutex<GameTracker>> {
     spawn_with_post(rx, None)
 }
 
@@ -407,7 +407,7 @@ pub fn spawn(rx: broadcast::Receiver<AkagiEvent>) -> Arc<Mutex<GameTracker>> {
 /// event, and on `can_act` describing *that* event rather than whatever the
 /// tracker has reached by the time they get round to it.
 pub fn spawn_with_post(
-    rx: broadcast::Receiver<AkagiEvent>,
+    rx: broadcast::Receiver<crate::event_bus::CapturedEvent>,
     post: Option<broadcast::Sender<TrackedEvent>>,
 ) -> Arc<Mutex<GameTracker>> {
     let tracker = new_handle();
@@ -421,7 +421,7 @@ pub fn spawn_with_post(
 /// on a runtime that isn't accessible at construction time.
 pub async fn drive_loop(
     tracker: Arc<Mutex<GameTracker>>,
-    rx: broadcast::Receiver<AkagiEvent>,
+    rx: broadcast::Receiver<crate::event_bus::CapturedEvent>,
     post: Option<broadcast::Sender<TrackedEvent>>,
 ) {
     run(tracker, rx, post, None).await
@@ -429,7 +429,7 @@ pub async fn drive_loop(
 
 pub async fn drive_loop_with_monitor(
     tracker: Arc<Mutex<GameTracker>>,
-    rx: broadcast::Receiver<AkagiEvent>,
+    rx: broadcast::Receiver<crate::event_bus::CapturedEvent>,
     post: Option<broadcast::Sender<TrackedEvent>>,
     monitor: Option<crate::monitor::MonitorHandle>,
 ) {
@@ -438,14 +438,15 @@ pub async fn drive_loop_with_monitor(
 
 async fn run(
     tracker: Arc<Mutex<GameTracker>>,
-    mut rx: broadcast::Receiver<AkagiEvent>,
+    mut rx: broadcast::Receiver<crate::event_bus::CapturedEvent>,
     post: Option<broadcast::Sender<TrackedEvent>>,
     monitor: Option<crate::monitor::MonitorHandle>,
 ) {
     info!("game tracker subscribed to MJAI bus");
     loop {
         match rx.recv().await {
-            Ok(ev) => {
+            Ok(captured) => {
+                let ev = captured.event;
                 // Read `can_act` under the same lock that applied the event,
                 // so it describes the state this event produced and not a
                 // later one. A burst of events from one frame is applied in
@@ -465,6 +466,7 @@ async fn run(
                 if let Some(p) = &post {
                     // Receiver may have lagged or no-one subscribed yet — ignore.
                     let _ = p.send(TrackedEvent {
+                        window: captured.window,
                         event: ev,
                         can_act,
                         context,
@@ -1057,8 +1059,8 @@ mod tests {
         let rx = bus.subscribe();
         let tracker = spawn(rx);
 
-        bus.send(start_game()).unwrap();
-        bus.send(start_kyoku(1)).unwrap();
+        bus.send((start_game()).into()).unwrap();
+        bus.send((start_kyoku(1)).into()).unwrap();
 
         // Give the task a moment to drain.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

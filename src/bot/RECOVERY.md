@@ -89,13 +89,12 @@ Three positions have different units and are never interchangeable:
    Several events can produce zero or several model observations. It is
    checkpointed with the immutable cache, never used as an event receipt.
 
-`WindowProof` must bind the request to the existing bridge-owned input
-window (`TimeBudget.opened_at` or `TenhouState.window`), not a new retry or
-input controller. It is captured on admission of that original context;
-if a request is already superseded it is not admitted. The UI FSM owns
-binding this proof to its stage and checking it immediately before input.
-The serialization of the existing monotonic window identity is a shared
-contract, not a second clock or a new window producer.
+`CapturedEvent` carries the bridge's original window only on the complete
+frame prefix; `TrackedEvent` adds the synchronous authoritative context.
+`BotResponse.request` retains both internally through planning. Shared current
+slots are rejection checks only. The Mahjong Soul FSM binds the original pair
+to its effect and rechecks the authoritative tracker context and real window
+after the final capture. The full implemented contract is [CONTROL.md](CONTROL.md).
 
 The coordinated path accepts complete riichi answers (tile and identity)
 from the current Miai and Native runners. It never runs plain-reach
@@ -135,7 +134,6 @@ explicit gap: neither the model cache nor hidden events are fabricated. A real
 tracker gap expires both sources. This boundary remains separate from a primary
 model failure, for which an independently valid local standby can continue.
 
-See [qualification](RECOVERY-TESTS.md) for evidence, commands and limits. Final
-UI stage/automatic-off/mouse-down qualification belongs to the separate UI FSM
-change and the parent's combined regression. This patch does not grant input
-permission by itself and has not been deployed.
+See [qualification](RECOVERY-TESTS.md) for evidence, commands and limits. The integrated Mahjong Soul FSM now owns the final stage/automatic-off/context/window
+mouse-down check. Offline composed regression covers its identity contract; the
+parent owns final release/client qualification. This worktree is not deployment.

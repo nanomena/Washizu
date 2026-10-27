@@ -41,7 +41,7 @@ pub enum BudgetSource {
 }
 
 /// Time budget the server granted for the *current* decision window.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeBudget {
     /// Base thinking time for this window (`operation.time_fixed`), ms.
     pub fixed_ms: u32,

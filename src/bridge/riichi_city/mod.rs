@@ -736,7 +736,11 @@ impl Bridge for RiichiCityBridge {
             events.extend(self.dispatch(pkt));
         }
         self.write_mjai(&events);
-        ParseResult { events, parsed }
+        ParseResult {
+            events,
+            parsed,
+            window: None,
+        }
     }
 
     fn build(&mut self, command: &MjaiEvent) -> Option<Vec<u8>> {
