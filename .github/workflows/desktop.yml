@@ -90,6 +90,7 @@ jobs:
           npm ci
           npm run check
           npm test
+          npm run test:tenhou
 
       # The npm package fetches Electron itself on first use; do it here, where
       # a failed download reads as one.
@@ -107,6 +108,7 @@ jobs:
         run: |
           xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke
           xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:profiles
+          xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:tenhou-ui
 
       - name: Restore bundled runtime cache
         uses: actions/cache@v4

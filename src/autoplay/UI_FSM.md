@@ -84,14 +84,19 @@ malformed types are unavailable, not empty/default observations. Unknown
 popup tags are explicit and have no input permission. Simultaneous popup
 and lobby facts cannot acquire a control.
 
-The parent-owned producer's `readUi()` and `pressUi(kind, identity)` are
-called through `cdp_input::observe_tenhou_ui` and `press_tenhou_ui`. The
-result is the single `tenhou::client::Dispatch` enum: sent, changed, or
-unavailable. Popup dispatch uses `kind="popup"`, reservation uses `"join"`.
+The parent-owned producer's `readUi()` and `probeUi(request)` are read-only,
+called through `tenhou::client::observe_tenhou_ui` and `probe_ui_target`.
+The probe reports ready, changed or unavailable with an explicit nullable
+mouse target. Popup targets use `kind="popup"`, reservations use `"join"`.
 An identity must refer to the same actionable client instance, including
 its popup type or offer's actual lobby/mode. The producer rechecks enabled,
 visible/non-closing status and identity in the same JavaScript evaluation
-as native dispatch. It performs no polling, retries or target selection.
+at the final physical hit point, including occlusion and unchanged geometry.
+Hidden-pane buttons cannot be selected; a visible alias must represent the
+same real lobby/mode. The bridge exposes no native OK/join effects, DOM click
+or synthetic-event effects. It performs no polling, retries or target choice.
+The FSM's PressWeb effect goes through the same PointerController::press_when
+and CDP move/down/up sequence as play and Mahjong Soul UI confirmations.
 
 | Web phase | Real evidence | Effect / confirmation boundary |
 |---|---|---|
@@ -101,7 +106,8 @@ as native dispatch. It performs no polling, retries or target selection.
 | RoundResult | actual AGARI/RYUUKYOKU popup | one dispatch per popup instance; client advances queued results or sends NEXTREADY |
 | FinalResult | actual OWARI popup | one confirmation when auto-continue is enabled |
 | WaitingLobby | successful own final confirmation | wait for an actual rebuilt lobby and exactly one enabled offer matching the real table |
-| ReservationPending | sent reservation or observed local request | no repeat; real StartGame completes the reservation path |
+| ReservationConfirming | mouse sequence sent | bounded wait for the actual client reservation flag; no repeat; expiry stops |
+| ReservationPending | observed client reservation request | no repeat; real StartGame completes the reservation path |
 | Stopped | unavailable producer/dispatch, unknown target, changed/ambiguous/disabled offer, revoked ending ownership, expiry/attempt limit | report typed reason; no guessed replacement room or retry loop |
 
 Only the real StartGame's player seat and `MatchInfo::Tenhou {go_type,lobby}`
@@ -120,9 +126,9 @@ result/end events cannot restart a Web UI plan.
 
 At the final boundary the manager keeps the same page read lease, reads a
 fresh DTO, synchronizes ownership and consumes the exact machine-issued
-control/ticket. The native producer then checks identity again. A sent
+control/ticket after a fresh DOM hit/identity/geometry check. A sent
 popup remains spent for the whole game; its reappearance cannot repeat it.
-Changed proves no native invocation and requires a fresh observation and
+Changed proves no authorized mouse press and requires a fresh observation and
 ticket. Unavailable after permission stops because delivery is unconfirmed.
 Observation/guard attempts are bounded by the same machine's phase deadline
 and finite limit. Local reservation UI only suppresses duplicates; it is

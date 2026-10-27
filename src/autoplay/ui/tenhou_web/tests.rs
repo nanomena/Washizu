@@ -61,7 +61,7 @@ impl Harness {
                     self.ui
                         .web_observed(ticket, Some(observation.clone()), self.now, &mut self.rng)
                 }
-                Effect::InvokeWeb { ticket, control } => return (ticket, control),
+                Effect::PressWeb { ticket, control } => return (ticket, control),
                 other => panic!("Web route emitted a pixel effect: {other:?}"),
             }
         }
@@ -223,11 +223,12 @@ fn final_returns_to_lobby_then_only_the_exact_real_table_can_be_reserved() {
         matches!(control, Control::Reserve { mode: 169, lobby: 0, ref identity, .. } if identity == "exact-target")
     );
     assert_eq!(control.dispatch_key(), ("join", "exact-target"));
-    assert_eq!(h.ui.phase(), Phase::Web(Stage::ReservationPending));
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::ReservationConfirming));
     h.observe_only(&observation, 20); // local reservation flag may still be false
     let mut requested = observation.clone();
     requested.lobby.as_mut().unwrap().reservation_requested = true;
     h.observe_only(&requested, 5);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::ReservationPending));
     h.observe_only(&observation, 5); // cancellation or rejection never silently requeues
     assert_eq!(h.sent.len(), 2);
     assert_eq!(h.ui.phase(), Phase::Web(Stage::ReservationPending));
@@ -258,6 +259,23 @@ fn real_rank_certificate_after_final_does_not_block_or_duplicate_the_rematch() {
         Control::Reserve { mode: 169, .. }
     ));
     assert_eq!(h.sent.len(), 3);
+}
+
+#[test]
+fn a_mouse_reservation_without_a_client_request_times_out_without_repeating() {
+    let mut h = Harness::new(Some(target()));
+    h.final_sent();
+    h.press(&lobby());
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::ReservationConfirming));
+    h.now += END_LIMIT + Duration::from_millis(1);
+    h.sync();
+    assert_eq!(
+        h.ui.phase(),
+        Phase::Web(Stage::Stopped(WaitingReason::EndTimeout))
+    );
+    assert_eq!(h.sent.len(), 2);
+    h.observe_only(&lobby(), 5);
+    assert_eq!(h.sent.len(), 2);
 }
 
 #[test]

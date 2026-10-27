@@ -195,7 +195,7 @@ pub enum Effect {
         sight: Sight,
     },
     ObserveWeb(Ticket),
-    InvokeWeb {
+    PressWeb {
         ticket: Ticket,
         control: tenhou_web::Control,
     },

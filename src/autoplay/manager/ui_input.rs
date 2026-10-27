@@ -4,7 +4,7 @@ use super::AutoplayManager;
 use crate::autoplay::context::{AutoplayContext, CanvasRect};
 use crate::autoplay::majsoul::coords;
 use crate::autoplay::pointer::{Point, Touch};
-use crate::autoplay::tenhou::client::Dispatch;
+use crate::autoplay::tenhou::client::{self, Dispatch, TargetStatus};
 use crate::autoplay::{cdp_input, pixels, ui};
 use crate::config::{AppConfig, Platform};
 use std::time::Instant;
@@ -49,42 +49,77 @@ pub(super) async fn environment(
 }
 
 impl AutoplayManager {
-    pub(super) async fn web_ui_invoke(
+    pub(super) async fn web_ui_press(
         &mut self,
         ticket: ui::Ticket,
         control: &ui::tenhou_web::Control,
     ) -> Dispatch {
-        let guard = self.ctx.page.read().await;
-        let Some(page) = guard.as_ref() else {
-            return Dispatch::Changed;
-        };
-        let observation = match cdp_input::observe_tenhou_ui(page).await {
-            Ok(observation) => Some(observation),
-            Err(error) => {
-                warn!("autoplay: Web UI final observation unavailable: {error:#}");
-                None
-            }
-        };
-        // Keep this page's read lease through dispatch, as for pixel input.
-        let env = environment(&self.ctx, &self.cfg, true, &self.monitor).await;
-        let (permitted, before, after, reason) = {
-            let mut ui = self.ui.lock().unwrap();
-            let before = ui.phase();
-            ui.synchronize(env, Instant::now());
-            let permitted = ui.consume_web(ticket, control, observation.as_ref());
-            (permitted, before, ui.phase(), ui.waiting_reason())
-        };
-        self.report_ui_transition(before, after, "Web final permission", reason);
-        if !permitted {
-            return Dispatch::Changed;
-        }
         let (kind, identity) = control.dispatch_key();
-        match cdp_input::press_tenhou_ui(page, kind, identity).await {
-            Ok(result) => result,
-            Err(error) => {
-                warn!("autoplay: Web UI dispatch unconfirmed: {error:#}");
-                Dispatch::Unavailable
+        let target = {
+            let guard = self.ctx.page.read().await;
+            let Some(page) = guard.as_ref() else {
+                return Dispatch::Changed;
+            };
+            match client::probe_ui_target(page, kind, identity, None).await {
+                Ok(probe) if probe.status == TargetStatus::Ready => probe.target,
+                Ok(_) => None,
+                Err(error) => {
+                    warn!("autoplay: Web UI mouse target unavailable: {error:#}");
+                    None
+                }
             }
+        };
+        let Some(target) = target else {
+            return Dispatch::Changed;
+        };
+        let point = (
+            target.bounds.x + target.bounds.width / 2.0,
+            target.bounds.y + target.bounds.height / 2.0,
+        );
+        let (hover_ms, hold_ms) = self.touch_times().await;
+        let ctx = self.ctx.clone();
+        let cfg = self.cfg.clone();
+        let machine = self.ui.clone();
+        let monitor = self.monitor.clone();
+        let control = control.clone();
+        let before = self.ui.lock().unwrap().phase();
+        let pressed = self.hand.press_when("Web UI effect", point, target.viewport,
+            Touch { hover_ms, hold_ms, jiggle: false }, move |page| async move {
+                // PointerController holds this page's lease through mouse-up.
+                // Both reads are observers; only the common mouse sends input.
+                let observation = match client::observe_tenhou_ui(&page).await {
+                    Ok(observation) => Some(observation),
+                    Err(error) => { warn!("autoplay: Web UI final observation unavailable: {error:#}"); None }
+                };
+                let (kind, identity) = control.dispatch_key();
+                let hit = client::probe_ui_target(&page, kind, identity, Some((&target.identity, point))).await;
+                let valid = match hit {
+                    Ok(probe) => probe.status == TargetStatus::Ready && probe.target.as_ref().is_some_and(|current| {
+                        current.identity == target.identity && current.bounds == target.bounds && current.viewport == target.viewport
+                    }),
+                    Err(error) => { warn!("autoplay: Web UI final mouse target unavailable: {error:#}"); false }
+                };
+                let env = environment(&ctx, &cfg, true, &monitor).await;
+                let mut ui = machine.lock().unwrap();
+                ui.synchronize(env, Instant::now());
+                let allowed = ui.consume_web(ticket, &control, observation.as_ref().filter(|_| valid));
+                if !allowed {
+                    warn!(?ticket, ?control, phase = ?ui.phase(), "autoplay: withheld Web UI mouse-down");
+                }
+                allowed
+            }).await;
+        let (after, reason) = {
+            let machine = self.ui.lock().unwrap();
+            (machine.phase(), machine.waiting_reason())
+        };
+        self.report_ui_transition(before, after, "Web final mouse permission", reason);
+        // The effect slot records whether final permission was consumed. A
+        // transport failure after permission is ambiguous and stops the FSM;
+        // a refusal before mouse-down cannot be mistaken for an accepted click.
+        if pressed {
+            Dispatch::Sent
+        } else {
+            Dispatch::Unavailable
         }
     }
 

@@ -369,7 +369,7 @@ async fn enable_script_rewrite(page: &Page) -> Result<()> {
 async fn reload_if_uninstrumented(page: &Page) -> Result<()> {
     use chromiumoxide::cdp::browser_protocol::page::ReloadParams;
 
-    let expr = "(()=>{try{const api=window.__akagiTenhou;return !/tenhou\\.net/.test(location.host)||(api?.client==='web3'&&['readInput','probeTarget','readUi','pressUi'].every(key=>typeof api[key]==='function'));}catch(e){return false}})()";
+    let expr = "(()=>{try{const api=window.__akagiTenhou;return !/tenhou\\.net/.test(location.host)||(api?.client==='web3'&&['readInput','probeTarget','readUi','probeUi'].every(key=>typeof api[key]==='function')&&typeof api.pressUi==='undefined');}catch(e){return false}})()";
     let done = page
         .evaluate(expr)
         .await

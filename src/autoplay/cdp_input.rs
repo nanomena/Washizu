@@ -379,8 +379,6 @@ pub async fn evaluate_canvas_rect(page: &Page) -> Result<CanvasRect> {
     Ok(rect)
 }
 
-pub(crate) use crate::autoplay::tenhou::client::{observe_tenhou_ui, press_tenhou_ui};
-
 #[cfg(test)]
 mod user_left_tests {
     use super::*;

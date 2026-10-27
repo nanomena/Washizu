@@ -1,5 +1,5 @@
 //! Read-only Web3 input targets in viewport CSS pixels.
-//! Playing input is dispatched solely by the shared pointer controller.
+//! All game input, including lobby/results, uses the shared pointer controller.
 
 use crate::autoplay::context::CanvasRect;
 use crate::autoplay::tenhou_state::TenhouState;
@@ -293,19 +293,54 @@ pub async fn observe_tenhou_ui(page: &Page) -> Result<Web3Observation> {
     evaluate(page, call("readUi", "")).await
 }
 
-pub async fn press_tenhou_ui(page: &Page, kind: &str, identity: &str) -> Result<Dispatch> {
-    evaluate(
-        page,
-        call(
-            "pressUi",
-            &format!(
-                "{},{}",
-                serde_json::to_string(kind)?,
-                serde_json::to_string(identity)?
-            ),
-        ),
-    )
-    .await
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiMouseTarget {
+    pub identity: String,
+    pub bounds: CanvasRect,
+    pub viewport: CanvasRect,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiTargetProbe {
+    #[serde(rename = "client")]
+    _client: ClientTag,
+    pub status: TargetStatus,
+    #[serde(deserialize_with = "required_nullable")]
+    pub target: Option<UiMouseTarget>,
+}
+
+impl UiTargetProbe {
+    fn check(self) -> Result<Self> {
+        if (self.status == TargetStatus::Ready) != self.target.is_some()
+            || self.target.as_ref().is_some_and(|target| {
+                target.identity.is_empty()
+                    || !valid_rect(&target.viewport)
+                    || !inside(&target.viewport, &target.bounds)
+            })
+        {
+            return Err(anyhow!("invalid Tenhou Web3 UI mouse target"));
+        }
+        Ok(self)
+    }
+}
+
+/// Read-only DOM target and, before mouse-down, its exact physical hit witness.
+pub async fn probe_ui_target(
+    page: &Page,
+    kind: &str,
+    identity: &str,
+    witness: Option<(&str, (f64, f64))>,
+) -> Result<UiTargetProbe> {
+    let mut request = json!({ "kind": kind, "identity": identity });
+    if let Some((target_identity, point)) = witness {
+        request["targetIdentity"] = json!(target_identity);
+        request["point"] = json!({"x": point.0, "y": point.1});
+    }
+    evaluate::<UiTargetProbe>(page, call("probeUi", &request.to_string()))
+        .await?
+        .check()
 }
 
 fn label(tile: u32) -> Option<String> {
@@ -522,5 +557,50 @@ mod tests {
             "elapsedMs":6000,"fixedMs":5000,"remainingBaseMs":0,"remainingBankMs":6000
         }))
         .is_err());
+    }
+
+    #[test]
+    fn ui_mouse_probe_requires_a_bounded_target_and_explicit_read_only_status() {
+        let ready = json!({"client":"web3","status":"ready","target":{
+            "identity":"popup:mouse:1", "bounds":{"x":10,"y":20,"width":80,"height":30},
+            "viewport":{"x":0,"y":0,"width":800,"height":600}
+        }});
+        assert!(serde_json::from_value::<UiTargetProbe>(ready.clone())
+            .unwrap()
+            .check()
+            .is_ok());
+        for value in [
+            json!({"client":"web3","status":"ready","target":null}),
+            json!({"client":"web3","status":"changed","target":ready["target"]}),
+            {
+                let mut outside = ready.clone();
+                outside["target"]["bounds"]["x"] = json!(790);
+                outside
+            },
+            {
+                let mut empty = ready.clone();
+                empty["target"]["identity"] = json!("");
+                empty
+            },
+        ] {
+            assert!(serde_json::from_value::<UiTargetProbe>(value)
+                .unwrap()
+                .check()
+                .is_err());
+        }
+        assert!(serde_json::from_value::<UiTargetProbe>(
+            json!({"client":"web3","status":"changed"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<UiTargetProbe>(
+            json!({"client":"web3","status":"sent","target":null})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<UiTargetProbe>(
+            json!({"client":"web3","status":"changed","target":null})
+        )
+        .unwrap()
+        .check()
+        .is_ok());
     }
 }

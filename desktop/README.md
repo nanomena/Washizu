@@ -227,6 +227,12 @@ draws when served the way the shell serves it: a content policy one directive
 short breaks nothing loudly, the tiles just turn into text.
 The OBS contract probe uses synthetic Electron bindings under plain Node;
 it exercises the real account module without starting a GUI, core or model.
+`npm run test:tenhou` checks the read-only Web3 target contract. Under Xvfb,
+`npm run smoke:tenhou-ui` uses real Chromium buttons to verify trusted mouse
+events for reservation and all five supported result/start/rank popups, plus
+occlusion refusal. It loads temporary local fixtures, no account or game, and
+does not move the system cursor. This certifies the DOM/mouse contract, not
+online Tenhou matching; actual reservation and next-game evidence is separate.
 On Windows, `npm run smoke:window` checks the real profile launcher and native
 window visibility on the first Open. It briefly opens a temporary test window,
 uses no account or model, and verifies cleanup. Mocked `show()` calls cannot

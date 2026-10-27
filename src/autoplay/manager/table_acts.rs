@@ -20,7 +20,8 @@ impl AutoplayManager {
                         let guard = self.ctx.page.read().await;
                         match guard.as_ref() {
                             Some(page) => {
-                                match crate::autoplay::cdp_input::observe_tenhou_ui(page).await {
+                                match crate::autoplay::tenhou::client::observe_tenhou_ui(page).await
+                                {
                                     Ok(observation) => Some(observation),
                                     Err(error) => {
                                         tracing::warn!(
@@ -38,13 +39,13 @@ impl AutoplayManager {
                         ui.web_observed(ticket, observation, Instant::now(), &mut rand::rng())
                     });
                 }
-                ui::Effect::InvokeWeb { ticket, control } => {
-                    let result = self.web_ui_invoke(ticket, &control).await;
+                ui::Effect::PressWeb { ticket, control } => {
+                    let result = self.web_ui_press(ticket, &control).await;
                     self.sync_ui().await;
                     self.ui_transition("Web dispatch", |ui| {
                         ui.web_done(ticket, result, Instant::now())
                     });
-                    info!(?control, ?result, "autoplay: Web UI effect completed");
+                    info!(?control, ?result, "autoplay: Web UI mouse effect completed");
                 }
                 ui::Effect::Observe(ticket) => {
                     let sight = self.look_at().await;
@@ -140,7 +141,7 @@ impl AutoplayManager {
         }
     }
 
-    async fn touch_times(&self) -> (u32, u32) {
+    pub(super) async fn touch_times(&self) -> (u32, u32) {
         let cfg = self.cfg.read().await;
         (
             cfg.autoplay.input.hover_delay_ms,
