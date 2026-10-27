@@ -175,7 +175,7 @@ try {
 
   assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), original)
   assert.equal(fs.readFileSync(path.join(root, 'history', 'keep.jsonl'), 'utf8'), 'existing game records\n')
-  for (const [width, height] of [[560, 368], [640, 368], [640, 432]]) {
+  for (const [width, height] of [[560, 304], [560, 368], [640, 368], [640, 432]]) {
     await chooserBrowser.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, chooser)
     for (const lang of ['zh-CN', 'zh-TW', 'en', 'ja']) {
       await evaluate(`document.querySelector('.accounts-tools button').click()`)
@@ -192,12 +192,15 @@ try {
       await until(() => evaluate(`!!document.querySelector('.accounts-panel')`), Boolean, 'account list restored')
       assert.equal(await evaluate(`document.documentElement.scrollWidth>innerWidth || document.querySelector('.accounts-panel').scrollWidth>document.querySelector('.accounts-panel').clientWidth`), false)
       assert.equal(await evaluate(`document.querySelector('tbody tr').getBoundingClientRect().height`), 64)
+      if (height === 304) assert.equal(await evaluate(`{const panel=document.querySelector('.accounts-panel');panel.scrollHeight>panel.clientHeight}`), true, 'the short viewport exercises a scrolling account list')
       assert.equal(await evaluate(`Array.from(document.querySelectorAll('.accounts-row-tools button')).some(b=>b.scrollWidth>b.clientWidth)`), false)
       const alignment = await evaluate(`{
-        const top=[...document.querySelectorAll('.accounts-tools button')].map(b=>b.getBoundingClientRect());
-        [...document.querySelectorAll('.accounts-row-tools')].every(row=>[...row.children].every((b,i)=>{const r=b.getBoundingClientRect();return Math.abs(r.x-top[i].x)<0.5&&Math.abs(r.width-top[i].width)<0.5;}));
+        const tracks=selector=>[...document.querySelectorAll(selector)].map(b=>{const r=b.getBoundingClientRect();return {x:r.x,width:r.width};});
+        ({top:tracks('.accounts-tools button'),rows:tracks('.accounts-row-tools button')});
       }`)
-      assert.equal(alignment, true, 'toolbar and account actions use the same rendered tracks')
+      assert.ok(alignment.rows.every((/** @type {{x:number,width:number}} */ r, /** @type {number} */ i) => {
+        const top = alignment.top[i % 2]; return Math.abs(r.x - top.x) < 0.5 && Math.abs(r.width - top.width) < 0.5
+      }), `toolbar and account tracks at ${width}x${height}/${lang}: ${JSON.stringify(alignment)}`)
     }
   }
   console.log('ok concurrent/failed state rows retain compact layout across four languages; original registry data paths and files are unchanged')
