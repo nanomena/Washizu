@@ -2,8 +2,12 @@
 //! All times and observations are supplied by the caller. This module never
 //! sleeps, captures, clicks, selects a bot, or reconstructs model context.
 
+mod effects;
 #[cfg(test)]
 mod tests;
+
+use effects::Effects;
+pub use effects::Ticket;
 
 use super::budget::{BudgetSource, TimeBudget};
 use super::humanize::{self, ASK_SEEN, CONFIRM_SEEN, END_SEEN};
@@ -166,15 +170,6 @@ enum Input {
     AutoWin,
 }
 
-/// An effect identity, consumed exactly once at mouse-down. Construction is
-/// private: a detector, timer or executor cannot manufacture permission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ticket {
-    revision: u64,
-    serial: u64,
-    input: Input,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecisionToken {
     context: crate::monitor::DecisionContext,
@@ -190,15 +185,6 @@ struct DecisionRun {
     limit: u32,
     input: InputTicket,
     next_click: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Work {
-    Idle,
-    At(Instant, Input),
-    Issued(Ticket),
-    Dispatched(Ticket),
-    Rejected(Ticket),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,9 +213,8 @@ pub struct Machine {
     state: State,
     suspension: Option<Suspension>,
     env: Option<Environment>,
-    revision: u64,
     serial: u64,
-    work: Work,
+    effects: Effects<Input>,
     decision: Option<DecisionRun>,
     consumed: Option<Window>,
     dead_clicks: u32,
@@ -242,9 +227,8 @@ impl Default for Machine {
             state: State::WaitingStart(WaitingReason::NoGame),
             suspension: None,
             env: None,
-            revision: 0,
             serial: 0,
-            work: Work::Idle,
+            effects: Effects::default(),
             decision: None,
             consumed: None,
             dead_clicks: 0,
@@ -274,8 +258,7 @@ impl Machine {
     }
 
     fn revoke(&mut self) {
-        self.revision += 1;
-        self.work = Work::Idle;
+        self.effects.revoke();
         self.decision = None;
     }
 
@@ -287,14 +270,7 @@ impl Machine {
     }
 
     fn ticket(&mut self, input: Input) -> Ticket {
-        self.serial += 1;
-        let t = Ticket {
-            revision: self.revision,
-            serial: self.serial,
-            input,
-        };
-        self.work = Work::Issued(t);
-        t
+        self.effects.issue(input)
     }
 
     /// Revoke old callbacks on every ownership change, including an off/on
@@ -369,8 +345,8 @@ impl Machine {
                 let retired = s.retired();
                 self.revoke();
                 self.state = retired;
-            } else if self.suspension.is_none() && self.work == Work::Idle {
-                self.work = Work::At(now + LOOK, Input::Observe);
+            } else if self.suspension.is_none() && self.effects.idle() {
+                self.effects.schedule(now + LOOK, Input::Observe);
             }
         }
     }
@@ -407,7 +383,7 @@ impl Machine {
             seen: None,
             retry: None,
         });
-        self.work = Work::At(
+        self.effects.schedule(
             now + Duration::from_millis(humanize::RESULT_LOOK_FIRST_MS),
             Input::Observe,
         );
@@ -441,7 +417,7 @@ impl Machine {
             seen: None,
             retry: None,
         });
-        self.work = Work::At(
+        self.effects.schedule(
             now + Duration::from_millis(humanize::END_LOOK_FIRST_MS),
             Input::Observe,
         );
@@ -451,20 +427,11 @@ impl Machine {
         if self.suspension.is_some() {
             return None;
         }
-        match self.work {
-            Work::At(at, _) => Some(at),
-            _ => None,
-        }
+        self.effects.due()
     }
 
     pub fn tick(&mut self, now: Instant) -> Option<Effect> {
         if self.suspension.is_some() {
-            return None;
-        }
-        let Work::At(at, input) = self.work else {
-            return None;
-        };
-        if now < at {
             return None;
         }
         if let State::Screens(s) = self.state {
@@ -474,7 +441,7 @@ impl Machine {
                 return None;
             }
         }
-        let t = self.ticket(input);
+        let (t, input) = self.effects.tick(now)?;
         match input {
             Input::Observe => Some(Effect::Observe(t)),
             Input::Screen(sight) => Some(Effect::Press { ticket: t, sight }),
@@ -490,7 +457,7 @@ impl Machine {
         now: Instant,
         rng: &mut R,
     ) {
-        if self.work != Work::Issued(ticket) || ticket.input != Input::Observe {
+        if !self.effects.observed(ticket, Input::Observe) {
             return;
         }
         let State::Screens(mut s) = self.state else {
@@ -521,10 +488,10 @@ impl Machine {
         };
         if !allowed {
             s.seen = None;
-            self.work = Work::At(now + LOOK, Input::Observe);
+            self.effects.schedule(now + LOOK, Input::Observe);
         } else if s.retry.is_some_and(|(old, at)| old == sight && now < at) {
             s.seen = None;
-            self.work = Work::At(now + LOOK, Input::Observe);
+            self.effects.schedule(now + LOOK, Input::Observe);
         } else {
             let read_at = match s.seen {
                 Some((old, at)) if old == sight => at,
@@ -551,11 +518,12 @@ impl Machine {
                 }
             };
             s.seen = Some((sight, read_at));
-            self.work = if now >= read_at {
-                Work::At(now, Input::Screen(sight))
+            if now >= read_at {
+                self.effects.schedule(now, Input::Screen(sight));
             } else {
-                Work::At(read_at.min(now + LOOK), Input::Observe)
-            };
+                self.effects
+                    .schedule(read_at.min(now + LOOK), Input::Observe);
+            }
         }
         self.state = State::Screens(s);
     }
@@ -563,17 +531,13 @@ impl Machine {
     /// Every input passes this same boundary, after the final capture. A
     /// ticket can produce at most one mouse-down, including duplicate calls.
     pub fn consume(&mut self, ticket: Ticket, frame: Frame) -> bool {
-        if self.suspension.is_some() || self.work != Work::Issued(ticket) {
+        if self.suspension.is_some() {
             return false;
         }
-        self.work = Work::Rejected(ticket);
-        if !frame.stable_geometry {
-            return false;
-        }
-        let Some(env) = self.env else {
+        let Some(input) = self.effects.issued(ticket) else {
             return false;
         };
-        let allowed = match ticket.input {
+        let allowed = frame.stable_geometry && self.env.is_some_and(|env| match input {
             Input::Observe => false,
             Input::Screen(sight) => {
                 frame.sight == sight
@@ -593,11 +557,8 @@ impl Machine {
                     && frame.sight == Sight::Nothing
                     && frame.auto_win == Glyph::Unlit
             }
-        };
-        if allowed {
-            self.work = Work::Dispatched(ticket);
-        }
-        allowed
+        });
+        self.effects.consume(ticket, allowed)
     }
 
     pub fn screen_done<R: Rng + ?Sized>(
@@ -607,19 +568,19 @@ impl Machine {
         now: Instant,
         rng: &mut R,
     ) {
-        let issued = self.work == Work::Issued(ticket);
-        let dispatched = self.work == Work::Dispatched(ticket);
-        let rejected = self.work == Work::Rejected(ticket);
-        if !(dispatched || (issued || rejected) && !pressed) {
-            return;
-        }
-        let Input::Screen(sight) = ticket.input else {
+        let Some(Input::Screen(_)) = self.effects.input(ticket) else {
             return;
         };
         let State::Screens(mut s) = self.state else {
             return;
         };
-        if dispatched {
+        let Some(completion) = self.effects.complete(ticket, pressed) else {
+            return;
+        };
+        let Input::Screen(sight) = completion.input else {
+            unreachable!("screen completion admitted above");
+        };
+        if completion.permitted {
             s.presses += 1;
             if pressed {
                 s.route = match sight {
@@ -633,7 +594,7 @@ impl Machine {
         }
         s.seen = None;
         self.state = State::Screens(s);
-        self.work = Work::At(
+        self.effects.schedule(
             now + if pressed {
                 Duration::from_millis(u64::from(humanize::END_PAUSE.draw_ms(rng)))
             } else {
@@ -678,7 +639,7 @@ impl Machine {
         self.serial += 1;
         let token = DecisionToken {
             context: request.context,
-            revision: self.revision,
+            revision: self.effects.revision(),
             serial: self.serial,
             window,
         };
@@ -731,7 +692,7 @@ impl Machine {
         }
         run.retries += 1;
         run.next_click = 0;
-        self.work = Work::Idle;
+        self.effects.cancel();
         true
     }
 
@@ -770,14 +731,11 @@ impl Machine {
             && env.settings.auto_win
             && env.window.is_none()
             && matches!(self.state, State::Table(TablePhase::Waiting))
-            && self.work == Work::Idle)
-            .then(|| self.ticket(Input::AutoWin))
+            && self.effects.idle())
+        .then(|| self.ticket(Input::AutoWin))
     }
 
     pub fn toggle_done(&mut self, ticket: Ticket) {
-        if matches!(self.work, Work::Issued(t) | Work::Dispatched(t) | Work::Rejected(t) if t == ticket)
-        {
-            self.work = Work::Idle;
-        }
+        self.effects.retire(ticket);
     }
 }

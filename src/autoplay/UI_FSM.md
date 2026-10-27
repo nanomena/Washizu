@@ -13,6 +13,16 @@ owns travel/hover/hold progress, not UI phase. `budget::TimeBudget` remains
 the bridge-owned decision-window identity and time grant. `InputWatch`
 remains a protocol observation, not another controller.
 
+The machine owns one `effects::Effects<Input>` slot for its scheduled,
+issued, permitted or refused effect. That component owns no platform facts,
+phase transitions, target selection, retry counts or timers of its own.
+Observation callbacks consume only an issued observation; final permission
+consumes a press whether allowed or refused; completion retires the effect
+before the machine advances or schedules new work. A failed transport after
+permission counts as an attempt but cannot claim the next screen. Duplicate
+or replaced callbacks cannot cancel newer work, and a reported success
+without consumed permission cannot advance a route.
+
 The recovery coordinator owns source selection and legality validation.
 The UI consumes its selected semantic action; it never chooses a model,
 launches inference, or falls back. The shared seam is the recovery module's
@@ -40,6 +50,26 @@ Integration prerequisite: the recovery branch must supply its coordinator
 producer together with these shared declarations. The old baseline bot
 manager emits unstamped replies, which this UI deliberately refuses. Do not
 deploy this branch alone or introduce an unstamped compatibility path.
+
+## Tenhou Web integration boundary
+
+The selected target for this integration is `https://tenhou.net/3/` Web.
+Its DOM observations and executable controls must have their own typed
+payloads; a Tenhou result or reservation is not a Mahjong Soul pixel `Sight`.
+The same machine and effect slot own their eventual scheduling, permission,
+completion and bounded retry policy. There is no second click/retry loop.
+
+Client-specific popup identity, popup kind, enabled/closing status, result
+queue state, lobby identity, selected rules and reservation availability
+must come from the verified Web observer. Wire game/round/end events retain
+their own authority. A reservation request is not proof of matching, and a
+DOM name alone is not proof of a game/result popup. Web client `1911.js`
+uses `name=ok` for popup confirmation and `name=join/cancel` for reservations;
+its popup dispatcher decides which queued result or terminal transition
+follows. Desktop4K `c6/c8` and its `.click()` dispatch contract do not apply.
+The Web observation and dispatch producer is an integration dependency;
+this section does not claim that automatic rematching is implemented or
+qualified. `/4/` facts are not a compatibility path for `/3/`.
 
 ## State and events
 

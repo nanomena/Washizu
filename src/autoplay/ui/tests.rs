@@ -286,6 +286,49 @@ async fn each_blue_confirm_is_recaptured_and_consumed_once() {
 }
 
 #[tokio::test]
+async fn a_fabricated_dispatch_success_cannot_own_a_rematch_question() {
+    let mut h = Harness::new();
+    h.end();
+    let ticket = h.ready(Sight::Rematch);
+    h.done(ticket, true); // no final permission and no transport dispatch
+    assert!(h.ui.due().is_none(), "the issued effect was not completed");
+    assert!(!h.click(ticket, frame(Sight::RematchAsk)).await);
+    h.done(ticket, false);
+    h.observe_only(&[Sight::RematchAsk], 20);
+    assert_eq!(h.mouse.downs(), 0);
+    h.screen(frame(Sight::Rematch)).await;
+    h.screen(frame(Sight::RematchAsk)).await;
+    assert_eq!(h.mouse.downs(), 2);
+}
+
+#[tokio::test]
+async fn transport_error_spends_screen_permission_without_claiming_the_next_phase() {
+    let mut h = Harness::new();
+    h.end();
+    let ticket = h.ready(Sight::Rematch);
+    h.mouse.fail = Some(MouseEvent::Down);
+    let ui = &mut h.ui;
+    let env = h.env;
+    let now = h.now;
+    let attempted = guarded_mouse_sequence(&mut h.mouse, (20., 30.), 0, 0, false, || async move {
+        ui.synchronize(env, now);
+        ui.consume(ticket, frame(Sight::Rematch))
+    })
+    .await;
+    assert!(attempted.is_err());
+    assert!(!h.ui.consume(ticket, frame(Sight::Rematch)));
+    h.done(ticket, false);
+    assert!(matches!(h.ui.state, State::Screens(s) if s.presses == 1));
+    h.mouse.fail = None;
+    let before = h.mouse.downs();
+    h.observe_only(&[Sight::RematchAsk], 20);
+    assert_eq!(h.mouse.downs(), before, "dispatch failure owns no question");
+    h.screen(frame(Sight::Rematch)).await;
+    h.screen(frame(Sight::RematchAsk)).await;
+    assert_eq!(h.mouse.downs(), before + 2);
+}
+
+#[tokio::test]
 async fn matching_manual_settings_profile_capture_restore_and_resize_reject_prepared_presses() {
     for change in 0..11 {
         let mut h = Harness::new();
