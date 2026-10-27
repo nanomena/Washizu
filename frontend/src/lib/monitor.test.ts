@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   actionLabel, alertsOf, candidatesOf, decisionMark, decisionView, describeAction, factsOf, handMarks, healthOf, meldView, newestSnapshot, ownHand,
-  serverLine, decisionSound, controlLabel, forecastView,
+  serverLine, decisionSound, controlLabel,
   type ForecastStatus, type MonitorDecision, type MonitorSnapshot, type Table,
 } from './monitor'
 import type { GameStateSnapshot, MjaiEvent, ShowItem } from '@/types'
@@ -37,20 +37,14 @@ describe('monitor stream identities', () => {
       [{ owner: 7, state: 'ready', context: d.context, through: 10, position: 6 }, '可用'],
       [{ owner: 7, state: 'unavailable', reason: 'forecast worker timed out' }, '不可用'],
     ]
-    for (const [forecast, label] of phases) {
+    for (const [forecast] of phases) {
       const next = { ...s, forecast }
-      expect(forecastView(forecast, true, true, true).label).toBe(label)
-      if ('reason' in forecast) expect(forecastView(forecast, true, true, true).detail).toBe(forecast.reason)
       expect(decisionView(next)).toEqual(decisionView(s))
       expect(decisionSound(next)).toBe(true)
       expect(healthOf(next)).toEqual(healthOf(s))
       expect(alertsOf(next, { ui: null, bridge: null })).toEqual([])
       expect(controlLabel(next.control!)).toBe('主模型 · 主模型就绪')
     }
-    expect(forecastView(null, true, true, true)).toEqual({ label: '读取中', detail: '正在读取预推理状态', tone: 'idle' })
-    expect(forecastView({ owner: 0, state: 'idle' }, false, true, true).label).toBe('已关闭')
-    expect(forecastView({ owner: 0, state: 'idle' }, true, false, true).label).toBe('等待自动操作')
-    expect(forecastView({ owner: 0, state: 'idle' }, true, true, false).label).toBe('等待 Bot')
   })
 
   it('keeps standby advice valid during a primary fault and still rejects a real tracker gap', () => {

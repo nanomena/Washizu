@@ -112,24 +112,6 @@ export function controlLabel(control: DecisionControl): string {
   return `${source} · ${primary}`
 }
 
-/** The saved preference is intent; only worker reports prove computation/readiness. */
-export function forecastView(status: ForecastStatus | null, enabled: boolean | undefined, autoplay: boolean | undefined, gameEnded: boolean | undefined): { label: string; detail: string; tone: Tone } {
-  if (!status) return { label: tr('读取中'), detail: tr('正在读取预推理状态'), tone: 'idle' }
-  if (enabled === false) return { label: tr('已关闭'), detail: tr('预推理开关已关闭'), tone: 'idle' }
-  if (autoplay === false) return { label: tr('等待自动操作'), detail: tr('开启自动打牌后使用预推理'), tone: 'idle' }
-  switch (status.state) {
-    case 'idle': return gameEnded === true
-      ? { label: tr('等待对局'), detail: tr('尚无预推理任务；对局开始后启动'), tone: 'idle' }
-      : { label: tr('等待 Bot'), detail: tr('等待当前对局的预推理任务启动'), tone: 'idle' }
-    case 'disabled': return { label: tr('未运行'), detail: tr('预推理任务尚未启用'), tone: 'idle' }
-    case 'unsupported': return { label: tr('不支持'), detail: status.reason, tone: 'wait' }
-    case 'waiting': return { label: tr('等待中'), detail: tr('等待可用于预推理的局面'), tone: 'idle' }
-    case 'running': return { label: tr('计算中'), detail: tr('正在计算下一手的光标候选'), tone: 'busy' }
-    case 'ready': return { label: tr('可用'), detail: tr('预推理候选已可用'), tone: 'ok' }
-    case 'unavailable': return { label: tr('不可用'), detail: status.reason, tone: 'wait' }
-  }
-}
-
 export function newestSnapshot(current: MonitorSnapshot | null, incoming: MonitorSnapshot): MonitorSnapshot {
   return current && current.revision > incoming.revision ? current : incoming
 }

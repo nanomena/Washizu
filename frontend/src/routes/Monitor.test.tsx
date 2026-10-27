@@ -66,7 +66,7 @@ const candidates = () => screen.queryAllByRole('listitem').filter(li => li.class
 describe('monitor user states', () => {
   beforeEach(() => { fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = [] })
 
-  it('shows forecast phases on every tab without changing the formal source or issuing input', async () => {
+  it('keeps forecast diagnostics out of the interface without changing the formal source or issuing input', async () => {
     fixture.options = { pointer_lean: true }
     const context = fixture.snapshot!.context
     fixture.snapshot!.control = {
@@ -85,15 +85,13 @@ describe('monitor user states', () => {
     const { rerender } = render(<Monitor />)
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
     const inputs = fixture.inputs.length
-    for (const [forecast, label] of phases) {
+    for (const [forecast] of phases) {
       fixture.snapshot = { ...fixture.snapshot!, forecast }
       rerender(<Monitor />)
       for (const name of ['决策', '本局', '对局', '统计', '设置']) {
         fireEvent.click(screen.getByRole('tab', { name }))
-        const indicator = screen.getByRole('group', { name: '预推理状态' })
-        expect(indicator.textContent).toBe(`预推理 · ${label}`)
-        expect(indicator.getAttribute('data-state')).toBe(forecast.state)
-        if ('reason' in forecast) expect(indicator.title).toBe(forecast.reason)
+        expect(screen.queryByRole('group', { name: '预推理状态' })).toBeNull()
+        if ('reason' in forecast) expect(screen.queryByText(forecast.reason)).toBeNull()
         expect(screen.getByText('本地备用 · 主模型恢复中')).toBeTruthy()
         expect(screen.getByRole('status').textContent).toBe('待确认')
         expect(screen.queryByRole('alert')).toBeNull()
@@ -101,30 +99,30 @@ describe('monitor user states', () => {
     }
     fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
     expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByText(/不可用 · forecast pipe closed/).title).toContain('forecast pipe closed')
+    expect(screen.getByText('别家行动时，光标停在下一手可能要打的牌上')).toBeTruthy()
     expect(fixture.calls.some(([cmd]) => /source|fallback|recovery|set_monitor_lean/.test(cmd))).toBe(false)
     expect(fixture.inputs).toHaveLength(inputs)
   })
 
-  it('waits for a reported forecast status even when its saved switch is on', () => {
+  it('does not add a forecast indicator while loading', () => {
     fixture.snapshot = null
     fixture.options = { pointer_lean: true }
     render(<Monitor />)
-    expect(screen.getByRole('group', { name: '预推理状态' }).textContent).toBe('预推理 · 读取中')
+    expect(screen.queryByRole('group', { name: '预推理状态' })).toBeNull()
   })
 
-  it.each(['Majsoul', 'Tenhou'] as const)('shows enabled lobby forecasts as waiting and shares controls on %s', async platform => {
+  it.each(['Majsoul', 'Tenhou'] as const)('keeps only the shared forecast preference and description on %s', async platform => {
     fixture.options = { platform, pointer_lean: true, pointer_trail: true }
     fixture.snapshot = { ...state(), forecast: { owner: 0, state: 'idle' }, game_ended: true, bot: { state: 'idle' } }
     render(<Monitor />)
-    await waitFor(() => expect(screen.getByRole('group', { name: '预推理状态' }).textContent).toBe('预推理 · 等待对局'))
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
     fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
     expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('true')
     expect(screen.getByRole('switch', { name: '光标轨迹' }).getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByText(/等待对局 · 尚无预推理任务/)).toBeTruthy()
+    expect(screen.getByText('别家行动时，光标停在下一手可能要打的牌上')).toBeTruthy()
     fireEvent.click(screen.getByRole('switch', { name: '预推理' }))
-    await waitFor(() => expect(screen.getByRole('group', { name: '预推理状态' }).textContent).toBe('预推理 · 已关闭'))
+    await waitFor(() => expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('false'))
     expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: false }])
   })
 

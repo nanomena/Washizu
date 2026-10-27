@@ -553,14 +553,12 @@
 /* One grid for the bar and the panels over it: twelve columns, 93 wide and 12
  * apart, 16 in from either edge. Every panel runs from one column's edge to
  * another's, so every edge stands over an edge of the bar. The bar is in three
- * parts — the round on 1 to 4, forecast and autoplay on 5 to 8, the tabs on 9
+ * parts — the round on 1 to 4, autoplay on 5 to 8, the tabs on 9
  * to 12. The panels above keep their own column spans. */
 .md-bar { grid-row: 2; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: center; column-gap: 12px; min-width: 0; padding: 0 16px; }
 .md-bar > .mround { grid-column: 1 / 5; }
 /* The middle part ends with what the window may do: autoplay, and the tools. */
 .md-controls { grid-column: 5 / 9; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
-.md-forecast { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 11px; color: var(--m-ink2); }
-.md-forecast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The round's dora indicators: five fit, the most a hand turns over. */
 .mround .mdora { --th: 20px; height: 20px; }
 /* The segmented control: a grey well, the chosen segment a white pill. */
