@@ -532,27 +532,32 @@ const commands = {
   async set_monitor_lean({ enabled }) {
     const saved = /** @type {{ pointer_lean: boolean }} */ (await running().call('set_monitor_lean', { enabled: enabled === true }))
     options = { ...options, ...saved }
+    tellOptions()
     return options
   },
   async set_monitor_confirm({ enabled }) {
     const saved = /** @type {{ quick_confirm: boolean }} */ (await running().call('set_monitor_confirm', { enabled: enabled === true }))
     options = { ...options, ...saved }
+    tellOptions()
     return options
   },
   async set_monitor_auto_win({ enabled }) {
     const saved = /** @type {{ auto_win: boolean }} */ (await running().call('set_monitor_auto_win', { enabled: enabled === true }))
     options = { ...options, ...saved }
+    tellOptions()
     return options
   },
   async set_monitor_continue({ enabled }) {
     const saved = /** @type {{ auto_continue: boolean }} */ (await running().call('set_monitor_continue', { enabled: enabled === true }))
     options = { ...options, ...saved }
+    tellOptions()
     return options
   },
   async set_monitor_trail({ enabled }) {
     const saved = /** @type {{ pointer_trail: boolean }} */ (await running().call('set_monitor_trail', { enabled: enabled === true }))
     options = { ...options, ...saved }
     placeTrail()
+    tellOptions()
     return options
   },
   async set_obs_output({ enabled }) {

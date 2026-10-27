@@ -24,6 +24,10 @@ const timers = new Map()
 let timerId = 0
 const windows = [], views = [], senders = [], errors = [], calls = []
 const presentation = [], messages = []
+const optionEvents = []
+const monitorOptionsOnly = process.env.MONITOR_OPTIONS_ONLY === '1'
+const savedMonitor = { pointer_lean: false, quick_confirm: false, auto_win: false, auto_continue: false, pointer_trail: false }
+let rejectMonitorSave = false
 const handlers = new Map()
 let start
 const screen = Object.assign(new EventEmitter(), {
@@ -38,7 +42,9 @@ class Page extends EventEmitter {
   destroyed = false
   setWindowOpenHandler() {}
   setFrameRate() {}
-  send() {}
+  send(channel, event, value) {
+    if (channel === 'akagi:event' && event === 'monitor-options') optionEvents.push(structuredClone(value))
+  }
   loadURL() { return Promise.resolve() }
   isDestroyed() { return this.destroyed }
   close() { this.destroyed = true; this.emit('destroyed') }
@@ -70,7 +76,18 @@ class View {
 }
 class Core extends EventEmitter {
   ready = Promise.resolve({ platform: 'Majsoul', monitor: {}, version: 'test' })
-  call(method, params) { calls.push({ method, params }); return Promise.resolve(null) }
+  call(method, params) {
+    calls.push({ method, params })
+    if (monitorOptionsOnly) {
+      const key = { set_monitor_lean: 'pointer_lean', set_monitor_confirm: 'quick_confirm', set_monitor_auto_win: 'auto_win', set_monitor_continue: 'auto_continue', set_monitor_trail: 'pointer_trail' }[method]
+      if (key) {
+        if (rejectMonitorSave) return Promise.reject(new Error('Monitor save rejected'))
+        savedMonitor[key] = params.enabled
+        return Promise.resolve({ ...savedMonitor })
+      }
+    }
+    return Promise.resolve(null)
+  }
 }
 const switches = { data: home, profile: 'existing', spout: sender, 'cdp-port': '33333', run: 'test' }
 const app = Object.assign(new EventEmitter(), {
@@ -150,6 +167,32 @@ try {
   }
   const invoke = (command, args = {}) => handlers.get('akagi:invoke')({ sender: views[0].webContents }, command, args)
   const options = async () => (await invoke('get_monitor_options')).value
+  if (monitorOptionsOnly) {
+    // A caller other than React's own onClick must update the mounted view,
+    // not just the cached get_monitor_options response.
+    for (const [command, key] of [['set_monitor_continue', 'auto_continue'], ['set_monitor_lean', 'pointer_lean'], ['set_monitor_confirm', 'quick_confirm'], ['set_monitor_auto_win', 'auto_win'], ['set_monitor_trail', 'pointer_trail']]) {
+      for (const enabled of [true, false]) {
+        optionEvents.length = 0
+        const reply = await invoke(command, { enabled })
+        assert.equal(reply.ok, true)
+        assert.equal(optionEvents.length, 1, `${command} must publish exactly once after persistence`)
+        assert.equal(optionEvents[0][key], enabled)
+        assert.deepEqual(optionEvents[0], structuredClone(await options()))
+        assert.deepEqual(structuredClone(reply.value), optionEvents[0])
+      }
+    }
+    const before = await options()
+    optionEvents.length = 0
+    rejectMonitorSave = true
+    const rejected = await invoke('set_monitor_continue', { enabled: true })
+    assert.equal(rejected.ok, false)
+    assert.match(rejected.error, /Monitor save rejected/)
+    assert.equal(optionEvents.length, 0, 'a failed save must not publish a successful setting')
+    assert.deepEqual(await options(), before)
+    assert.equal(calls.some(call => call.method === 'open_game'), false)
+    console.log('Persisted monitor options broadcast and failed-save isolation: passed')
+    return
+  }
   assert.equal((await options()).obs_name, 'Washizu')
   assert.equal((await options()).obs_output, true)
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'obs.json'), 'utf8')), { enabled: true })
