@@ -387,6 +387,7 @@ impl AutoplayManager {
 
 /// Spawn point for the autoplay loop. Must be called on the Tokio runtime:
 /// the manager spawns its own helper tasks there.
+#[allow(clippy::too_many_arguments)] // Composition boundary for the existing runtime owners.
 pub async fn run_autoplay_manager(
     cfg: Arc<RwLock<AppConfig>>,
     ctx: Arc<AutoplayContext>,

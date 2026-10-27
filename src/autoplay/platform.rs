@@ -96,6 +96,7 @@ pub enum TargetKind {
 /// Read-only normalization and exact physical target matching. Transaction
 /// state, pacing, retries, and all mouse input belong to the common runtime.
 #[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // async_trait adds this attribute to boxed futures.
 pub trait SiteAdapter: Send + Sync {
     fn plan(&self, context: &ActionContext<'_>) -> TurnPlan;
     async fn pointer_layout(

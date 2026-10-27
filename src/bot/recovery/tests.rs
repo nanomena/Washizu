@@ -421,7 +421,7 @@ async fn real_native_standby_owns_one_window_then_primary_catches_up_on_confirme
         .as_u64()
         .unwrap();
     assert!(
-        ms >= 700 && ms < 1_350,
+        (700..1_350).contains(&ms),
         "actual budget/reserve cutoff: {ms} ms"
     );
     // A repeated delivery is idempotent and cannot create another decision.

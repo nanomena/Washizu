@@ -103,7 +103,8 @@ jobs:
       - name: Shell — smoke
         if: runner.os == 'Linux'
         working-directory: desktop
-        run: xvfb-run -a npm run smoke
+        # At scale 1.5 the display must fit the fixed 1280x720 CSS game surface.
+        run: xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke
 
       - name: Restore bundled runtime cache
         uses: actions/cache@v4

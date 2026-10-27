@@ -34,15 +34,12 @@ impl RiichiCityAutoplay {
         let player = ctx.snapshot.players.get(ctx.our_seat as usize);
         let hand = player.map(|p| p.tehai.clone());
         let drawn = player.and_then(|p| p.drawn_tile.clone());
-        let Some(frame) = build::encode_action_with(
+        build::encode_action_with(
             ctx.action,
             drawn.as_deref(),
             ctx.last_kawa_tile,
             hand.as_deref(),
-        ) else {
-            return None;
-        };
-        Some(frame)
+        )
     }
 }
 

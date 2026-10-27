@@ -65,7 +65,7 @@ impl Payment {
             delta: vec![0; state.num_players as usize],
             after: vec![0; state.num_players as usize],
         };
-        for (relative, pair) in sc.chunks_exact(2).enumerate() {
+        for (relative, pair) in sc.as_chunks::<2>().0.iter().enumerate() {
             let absolute = state.rel_to_abs(relative as u8);
             if state.is_ghost_abs(absolute) {
                 ensure!(pair == [0, 0], "nonzero payment for sanma ghost");

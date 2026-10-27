@@ -116,7 +116,7 @@ pub enum Effect {
     Press {
         permit: Permit,
         target: InputTarget,
-        intent: PressIntent,
+        intent: Box<PressIntent>,
         retry: u32,
     },
     Finished {
@@ -460,7 +460,7 @@ impl TurnController {
         Effect::Press {
             permit,
             target: target.clone(),
-            intent: run.plan.presses[run.index].clone(),
+            intent: Box::new(run.plan.presses[run.index].clone()),
             retry: run.retries,
         }
     }

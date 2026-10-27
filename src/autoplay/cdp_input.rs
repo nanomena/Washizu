@@ -229,6 +229,7 @@ pub(crate) enum MouseEvent {
 }
 
 #[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // async_trait adds this attribute to boxed futures.
 pub(crate) trait MouseSink: Send {
     async fn send(&mut self, event: MouseEvent, point: (f64, f64)) -> Result<()>;
 }
