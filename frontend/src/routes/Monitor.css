@@ -376,7 +376,7 @@
 /* The reason there are no candidates, in the candidates' own slot. */
 .mfault {
   --tone: var(--m-bad);
-  display: grid; grid-template-rows: minmax(0, 1fr) var(--line); min-width: 0; min-height: 0; padding: 7px 14px; border-radius: 10px;
+  display: grid; grid-template: minmax(0, 1fr) var(--line) / minmax(0, 1fr); min-width: 0; min-height: 0; padding: 7px 14px; border-radius: 10px;
   background: color-mix(in srgb, var(--m-bad) 8%, var(--m-panel)); border: 1px solid hsl(0 60% 50% / 0.35); box-shadow: var(--m-shadow);
 }
 .mfault ul { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden; }
@@ -573,6 +573,7 @@
  * decision's own tab: the candidates 5 to 7, the hand and the scores 8 to 12,
  * the round's result across both. */
 .md-body > .mdec { grid-column: 1 / 5; }
+.md-fault { grid-column: 1 / 5; display: grid; min-width: 0; min-height: 0; }
 .md-body > :is(.mcands, .mfault) { grid-column: 5 / 8; }
 .md-body > :is(.md-side, .mslot-empty) { grid-column: 8 / 13; }
 .md-body > :is(.md-wide, .mresult) { grid-column: 5 / 13; }
