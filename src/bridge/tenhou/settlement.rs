@@ -68,7 +68,7 @@ impl Payment {
         for (relative, pair) in sc.as_chunks::<2>().0.iter().enumerate() {
             let absolute = state.rel_to_abs(relative as u8);
             if state.is_ghost_abs(absolute) {
-                ensure!(pair == [0, 0], "nonzero payment for sanma ghost");
+                ensure!(*pair == [0, 0], "nonzero payment for sanma ghost");
                 continue;
             }
             let seat = absolute as usize;
