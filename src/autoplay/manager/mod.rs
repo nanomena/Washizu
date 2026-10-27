@@ -11,22 +11,23 @@
 //! - the platform plans it ([`PlatformAutoplay::plan`]), and the pointer
 //!   plans its way to the first press ([`crate::autoplay::pointer::Hand`]);
 //! - [`steps`] carries the plan out;
-//! - [`press`] proves that the client took the presses, retries the ones it
-//!   did not, and recovers a client that has stopped listening.
+//! - [`press`] reports input evidence and executes only machine-authorized
+//!   retries or client reload effects.
 //!
 //! [`events`] keeps the per-game bookkeeping the mjai stream drives, and
-//! [`table_acts`] makes the presses between decisions.
+//! [`table_acts`] executes observed UI effects. [`ui_input`] applies the same
+//! final capture and single-use permission to every Mahjong Soul mouse-down.
 //!
-//! Failure modes are silent-by-design: if the page handle is missing
-//! (chromium backend not running) or the canvas-rect query fails, the
-//! manager logs a warning and skips the click. The bot pipeline is
-//! untouched; the user can still play the round manually.
+//! Missing pages, unknown pixels, changed ownership and obsolete effects
+//! withhold input. Phase changes and refused presses include their reasons
+//! in the log. Model recovery and source selection belong to the coordinator.
 
 mod decision;
 mod events;
 mod press;
 mod steps;
 mod table_acts;
+mod ui_input;
 
 use crate::autoplay::canvas::Canvas;
 use crate::autoplay::context::AutoplayContext;
@@ -65,8 +66,10 @@ pub struct AutoplayManager {
     state: ManagerState,
     /// The pointer over the current hand.
     hand: Hand,
-    /// The presses due between decisions (see `autoplay::acts`).
-    acts: crate::autoplay::acts::Acts,
+    /// Sole Mahjong Soul UI phase/effect/input authority.
+    ui: Arc<std::sync::Mutex<crate::autoplay::ui::Machine>>,
+    /// Auto-win wishes, independent of phase and without click authority.
+    toggles: crate::autoplay::toggles::Toggles,
     /// When the canvas rect was last measured.
     canvas: Canvas,
     /// User Lua delay policy (hot-reloaded from disk; see
@@ -86,9 +89,6 @@ struct ManagerState {
     last_kawa_tile: Option<String>,
     last_self_tsumo: Option<String>,
     self_riichi_accepted: bool,
-    /// Decisions in a row where the client accepted nothing we pressed.
-    /// Reset by any input the client does accept.
-    dead_clicks: u32,
     /// Cached seat index for our player. Captured directly from
     /// `StartGame { id }` and kept across kyoku resets. Avoids try_lock
     /// failures in the synchronous mjai event handler causing missed
@@ -114,7 +114,8 @@ impl AutoplayManager {
     ) -> Self {
         Self {
             hand: Hand::new(ctx.clone()),
-            acts: Default::default(),
+            ui: Default::default(),
+            toggles: Default::default(),
             cfg,
             ctx,
             tracker,
@@ -153,13 +154,20 @@ impl AutoplayManager {
         });
 
         loop {
+            self.sync_ui().await;
             // The pointer's own pace between turns, apart from any event.
             let glance_at = self.hand.glance_due();
             // And its presses between decisions.
-            let act_at = self.acts.due();
+            let act_at = [self.ui.lock().unwrap().due(), self.toggles.due()]
+                .into_iter()
+                .flatten()
+                .min();
             // And its unhurried moves, a frame at a time, so a press can cut them short.
             let motion_at = self.hand.motion_due();
             tokio::select! {
+                // Sample settings/manual ownership even on an idle lobby.
+                // This timer reports facts; it never authorizes a click.
+                _ = tokio::time::sleep(Duration::from_millis(150)) => {},
                 _ = tokio::time::sleep_until(motion_at.unwrap_or_else(Instant::now).into()), if motion_at.is_some() => {
                     self.hand.step().await;
                 }
@@ -184,9 +192,14 @@ impl AutoplayManager {
                 },
                 msg = mjai_rx.recv() => match msg {
                     Ok(ev) => {
+                        self.sync_ui().await;
                         self.handle_mjai_event(&ev);
                     }
-                    Err(RecvError::Lagged(n)) => warn!("autoplay: mjai bus lagged {n}"),
+                    Err(RecvError::Lagged(n)) => {
+                        warn!("autoplay: mjai bus lagged {n}; revoking UI session");
+                        self.ctx.invalidate_ui();
+                        self.hand.cancel();
+                    },
                     Err(RecvError::Closed) => {
                         info!("autoplay: mjai bus closed; exiting");
                         return Ok(());
@@ -198,7 +211,8 @@ impl AutoplayManager {
 
     /// One decision, from the bot's answer to the pointer's rest after it.
     async fn handle_bot_response(&mut self, resp: BotResponse) {
-        let Some(decision) = self.read_decision(&resp).await else {
+        self.sync_ui().await;
+        let Some(mut decision) = self.read_decision(&resp).await else {
             return;
         };
         // Every reply that gets here is one the engine asked for: the bot
@@ -282,6 +296,23 @@ impl AutoplayManager {
         // the previous decision cannot be mistaken for this one landing.
         let ticket = self.ctx.input_watch.ticket();
 
+        if decision.platform == Platform::Majsoul {
+            let Some(window) = decision.planned_budget.map(Into::into) else {
+                warn!("autoplay: no authoritative Majsoul window; withholding semantic input");
+                return;
+            };
+            self.sync_ui().await;
+            decision.ui_token = self
+                .ui
+                .lock()
+                .unwrap()
+                .begin_decision(window, decision.cfg.click_retries);
+            if decision.ui_token.is_none() {
+                debug!("autoplay: phase/window already consumed or unavailable; withholding reply");
+                return;
+            }
+        }
+
         if let Some(w) = decision.planned_window {
             self.state.acted_window = Some(w.opened_at);
         }
@@ -326,10 +357,16 @@ impl AutoplayManager {
             .execute(&plan, approach, rect, &decision, &resp.action)
             .await
         {
+            if let Some(token) = decision.ui_token {
+                self.ui.lock().unwrap().finish_decision(token);
+            }
             return;
         }
         self.prove(&plan, rect, ticket, &decision, &resp.action)
             .await;
+        if let Some(token) = decision.ui_token {
+            self.ui.lock().unwrap().finish_decision(token);
+        }
     }
 
     /// One look between turns: at one of the tiles the bot expects to throw,

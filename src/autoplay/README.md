@@ -23,8 +23,8 @@ bot answers is the most obvious tell there is.
 
 | Module | Role |
 |---|---|
-| `manager.rs` | Long-lived task: subscribes to `BotResponseBus` + `MjaiBus`, owns per-game state (`last_kawa_tile`, riichi flags, reach two-step), executes click plans. |
-| `platform.rs` | `PlatformAutoplay` trait + `ActionContext`/`PlanResult`/`Step` (`Click` / `Sleep` / `AwaitReady` / `DomClick` / `Discard`). The manager only knows this trait. |
+| `manager/` | Long-lived task: subscribes to `BotResponseBus` + `MjaiBus`, feeds protocol/environment events to the UI machine and executes its effects. |
+| `platform.rs` | `PlatformAutoplay` trait + `ActionContext`/`PlanResult`/`Step` (`Click` / `Sleep` / `AwaitReady` / `DomClick` / `Discard`). The trait plans semantic actions; it grants no input permission. |
 | `majsoul/` | The Majsoul implementation: 16:9 coordinate tables (`coords.rs`) + plan dispatch for every mjai action type. |
 | `tenhou/` | The Tenhou implementation: press the client's own action buttons (`Step::DomClick`) or call its discard handler with a tile index (`Step::Discard`). `tenhou/inject.rs` is what makes the latter reachable. |
 | `tenhou_state.rs` | `TenhouState` — the hand at Tenhou tile-index resolution plus the current decision window (the server's `t` bitmask). Written by the Tenhou bridge, read here. Without it an mjai tile *string* cannot be resolved to the physical copy Tenhou wants. |
@@ -35,12 +35,15 @@ bot answers is the most obvious tell there is.
 | `pointer.rs` | Where the pointer is between presses, Majsoul only: the *approach* (it travels to the first press of a plan instead of appearing on it, and may rest on the runner-up first) and the *rest* (once the press has registered it leaves the hand). Pure arithmetic on points and milliseconds; see "The pointer between presses" below. |
 | `context.rs` | `AutoplayContext` — shared slots between the capture backend, the bridge and the manager (`page`, `canvas_rect`, `time_budget`, `input_watch`, `tenhou_state`). |
 | `cdp_input.rs` | chromiumoxide wrappers: hover → press → hold → release click sequence (optionally with a mid-press cursor jiggle for retries), canvas rect query, and the Tenhou route's DOM helpers — action-button selectors, the readiness probe, and the call into the injected discard handler. |
-| `verify.rs` | Majsoul only. `InputWatch` — counts the client's own uplink input commands (`inputOperation` / `inputChiPengGang`, bumped by the Majsoul bridge). The manager takes a ticket before pressing; if the count never moves, the click was swallowed and the plan is pressed again (bounded by `click_retries`, gated on the decision window still being live). Repeated dead decisions trigger a page reload (`reload_after_failures`), which reconnects into the hand via the bridge's `GameRestore` path. |
+| `verify.rs` | Majsoul only. `InputWatch` — counts the client's own uplink input commands (`inputOperation` / `inputChiPengGang`, bumped by the Majsoul bridge). The manager takes a ticket before pressing; if the count never moves, the click was swallowed and the plan is pressed again (bounded by `click_retries`, gated on the decision window still being live). The UI machine authorizes bounded retries and a configured client reload effect; verification itself chooses no recovery path. |
 
-Game-end continuation has its own observed controls and matching-response
-stop signal. Unknown frames never acquire a rematch click target. See
-[ENDING.md](ENDING.md) for the state transitions, historical image evidence,
-click guards and deterministic regression coverage.
+Mahjong Soul UI control lives in [`ui.rs`](ui.rs): table waiting, own-turn
+and claim windows, blue result confirm, yellow continue, recognized reward,
+rematch, owned question, matching, unknown/transition and suspended input.
+Only that machine grants an input ticket. Timers, pixels and the pointer
+report facts or execution progress. See [UI_FSM.md](UI_FSM.md) for ownership,
+transitions, migration and the selected-response contract, and
+[ENDING.md](ENDING.md) for historical screen evidence.
 
 ## What arrives on the `BotResponseBus`
 
@@ -50,6 +53,11 @@ our seat can act, so an `MjaiEvent::None` reaching autoplay is a *decline*
 — press pass — and never "the bot had nothing to say about someone else's
 turn". That distinction is not visible in the reply itself, which is why it
 is settled upstream; see `src/bot/README.md` → "Deciding what to ask".
+
+Majsoul actions require the coordinator's typed `meta.control` with an exact
+current `WindowProof`; missing, malformed and stale proofs are withheld.
+Primary and native-standby selections use the same input path. The FSM
+never chooses a source.
 
 Replies carrying a `meta.unavailable` reason are recorded upstream but withheld
 from this bus. A lost or unavailable model therefore cannot become a Pass
@@ -334,8 +342,9 @@ Invariants:
   plan's own coordinates; the pointer's path decides nothing about the
   action. The stale-window check stays immediately before the press,
   after the walk.
-- **Later presses of one plan are unchanged** (candidate row, riichi
-  tile): they follow the first by `inter_click_delay_ms` as before.
+- **Every later press is checked again** (candidate row, riichi tile), after
+  its existing inter-click delay: window, ownership, geometry and current
+  positive table evidence must still match.
 - The rest runs inline after verification, so it delays the handling
   of the next bot response by its own length (well under a second);
   the next decision's `elapsed_ms` accounts for it.

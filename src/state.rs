@@ -118,6 +118,18 @@ impl AppState {
         )
         .map_err(|e| e.to_string())?;
         std::fs::write(&*self.config_path, saved).map_err(|e| e.to_string())?;
+        // Revoke before publishing input settings, including an off/on
+        // interval entirely inside a pending press. Unrelated UI preferences
+        // do not interrupt a live decision. Capture/profile ownership uses
+        // invalidate_ui at its separate session boundary.
+        if config.autoplay.enabled != next.autoplay.enabled
+            || config.platform.kind != next.platform.kind
+            || config.monitor.quick_confirm != next.monitor.quick_confirm
+            || config.monitor.auto_continue != next.monitor.auto_continue
+            || config.monitor.auto_win != next.monitor.auto_win
+        {
+            self.autoplay_context.settings_changed();
+        }
         *config = next.clone();
         Ok(next)
     }

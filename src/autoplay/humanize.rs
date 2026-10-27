@@ -312,9 +312,7 @@ pub fn frame_ms<R: Rng + ?Sized>(rng: &mut R) -> u64 {
 /// From a hand's result arriving to the first look for its confirm button,
 /// in ms: the client plays the win's or the draw's cut-in first.
 pub const RESULT_LOOK_FIRST_MS: u64 = 1500;
-/// Between two looks for the confirm button while it has not shown, in ms.
-pub const RESULT_LOOK_EVERY_MS: u64 = 250;
-/// From a confirm button showing to the first burst on it: a person sees it,
+/// From a confirm button showing to the press on it: a person sees it,
 /// then any moment as likely as the next. The button counts down from three
 /// and the client confirms by itself at nought, so the reaction, the move
 /// there and the hover all fit in about three seconds.
@@ -329,62 +327,6 @@ pub const CONFIRM_SEEN: Hazard = Hazard {
 pub const OUR_BUTTON_LINGER: f64 = 1.5;
 /// The longest the hand looks at a confirm button before setting off for it, in ms.
 pub const CONFIRM_SEEN_MOST_MS: f64 = 1_600.0;
-/// From a hand's result arriving to the hand starting to press its way
-/// through it, when the screen cannot be read to see its button: a look at
-/// the result, then any moment as likely as the next.
-pub const RESULT_START: Hazard = Hazard {
-    floor: 2100.0,
-    mean: 3000.0,
-    most: 30_000.0,
-};
-/// After a win of the seat's own, how many times longer the hand lets the
-/// result show before it starts pressing through it, when it cannot see the
-/// button ([`RESULT_START`]): a player looks at their own hand's score.
-pub const OUR_WIN_LINGER: f64 = 2.5;
-/// Between one burst of presses on the result and the next: a third of a
-/// second on average, never under 120 ms.
-pub const RESULT_PAUSE: Hazard = Hazard {
-    floor: 120.0,
-    mean: 200.0,
-    most: 7_000.0,
-};
-/// The fewest and the most presses a burst has.
-pub const BURST_LEAST: u32 = 2;
-pub const BURST_MOST: u32 = 7;
-/// Between the presses of a burst, from one's release to the next one's
-/// press: a hand clicking as fast as it does.
-pub const BURST_GAP: Tail = Tail {
-    median: 150.0,
-    spread: 0.35,
-    low: 70.0,
-    high: 600.0,
-};
-/// What a press of a burst holds the button about, in ms, before [`HOLD`]
-/// draws it: quick, and with no hover first, the pointer already on it.
-pub const TAP_HOLD_MS: u32 = 70;
-/// How far, in the 16:9 unit, the pointer drifts between the presses of a
-/// burst, sideways and up and down: a pixel or two, a hand clicking fast not
-/// moving the mouse. A press pushes the mouse more along the hand than across
-/// it, so mostly up and down.
-pub const TAP_DRIFT_X: Spread = Spread {
-    sd: 0.005,
-    most: 0.02,
-};
-pub const TAP_DRIFT_Y: Spread = Spread {
-    sd: 0.016,
-    most: 0.05,
-};
-/// From one burst on the same button to the next, the hand still on it: it
-/// stays where it was, moved a little more than between two presses, again
-/// mostly up and down.
-pub const STAY_DRIFT_X: Spread = Spread {
-    sd: 0.012,
-    most: 0.04,
-};
-pub const STAY_DRIFT_Y: Spread = Spread {
-    sd: 0.035,
-    most: 0.10,
-};
 /// From our riichi being accepted to the hand switching the client's
 /// auto-win on: any moment as likely as the next, so an early riichi, with
 /// longer to go, is the likelier to have it switched on.
@@ -432,17 +374,8 @@ pub const END_PAUSE: Hazard = Hazard {
     most: 3_000.0,
 };
 
-/// How many presses a burst has: any number from [`BURST_LEAST`] to
-/// [`BURST_MOST`], each as likely.
-pub fn burst_len<R: Rng + ?Sized>(rng: &mut R) -> u32 {
-    BURST_LEAST + one_of((BURST_MOST - BURST_LEAST + 1) as usize, rng) as u32
-}
-
 // ---- Who holds the pointer ----
 
-/// How long a press waits for the user's hand to leave the mouse before it
-/// goes ahead anyway: a turn's clock does not wait.
-pub const USER_WAIT_MS: u64 = 1500;
 /// How long the unhurried moves are put off at a time while the user's hand
 /// is on the mouse.
 pub const USER_PUT_OFF_MS: u64 = 300;
@@ -676,17 +609,6 @@ mod tests {
         let (early, late) = (past(1000), past(9000));
         assert!((early - late).abs() < 0.04, "{early} {late}");
         assert!((early - (-1.0f64).exp()).abs() < 0.03, "{early}");
-    }
-
-    /// A burst is two presses to seven, each count as likely.
-    #[test]
-    fn a_burst_is_two_presses_to_seven_each_as_likely() {
-        let all = draws(30_000, burst_len);
-        assert!(all.iter().all(|&n| (2..=7).contains(&n)));
-        for n in 2..=7 {
-            let share = all.iter().filter(|&&m| m == n).count() as f64 / all.len() as f64;
-            assert!((share - 1.0 / 6.0).abs() < 0.015, "{n}: {share}");
-        }
     }
 
     /// A place's spread stays within its bound and is mostly small.

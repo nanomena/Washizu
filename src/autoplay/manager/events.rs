@@ -3,7 +3,7 @@
 //! A game resets everything. A hand keeps the seat, the table size, the
 //! canvas cache and the dead-click count, and forgets the rest — the tiles
 //! last seen, the riichi, and all the pointer knows ([`Hand::reset`]). The
-//! presses between decisions (`autoplay::acts`) learn of each result, riichi,
+//! UI machine and independent toggle schedule learn of each result, riichi,
 //! deal, game end and discard of ours here.
 //!
 //! [`Hand::reset`]: crate::autoplay::pointer::Hand::reset
@@ -24,7 +24,8 @@ impl AutoplayManager {
                 // than going through the tracker. This avoids the try_lock
                 // race entirely and makes cached_our_seat available from
                 // the very first event of the game.
-                self.acts.hand_over();
+                self.toggles.reset();
+                self.ui_transition("start_game", |ui| ui.game_started());
                 self.new_game();
                 self.state.cached_our_seat = *id;
                 self.state.num_players = *num_players;
@@ -33,31 +34,38 @@ impl AutoplayManager {
                 // The game ends as its last result shows: that result is
                 // still pressed through, up to the game's own screens, and
                 // those are looked for after it.
-                self.acts
-                    .game_over(Instant::now(), self.ctx.input_watch.matching());
+                self.toggles.reset();
+                self.ui_transition("end_game", |ui| ui.game_ended(Instant::now()));
                 self.new_game();
             }
             MjaiEvent::Hora { .. } | MjaiEvent::Ryukyoku { .. } => {
                 let confirmed = self.ctx.input_watch.confirmed();
                 let ours = matches!(ev, MjaiEvent::Hora { actor, .. }
                     if Some(*actor) == self.state.cached_our_seat);
-                self.acts
-                    .result_shown(confirmed, ours, Instant::now(), &mut rand::rng());
+                self.toggles.reset();
+                self.ui_transition("result", |ui| ui.result(confirmed, ours, Instant::now()));
             }
             MjaiEvent::StartKyoku { .. } | MjaiEvent::EndKyoku => {
                 if matches!(ev, MjaiEvent::StartKyoku { .. }) {
-                    self.acts.hand_over();
+                    self.toggles.reset();
+                    let window = self
+                        .ctx
+                        .time_budget
+                        .read()
+                        .ok()
+                        .and_then(|g| *g)
+                        .map(Into::into);
+                    self.ui_transition("start_kyoku", |ui| ui.table_started(window));
                 }
                 // Per-kyoku reset: keep last seen rect cache and cached seat,
                 // drop everything else. Keep last_kawa_tile as None so
                 // push_random_pre_delay uses the max delay (opening-hand guard).
-                // The dead-click count survives too: a client that has
+                // The UI machine retains dead-click evidence: a client that has
                 // stopped accepting presses stays that way across the kyoku
                 // boundary, and zeroing it here would need the failures to
                 // land inside one hand before anything recovered them.
                 self.state = ManagerState {
                     cached_our_seat: self.state.cached_our_seat,
-                    dead_clicks: self.state.dead_clicks,
                     num_players: self.state.num_players,
                     ..ManagerState::default()
                 };
@@ -77,14 +85,15 @@ impl AutoplayManager {
                     self.state.last_self_tsumo = None;
                     // The hand it leaves may be ready; in riichi it is not ours to play.
                     if !self.state.self_riichi_accepted {
-                        self.acts.discarded(Instant::now());
+                        self.toggles.discarded(Instant::now());
                     }
                 }
             }
             MjaiEvent::ReachAccepted { actor } => {
                 if self.is_ours(*actor) {
                     self.state.self_riichi_accepted = true;
-                    self.acts.riichi_accepted(Instant::now(), &mut rand::rng());
+                    self.toggles
+                        .riichi_accepted(Instant::now(), &mut rand::rng());
                 }
             }
             MjaiEvent::Chi { actor, .. }
@@ -197,22 +206,6 @@ mod tests {
         );
     }
 
-    /// A client that has stopped accepting presses stays that way across
-    /// a kyoku boundary — the failures run to the end of the game — so the
-    /// count has to survive one, or the threshold would only ever be
-    /// reached by failures packed into a single hand. It does reset for a
-    /// new game, which is a new page state.
-    #[test]
-    fn dead_click_count_survives_a_kyoku_but_not_a_game() {
-        let mut m = AutoplayManager::for_tests();
-        m.state.dead_clicks = 2;
-        m.handle_mjai_event(&MjaiEvent::EndKyoku);
-        assert_eq!(m.state.dead_clicks, 2, "the client is still not listening");
-
-        m.handle_mjai_event(&start_game(Some(0)));
-        assert_eq!(m.state.dead_clicks, 0, "a new table is a fresh start");
-    }
-
     /// Our riichi and a hand's result reach the presses between decisions;
     /// another seat's riichi does not, and a new deal clears what was due.
     #[test]
@@ -220,20 +213,20 @@ mod tests {
         let mut m = AutoplayManager::for_tests();
         m.handle_mjai_event(&start_game(Some(0)));
         m.handle_mjai_event(&MjaiEvent::ReachAccepted { actor: 2 });
-        assert!(m.acts.due().is_none(), "not our riichi");
+        assert!(m.toggles.due().is_none(), "not our riichi");
         m.handle_mjai_event(&MjaiEvent::ReachAccepted { actor: 0 });
-        assert!(m.acts.due().is_some(), "auto-win may go on");
+        assert!(m.toggles.due().is_some(), "auto-win may go on");
         m.handle_mjai_event(&MjaiEvent::Ryukyoku {
             deltas: None,
             tehais: None,
             scores: None,
             reason: None,
         });
-        let result = m.acts.due().expect("the result is pressed through");
+        let result = m.ui.lock().unwrap().due().expect("the result is observed");
         assert!(result <= Instant::now() + std::time::Duration::from_secs(30));
         m.handle_mjai_event(&MjaiEvent::EndKyoku);
         assert!(
-            m.acts.due().is_some(),
+            m.ui.lock().unwrap().due().is_some(),
             "the result is still up after the hand's end"
         );
         m.handle_mjai_event(&MjaiEvent::StartKyoku {
@@ -247,7 +240,10 @@ mod tests {
             tehais: vec![vec!["1m".into(); 13]; 4],
             num_players: 4,
         });
-        assert!(m.acts.due().is_none(), "a new deal: nothing left to press");
+        assert!(
+            m.ui.lock().unwrap().due().is_none(),
+            "a new deal: nothing left to press"
+        );
     }
 
     /// Observer/replay mode: `StartGame` with `id: None` must not cache a

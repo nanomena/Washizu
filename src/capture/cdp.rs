@@ -266,6 +266,7 @@ pub async fn run(
                 let mut guard = ctx.page.write().await;
                 let owner = guard.as_ref().map(|p| p.target_id().inner().clone());
                 if page_handle_cleared_by_removal(owner.as_deref(), &removes) {
+                    ctx.invalidate_ui();
                     *guard = None;
                     drop(guard);
                     *ctx.canvas_rect.write().await = None;
@@ -596,6 +597,7 @@ async fn attach_page(
                             let prev_target =
                                 guard.as_ref().map(|p| p.target_id().inner().clone());
                             let same_tab = prev_target.as_deref() == Some(target_id.as_str());
+                            if !same_tab { ctx.invalidate_ui(); }
                             *guard = Some(page.clone());
                             drop(guard);
                             if same_tab {

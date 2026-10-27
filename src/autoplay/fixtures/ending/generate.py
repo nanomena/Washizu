@@ -39,3 +39,13 @@ for name, filename, box in captures:
         roi = tuple(round(v * 60) for v in (left, top, right, bottom))
         clean.paste(image.crop(roi), roi[:2])
     clean.save(out / (name + '.png'))
+
+# Positive table evidence is restricted to the already measured toggle strip.
+# No player name/avatar/hand data is retained. Existing eight fixtures above
+# keep their historical masks unchanged.
+image = Image.open(source / 'panel-shots/003047-table.png').convert('RGB')
+image = image.resize((960, 540), Image.Resampling.LANCZOS)
+clean = Image.new('RGB', image.size)
+box = (0, 260, 35, 372)
+clean.paste(image.crop(box), box[:2])
+clean.save(out / 'table-glyphs.png')

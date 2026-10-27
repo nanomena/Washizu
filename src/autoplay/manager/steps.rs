@@ -27,8 +27,8 @@ impl AutoplayManager {
         // tile go out in one plan (the declaring discard is pre-resolved onto
         // `Reach.pai`), so the reach action alone identifies it.
         let declares_reach = matches!(action, MjaiEvent::Reach { .. });
-        let mut window_checked = false;
         let mut clicked = false;
+        let mut click_index = 0;
         for step in &plan.steps {
             match step {
                 Step::Sleep { duration_ms } => {
@@ -115,7 +115,7 @@ impl AutoplayManager {
                     }
                 }
                 Step::Click { x_norm, y_norm } => {
-                    let Some(rect) = rect else {
+                    let Some(_) = rect else {
                         warn!("autoplay: click step with no canvas rect; skipping");
                         continue;
                     };
@@ -127,32 +127,12 @@ impl AutoplayManager {
                             return false;
                         }
                     }
-                    // The decision window can close while we sleep: a
-                    // higher-priority claimant (ron over our chi window)
-                    // resolves it early, and the *next* window's buttons
-                    // render at the same coordinates — a stale click
-                    // would press a live button of the wrong decision.
-                    // The bridge rewrites the budget slot exactly when
-                    // that happens, so the slot still holding the window
-                    // we planned against is the cheap validity check.
-                    // Checked once, before the first click: later steps
-                    // of one plan run inside our own action's window.
-                    // With no budget tracked (off-Majsoul) there is no
-                    // signal — behaviour is unchanged there.
-                    if !window_checked {
-                        window_checked = true;
-                        if decision.planned_budget.is_some() {
-                            let current = self.ctx.time_budget.read().ok().and_then(|g| *g);
-                            if current.map(|b| b.opened_at)
-                                != decision.planned_budget.map(|b| b.opened_at)
-                            {
-                                warn!(
-                                    "autoplay: decision window closed mid-delay — dropping stale click for {action:?}"
-                                );
-                                return false;
-                            }
-                        }
-                    }
+                    let Some(token) = decision.ui_token else {
+                        return false;
+                    };
+                    let Some(rect) = self.canvas.remeasure(&self.ctx).await else {
+                        return false;
+                    };
                     let (px, py) = rect.pixel(*x_norm, *y_norm);
                     if !rect.contains(px, py) {
                         warn!(
@@ -176,9 +156,13 @@ impl AutoplayManager {
                         hold_ms: decision.cfg.click_hold_ms,
                         jiggle: declares_reach,
                     };
-                    if !self.hand.press("plan", (px, py), rect, touch).await {
+                    if !self
+                        .decision_press(token, click_index, (px, py), rect, touch)
+                        .await
+                    {
                         return false;
                     }
+                    click_index += 1;
                     clicked = true;
                 }
                 // Riichi City SendFrames never reach this loop — they are

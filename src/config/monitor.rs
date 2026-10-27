@@ -16,18 +16,18 @@ pub struct MonitorConfig {
     /// `autoplay::pointer::lean`). Asks the bot between turns, so only a bot
     /// that answers with a lean gives the pointer anywhere to go.
     pub pointer_lean: bool,
-    /// Press through a hand's result, in bursts at its confirm button, as a
-    /// person in a hurry does (see `autoplay::acts`).
+    /// Press a recognized hand-result confirm after a reaction, then observe
+    /// again before another press (see `autoplay::ui`).
     pub quick_confirm: bool,
     /// Some while after our riichi, or after our hand comes to be ready and
     /// to win on some wait, closed or open, switch the client's own auto-win
     /// on, below a mangan, and for a hand not in riichi not in a hand that may
     /// be the game's last; the client switches it off for every new hand (see
-    /// `autoplay::acts`, `autoplay::tenpai`).
+    /// `autoplay::toggles`, `autoplay::tenpai`).
     pub auto_win: bool,
     /// Play game after game: with autoplay on, press through the game's own
     /// screens after its end — the standings, the rank, the room's rewards —
-    /// and "play again" (see `autoplay::acts`). The level of autoplay above
+    /// and "play again" (see `autoplay::ui`). The level of autoplay above
     /// playing a game; switched off during a game, that game is the last.
     pub auto_continue: bool,
     /// Offer the game view — the game alone, without the dock or any pointer
