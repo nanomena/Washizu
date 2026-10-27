@@ -238,6 +238,13 @@ impl SiteAdapter for TenhouAutoplay {
             let Some((tile, tsumogiri)) = discard_tile(&intent.action, &state) else {
                 return Ok(observation);
             };
+            if !input
+                .tiles
+                .iter()
+                .any(|actual| actual.tile == tile && actual.legal && actual.drawn == tsumogiri)
+            {
+                return Ok(observation);
+            }
             client::TargetRequest::Discard {
                 window: window.clone(),
                 hand: input.hand.clone(),
