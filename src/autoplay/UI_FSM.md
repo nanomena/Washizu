@@ -8,7 +8,7 @@ not the project's work-status ledger or a deployment claim.
 `ui::Machine` is the single owner of UI phase, observed-control reaction,
 transition waits, finite click attempts and phase tickets. `manager` feeds
 real protocol facts, current settings, clock events and observations, then
-executes effects. `pixels` only reports `Sight`/`Glyph`. `pointer::Hand`
+executes effects. `pixels` only reports `Sight`/`Glyph`. `pointer::PointerController`
 owns travel/hover/hold progress, not UI phase. `budget::TimeBudget` remains
 the bridge-owned decision-window identity and time grant. `InputWatch`
 remains a protocol observation, not another controller.
@@ -23,21 +23,27 @@ permission counts as an attempt but cannot claim the next screen. Duplicate
 or replaced callbacks cannot cancel newer work, and a reported success
 without consumed permission cannot advance a route.
 
-The recovery coordinator owns source selection and legality validation.
-The UI consumes its selected semantic action; it never chooses a model,
-launches inference, or falls back. The shared seam is the recovery module's
-public `bot::control::{DecisionControl, WindowProof}` contract, documented
-in its `RECOVERY.md`. Its declarations and `BotResponse` accessors are
-mirrored here verbatim so this consumer compiles before branch integration.
-The coordinator is the only producer of `meta.control`, with the original
-`DecisionContext` and exact bridge window captured **before inference**.
-Missing/malformed/unavailable/stale provenance fails admission; it cannot
-borrow the newest budget. Primary and native standby use the same path.
-The UI never reads an asynchronous monitor cursor to manufacture identity.
+Playing actions no longer belong to this UI machine. The recovery coordinator
+owns source selection and legality validation. The shared `TurnController`
+consumes its original `DecisionRequest` and `meta.control` proof, and owns
+preparation, readiness, pacing, mouse permits, actual command/declaration
+confirmation, bounded retries, completion and cancellation. Missing or stale
+provenance cannot borrow the newest window. `manager` only joins these objects;
+it has no website-specific playing loop. `PacingPolicy` computes one absolute
+schedule, and `PointerController` executes every browser mouse effect.
+
+`SiteAdapter` is read-only: semantic action matching, native window/full hand/
+control identity, actual CSS bounds, real clock facts and exact-point hit tests.
+It cannot wait, retry or dispatch. Local reveal/menu clicks remain in the same
+common turn; physical dispatch alone never completes the selected action. A
+real declaration echo opens only the validated continuation; full riichi still
+requires its selected declaring discard. `transaction.rs` and its shared tests
+are the playing-lifetime contract. No decision/retry/finish API remains here.
 
 `Ticket` is UI phase/effect freshness; it is not another request envelope or
-`InputGate`. The final boundary checks settings, page/canvas, the same real
-window, its server-granted fixed+add lifetime, uplink consumption and pixels.
+`InputGate`. The page-effect boundary checks settings, page/canvas, ownership and observed
+pixels or exact Web controls. Playing-window lifetime and command consumption
+are checked by TurnController at its own final mouse-down boundary.
 Config changes increment a UI settings revision (off/on during hover is
 observable). Capture/tab/profile changes retire a UI session; bridge auth,
 restore and new-round facts retire the old table generation. Manual input

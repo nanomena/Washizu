@@ -298,7 +298,7 @@ impl AutoplayManager {
     }
 
     /// One look between turns: at one of the tiles the bot expects to throw,
-    /// or nowhere new (see `autoplay::pointer::lean`). Majsoul only, the
+    /// or nowhere new (see `autoplay::pointer::lean`), using measured site targets. The
     /// seat's hand at rest, autoplay on and not in riichi; otherwise the
     /// looks stop.
     async fn glance(&mut self) {
@@ -460,8 +460,30 @@ mod admission_tests {
         manager.ui.lock().unwrap().synchronize(env, Instant::now());
         let decision = manager.read_decision(&reply).await.unwrap();
         assert_eq!(decision.request, request);
-        let mut ui = manager.ui.lock().unwrap();
-        assert!(ui.begin_decision(decision.request, 0).is_some(), "{ui:?}");
+        let plan = manager.majsoul.plan(&decision.context(&reply.action));
+        let binding = crate::autoplay::transaction::Binding {
+            context: decision.request.context,
+            owner: decision.owner,
+            window: turn::window_identity(decision.request.window.unwrap().proof()),
+            input: manager.ctx.input_watch.ticket(),
+        };
+        assert!(manager.turn.lock().unwrap().begin(
+            binding,
+            reply.action.clone(),
+            plan,
+            crate::autoplay::transaction::Settings {
+                retries: 0,
+                verify_ms: 100,
+                gap_ms: 0,
+                ready_ms: 8_000,
+                reload_after: 0
+            },
+            Instant::now()
+        ));
+        assert_eq!(
+            manager.turn.lock().unwrap().phase(),
+            Some(crate::autoplay::transaction::Phase::Preparing)
+        );
         assert_eq!(manager.state.last_self_tsumo.as_deref(), Some("N"));
     }
 }
