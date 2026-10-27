@@ -11,7 +11,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::Page;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -21,6 +21,11 @@ use tokio::sync::broadcast;
 /// both kinds of input, and a press of ours made while the user's mouse moves
 /// can be read by the client as part of the user's drag, and come to nothing.
 static USER_HAND: AtomicBool = AtomicBool::new(false);
+static USER_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub fn user_revision() -> u64 {
+    USER_REVISION.load(Ordering::SeqCst)
+}
 
 /// Until when a hand that has come to rest still counts as on the mouse:
 /// autoplay has the pointer back a while after the user stops, a while of its
@@ -29,6 +34,9 @@ static RESTING_UNTIL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::
 
 /// The shell's word on the user's mouse: moving over the game, or come to rest.
 pub fn set_user_active(active: bool) {
+    if active && !USER_HAND.load(Ordering::Relaxed) {
+        USER_REVISION.fetch_add(1, Ordering::SeqCst);
+    }
     let until = (!active).then(|| {
         let wait = crate::autoplay::humanize::HAND_BACK.draw_ms(&mut rand::rng());
         std::time::Instant::now() + Duration::from_millis(u64::from(wait))
@@ -76,23 +84,6 @@ pub fn take_user_left_pointer() -> Option<(f64, f64)> {
 /// The next mark starts a fresh stretch of the path (see [`PointerMark::fresh`]).
 static FRESH: AtomicBool = AtomicBool::new(false);
 
-/// Wait, up to `humanize::USER_WAIT_MS`, for the user's mouse to rest or leave the game.
-/// After that the press goes ahead: a turn's clock does not wait.
-async fn wait_for_user_hand() {
-    if !user_active() {
-        return;
-    }
-    let started = tokio::time::Instant::now();
-    let most = Duration::from_millis(crate::autoplay::humanize::USER_WAIT_MS);
-    while user_active() && started.elapsed() < most {
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-    tracing::info!(
-        "autoplay: waited {} ms for the user's mouse to rest before pressing",
-        started.elapsed().as_millis()
-    );
-}
-
 /// Where the pointer autoplay drives is, in the page's CSS pixels, and whether
 /// it is pressed. The page shows no cursor for input sent over CDP; these are
 /// for whoever wants to draw one.
@@ -127,6 +118,9 @@ fn mark(x: f64, y: f64, down: bool) {
 /// Put the pointer at `(x, y)` in one step: one frame of a move made a frame
 /// at a time (`autoplay::pointer::queue`).
 pub async fn step_to(page: &Page, x: f64, y: f64) -> Result<()> {
+    if user_active() {
+        return Err(anyhow!("manual pointer ownership"));
+    }
     move_to(page, x, y).await
 }
 
@@ -204,7 +198,6 @@ where
     F: FnOnce(Page) -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let pt = Point::new(x, y);
     // About the configured times, each press its own: mostly near them, now and then longer.
     let (hover_delay_ms, click_hold_ms) = {
         use crate::autoplay::humanize::{HOLD, HOVER};
@@ -214,61 +207,112 @@ where
             HOLD.draw_ms(click_hold_ms, &mut rng),
         )
     };
-    wait_for_user_hand().await;
-    move_to(page, x, y).await?;
+    if user_active() {
+        return Ok(false);
+    }
+    guarded_mouse_sequence(
+        &mut PageMouse(page),
+        (x, y),
+        hover_delay_ms,
+        click_hold_ms,
+        jiggle,
+        || check(page.clone()),
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseEvent {
+    Move,
+    Down,
+    Up,
+}
+
+#[async_trait::async_trait]
+pub(crate) trait MouseSink: Send {
+    async fn send(&mut self, event: MouseEvent, point: (f64, f64)) -> Result<()>;
+}
+
+struct PageMouse<'a>(&'a Page);
+
+#[async_trait::async_trait]
+impl MouseSink for PageMouse<'_> {
+    async fn send(&mut self, event: MouseEvent, (x, y): (f64, f64)) -> Result<()> {
+        if event == MouseEvent::Move {
+            return step_to(self.0, x, y).await;
+        }
+        let ty = match event {
+            MouseEvent::Down => DispatchMouseEventType::MousePressed,
+            MouseEvent::Up => DispatchMouseEventType::MouseReleased,
+            MouseEvent::Move => unreachable!(),
+        };
+        let params = DispatchMouseEventParams::builder()
+            .r#type(ty)
+            .x(x)
+            .y(y)
+            .button(MouseButton::Left)
+            .click_count(1)
+            .build()
+            .map_err(|e| anyhow!("build mouse event: {e}"))?;
+        self.0.execute(params).await.context("CDP mouse button")?;
+        mark(x, y, event == MouseEvent::Down);
+        Ok(())
+    }
+}
+
+/// Production and isolated tests share the full move/hover/final-check/
+/// down/hold/up boundary. A refused check cannot emit either button event.
+pub(crate) async fn guarded_mouse_sequence<S, F, Fut>(
+    sink: &mut S,
+    point: (f64, f64),
+    hover_delay_ms: u32,
+    click_hold_ms: u32,
+    jiggle: bool,
+    check: F,
+) -> Result<bool>
+where
+    S: MouseSink,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    sink.send(MouseEvent::Move, point).await?;
     if hover_delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(hover_delay_ms as u64)).await;
     }
-
-    if !check(page.clone()).await {
+    if !check().await {
         return Ok(false);
     }
-
-    let press = DispatchMouseEventParams::builder()
-        .r#type(DispatchMouseEventType::MousePressed)
-        .x(pt.x)
-        .y(pt.y)
-        .button(MouseButton::Left)
-        .click_count(1)
-        .build()
-        .map_err(|e| anyhow!("build mousePressed: {e}"))?;
-    page.execute(press).await.context("CDP mousePressed")?;
-    mark(x, y, true);
-
-    if jiggle {
-        // Split the hold around the nudge so its total stays what the
-        // config says. The move is one CSS pixel — enough for the engine
-        // to resample the cursor while the button is down, not enough to
-        // leave the control.
-        let half = u64::from(click_hold_ms) / 2;
-        if half > 0 {
-            tokio::time::sleep(Duration::from_millis(half)).await;
-        }
-        page.move_mouse(Point::new(x + 1.0, y))
-            .await
-            .context("CDP move_mouse (jiggle out)")?;
-        page.move_mouse(pt)
-            .await
-            .context("CDP move_mouse (jiggle back)")?;
-        let rest = u64::from(click_hold_ms) - half;
-        if rest > 0 {
-            tokio::time::sleep(Duration::from_millis(rest)).await;
-        }
-    } else if click_hold_ms > 0 {
-        tokio::time::sleep(Duration::from_millis(click_hold_ms as u64)).await;
+    if let Err(e) = sink.send(MouseEvent::Down, point).await {
+        let _ = sink.send(MouseEvent::Up, point).await;
+        return Err(e);
     }
-
-    let release = DispatchMouseEventParams::builder()
-        .r#type(DispatchMouseEventType::MouseReleased)
-        .x(pt.x)
-        .y(pt.y)
-        .button(MouseButton::Left)
-        .click_count(1)
-        .build()
-        .map_err(|e| anyhow!("build mouseReleased: {e}"))?;
-    page.execute(release).await.context("CDP mouseReleased")?;
-    mark(x, y, false);
-
+    let held: Result<()> = async {
+        if jiggle {
+            // Split the hold around the nudge so its total stays what the
+            // config says. The move is one CSS pixel — enough for the engine
+            // to resample the cursor while the button is down, not enough to
+            // leave the control.
+            let half = u64::from(click_hold_ms) / 2;
+            if half > 0 {
+                tokio::time::sleep(Duration::from_millis(half)).await;
+            }
+            sink.send(MouseEvent::Move, (point.0 + 1.0, point.1))
+                .await?;
+            sink.send(MouseEvent::Move, point).await?;
+            let rest = u64::from(click_hold_ms) - half;
+            if rest > 0 {
+                tokio::time::sleep(Duration::from_millis(rest)).await;
+            }
+        } else if click_hold_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(click_hold_ms as u64)).await;
+        }
+        Ok(())
+    }
+    .await;
+    // A transport error during a held jiggle must still release the button.
+    let released = sink.send(MouseEvent::Up, point).await;
+    held?;
+    released?;
     Ok(true)
 }
 
@@ -296,12 +340,12 @@ pub async fn travel(
         }
         let t = elapsed.as_secs_f64() / total.as_secs_f64();
         let (x, y) = crate::autoplay::pointer::along(from, to, bend, t);
-        move_to(page, x, y).await?;
+        step_to(page, x, y).await?;
         // About a display frame between steps, as a real mouse's events come: never quite even.
         let frame = Duration::from_millis(crate::autoplay::humanize::frame_ms(&mut rand::rng()));
         tokio::time::sleep(frame.min(total.saturating_sub(started.elapsed()))).await;
     }
-    move_to(page, to.0, to.1).await
+    step_to(page, to.0, to.1).await
 }
 
 /// Read the game canvas's `getBoundingClientRect()` via `Runtime.evaluate`.

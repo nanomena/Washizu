@@ -17,6 +17,13 @@ use crate::schema::MjaiEvent;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Proof {
+    Registered,
+    Retired,
+    Missed,
+}
+
 impl AutoplayManager {
     /// After `plan` was carried out for `action`: prove its presses, recover
     /// a client that has stopped taking them, say so when a riichi did not
@@ -45,7 +52,7 @@ impl AutoplayManager {
         // it, and accepting it would report retries as registered at
         // the exact moments the presses had failed.
         let require_non_discard = !matches!(action, MjaiEvent::Dahai { .. });
-        let registered = self
+        let proof = self
             .verify_and_retry(rect, plan, ticket, decision, action, require_non_discard)
             .await;
         // Once the client stops accepting presses it tends to stay that
@@ -54,21 +61,22 @@ impl AutoplayManager {
         // runs to timeout. A page reload reconnects into the hand
         // through the bridge's GameRestore path, so the way out costs a
         // reconnect rather than the game.
-        if registered {
-            self.state.dead_clicks = 0;
-        } else {
-            self.state.dead_clicks += 1;
-            if cfg.reload_after_failures > 0 && self.state.dead_clicks >= cfg.reload_after_failures
-            {
-                warn!(
-                    decisions = self.state.dead_clicks,
-                    "autoplay: the client has stopped accepting presses — reloading to recover"
-                );
+        if proof == Proof::Retired {
+            return;
+        }
+        let registered = proof == Proof::Registered;
+        if let Some(token) = decision.ui_token {
+            let effect =
+                self.ui
+                    .lock()
+                    .unwrap()
+                    .verified(token, registered, cfg.reload_after_failures);
+            if effect == Some(crate::autoplay::ui::DecisionEffect::ReloadClient) {
+                warn!("autoplay: the client has stopped accepting presses — reloading to recover");
                 let _ = self.notify.send(
                     crate::schema::Notification::warn("Reloading the game")
                         .body("Clicks stopped registering; reconnecting to recover."),
                 );
-                self.state.dead_clicks = 0;
                 self.reload_page().await;
             }
         }
@@ -118,7 +126,7 @@ impl AutoplayManager {
         decision: &Decision,
         action: &MjaiEvent,
         require_non_discard: bool,
-    ) -> bool {
+    ) -> Proof {
         let cfg = &decision.cfg;
         let clicks: Vec<(f64, f64)> = plan
             .steps
@@ -133,7 +141,7 @@ impl AutoplayManager {
             })
             .collect();
         if clicks.is_empty() {
-            return true;
+            return Proof::Registered;
         }
 
         let mut rect = rect;
@@ -145,16 +153,24 @@ impl AutoplayManager {
                 if attempt > 0 {
                     info!("autoplay: retry {attempt} registered for {action:?}");
                 }
-                return true;
+                return Proof::Registered;
             }
             if attempt == cfg.click_retries {
                 break;
             }
-            if !self.window_still_open(decision.planned_budget) {
+            self.sync_ui().await;
+            let live = decision
+                .ui_token
+                .is_some_and(|token| self.ui.lock().unwrap().decision_live(token));
+            if !live {
                 debug!(
                     "autoplay: no input seen for {action:?}, but the decision window has moved on — not retrying"
                 );
-                return true;
+                return Proof::Retired;
+            }
+            let token = decision.ui_token.unwrap();
+            if !self.ui.lock().unwrap().retry(token, attempt) {
+                break;
             }
             let again = retry_slice(&clicks, attempt);
             // Each press made again lands at a fresh point of its target.
@@ -201,6 +217,8 @@ impl AutoplayManager {
                     );
                 }
                 rect = now;
+            } else {
+                return Proof::Retired;
             }
             for (i, (x_norm, y_norm)) in again.iter().enumerate() {
                 if i > 0 {
@@ -226,7 +244,12 @@ impl AutoplayManager {
                     hold_ms: hold,
                     jiggle,
                 };
-                self.hand.press("retry", (px, py), rect, touch).await;
+                if !self
+                    .decision_press(token, i as u32, (px, py), rect, touch)
+                    .await
+                {
+                    return Proof::Retired;
+                }
             }
         }
         // The timings are in the message because a config written before a
@@ -239,7 +262,7 @@ impl AutoplayManager {
             cfg.hover_delay_ms,
             cfg.click_hold_ms
         );
-        false
+        Proof::Missed
     }
 
     /// Poll for an input command until `timeout_ms` runs out. Polling (not
@@ -271,21 +294,11 @@ impl AutoplayManager {
         }
     }
 
-    /// Whether the decision window the plan was made against is still the
-    /// live one. With no budget tracked there is no signal, and the answer
-    /// is "yes" — behaviour off-Majsoul is unchanged.
-    fn window_still_open(&self, planned: Option<crate::autoplay::budget::TimeBudget>) -> bool {
-        let Some(planned) = planned else {
-            return true;
-        };
-        let current = self.ctx.time_budget.read().ok().and_then(|g| *g);
-        current.map(|b| b.opened_at) == Some(planned.opened_at)
-    }
-
     /// Reload the game tab. The bridge reconnects into the in-progress
     /// hand through its `GameRestore` path (`syncGame` replay), so the
     /// cost is a reconnect rather than the game.
     async fn reload_page(&mut self) {
+        self.ctx.invalidate_ui();
         let page_guard = self.ctx.page.read().await;
         let Some(page) = page_guard.as_ref().cloned() else {
             warn!("autoplay: cannot reload — no page handle");

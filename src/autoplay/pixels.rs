@@ -57,6 +57,32 @@ pub enum Sight {
     Unread,
 }
 
+/// Positive table evidence using the existing measured toggle glyphs. A
+/// blank/transition frame with no ending control is never a table proof.
+pub fn table_view(image: &Image, scale: f64, rect: CanvasRect) -> bool {
+    valid_view(image, scale, rect)
+        && [
+            coords::AUTO_SORT,
+            coords::AUTO_WIN,
+            coords::NO_CALLS,
+            coords::AUTO_TSUMOGIRI,
+        ]
+        .into_iter()
+        .filter(|&at| toggle_in(image, scale, rect, at) != Glyph::Absent)
+        .count()
+            >= 2
+}
+
+pub fn toggle_in(image: &Image, scale: f64, rect: CanvasRect, at: (f64, f64)) -> Glyph {
+    if !valid_view(image, scale, rect) {
+        return Glyph::Absent;
+    }
+    let half = coords::TOGGLE_HALF;
+    let (x0, y0) = rect.pixel(at.0 - half, at.1 - half);
+    let (x1, y1) = rect.pixel(at.0 + half, at.1 + half);
+    classify(&image.crop(x0 * scale, y0 * scale, (x1 - x0) * scale, (y1 - y0) * scale))
+}
+
 /// What a hand's result shows in `image`, a screenshot of the whole view at
 /// `scale` device pixels a CSS pixel, the game's canvas at `rect`.
 pub fn result_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
@@ -404,6 +430,59 @@ mod tests {
 
     fn historical(bytes: &[u8]) -> Image {
         decode_png(bytes).expect("RGB historical ROI fixture")
+    }
+
+    #[test]
+    fn historical_table_strip_is_positive_evidence_across_resolution_scale_and_offset() {
+        let original = historical(include_bytes!("fixtures/ending/table-glyphs.png"));
+        for (width, scale) in [(640, 1.0), (960, 1.0), (1280, 1.5), (1920, 2.0)] {
+            let height = width * 9 / 16;
+            let (ox, oy) = (24, 36);
+            let mut im = Image {
+                width: width + ox * 2,
+                height: height + oy * 2,
+                pixels: vec![[0; 3]; (width + ox * 2) * (height + oy * 2)],
+            };
+            for y in 0..height {
+                for x in 0..width {
+                    im.pixels[(y + oy) * im.width + x + ox] =
+                        original.pixels[y * original.height / height * original.width
+                            + x * original.width / width];
+                }
+            }
+            let rect = CanvasRect {
+                x: ox as f64 / scale,
+                y: oy as f64 / scale,
+                width: width as f64 / scale,
+                height: height as f64 / scale,
+            };
+            assert!(table_view(&im, scale, rect), "{width}px @ {scale}");
+            assert_eq!(end_sight(&im, scale, rect), Sight::Nothing);
+            assert_eq!(toggle_in(&im, scale, rect, coords::AUTO_WIN), Glyph::Unlit);
+            assert!(!table_view(&im, f64::NAN, rect));
+            assert!(!table_view(
+                &im,
+                scale,
+                CanvasRect {
+                    width: rect.width * 2.,
+                    ..rect
+                }
+            ));
+            for p in &mut im.pixels {
+                for channel in p {
+                    *channel /= 4;
+                }
+            }
+            assert!(
+                !table_view(&im, scale, rect),
+                "faded transition is not table proof"
+            );
+            im.pixels.fill([0; 3]);
+            assert!(
+                !table_view(&im, scale, rect),
+                "absence of an ending control is not table proof"
+            );
+        }
     }
 
     /// Real pixels (anonymous ROIs), rather than painted button colours:

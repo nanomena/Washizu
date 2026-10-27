@@ -53,9 +53,8 @@
 //!   per-game state and drives the plan.
 //! - [`pointer`] — how the pointer moves: its way to a press, its looks
 //!   between turns ([`pointer::lean`]) and its rests.
-//! - [`acts`] — the presses between decisions: through a hand's result, on
-//!   the client's auto-win around a riichi, and on its auto-win and no-calls
-//!   for a ready hand.
+//! - [`ui`] — the Mahjong Soul phase/effect machine and one-use input tickets.
+//! - [`toggles`] — auto-win policy scheduling; only the UI machine grants input.
 //! - [`tenpai`] — whether our ready hand, or our riichi, wants the client's
 //!   auto-win.
 //! - [`pixels`] — reading the few pixels of the game that say what its
@@ -69,7 +68,6 @@
 //!
 //! Entry point: [`manager::run_autoplay_manager`].
 
-pub mod acts;
 pub mod advisor;
 pub mod budget;
 pub mod canvas;
@@ -88,6 +86,8 @@ pub mod table;
 pub mod tenhou;
 pub mod tenhou_state;
 pub mod tenpai;
+pub mod toggles;
+pub mod ui;
 pub mod verify;
 
 pub use budget::{BudgetSource, SharedTimeBudget, TimeBudget};

@@ -331,6 +331,9 @@ impl MajsoulBridge {
     fn dispatch(&mut self, msg: &ParsedMessage) -> Vec<MjaiEvent> {
         match (&msg.msg_type, msg.method_name.as_ref()) {
             (MessageType::Request, METHOD_AUTH_GAME) => {
+                if let Some(watch) = &self.input_watch {
+                    watch.reset_ui_table();
+                }
                 self.account_id = msg.payload.get("account_id").and_then(JsonValue::as_u64);
                 self.game_uuid = msg
                     .payload
@@ -380,14 +383,30 @@ impl MajsoulBridge {
                     .is_some_and(|error| !error.is_null())
                 {
                     if let Some(watch) = &self.input_watch {
-                        watch.note_matching();
+                        watch.note_lobby(crate::autoplay::verify::LobbyPhase::Matching);
                     }
                 }
                 Vec::new()
             }
             (MessageType::Notify, METHOD_ACTION_PROTOTYPE) => self.handle_action_prototype(msg),
             (MessageType::Response, METHOD_SYNC_GAME)
-            | (MessageType::Response, METHOD_ENTER_GAME) => self.handle_game_restore(&msg.payload),
+            | (MessageType::Response, METHOD_ENTER_GAME) => {
+                if let Some(watch) = &self.input_watch {
+                    watch.reset_ui_table();
+                }
+                self.handle_game_restore(&msg.payload)
+            }
+            (MessageType::Response, ".lq.Lobby.cancelMatch")
+            | (MessageType::Response, ".lq.Lobby.cancelQueue")
+            | (MessageType::Response, ".lq.Lobby.cancelUnifiedMatch")
+            | (MessageType::Response, ".lq.Lobby.leaveRoom") => {
+                if !msg.payload.get("error").is_some_and(|e| !e.is_null()) {
+                    if let Some(watch) = &self.input_watch {
+                        watch.note_lobby(crate::autoplay::verify::LobbyPhase::WaitingStart);
+                    }
+                }
+                Vec::new()
+            }
             (MessageType::Notify, METHOD_NOTIFY_GAME_END_RESULT) => {
                 info!(
                     target: "akagi::bridge::majsoul",
@@ -551,6 +570,11 @@ impl MajsoulBridge {
     /// replay the value is parked in `restore_budget` instead — see
     /// `handle_game_restore`.
     fn update_time_budget(&mut self, action_name: &str, data: &JsonValue) {
+        if !self.replaying && self.seat.is_some() && action_name == ACTION_NEW_ROUND {
+            if let Some(watch) = &self.input_watch {
+                watch.reset_ui_table();
+            }
+        }
         if self.time_budget.is_none() {
             return;
         }
@@ -2245,16 +2269,48 @@ mod tests {
         let watch: crate::autoplay::verify::SharedInputWatch = Default::default();
         let mut bridge = MajsoulBridge::new(None, None).with_input_watch(Some(watch.clone()));
         for method in [".lq.Lobby.startUnifiedMatch", ".lq.Lobby.matchGame"] {
-            let before = watch.matching();
+            let before = watch.lobby();
             bridge.dispatch(&req(method, json!({})));
-            assert_eq!(watch.matching(), before, "a request can still fail");
+            assert_eq!(watch.lobby(), before, "a request can still fail");
             let mut response = req(method, json!({"error": {"code": 1001}}));
             response.msg_type = MessageType::Response;
             bridge.dispatch(&response);
-            assert_eq!(watch.matching(), before);
+            assert_eq!(watch.lobby(), before);
             response.payload = json!({});
             assert!(bridge.dispatch(&response).is_empty());
-            assert_eq!(watch.matching(), before + 1);
+            assert_eq!(
+                watch.lobby(),
+                crate::autoplay::verify::LobbyObservation {
+                    sequence: before.sequence + 1,
+                    phase: crate::autoplay::verify::LobbyPhase::Matching
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn only_confirmed_cancel_and_leave_responses_return_to_lobby() {
+        use crate::autoplay::verify::LobbyPhase;
+        let watch: crate::autoplay::verify::SharedInputWatch = Default::default();
+        let mut bridge = MajsoulBridge::new(None, None).with_input_watch(Some(watch.clone()));
+        for method in [
+            ".lq.Lobby.cancelMatch",
+            ".lq.Lobby.cancelQueue",
+            ".lq.Lobby.cancelUnifiedMatch",
+            ".lq.Lobby.leaveRoom",
+        ] {
+            watch.note_lobby(LobbyPhase::Matching);
+            let before = watch.lobby();
+            bridge.dispatch(&req(method, json!({})));
+            assert_eq!(watch.lobby(), before);
+            let mut response = req(method, json!({"error": {"code": 1001}}));
+            response.msg_type = MessageType::Response;
+            bridge.dispatch(&response);
+            assert_eq!(watch.lobby(), before);
+            response.payload = json!({});
+            assert!(bridge.dispatch(&response).is_empty());
+            assert_eq!(watch.lobby().phase, LobbyPhase::WaitingStart);
+            assert_eq!(watch.lobby().sequence, before.sequence + 1);
         }
     }
 

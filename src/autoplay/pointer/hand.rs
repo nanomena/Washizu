@@ -9,7 +9,7 @@
 //! [`super::spots`]'s and [`super::aim`]'s, every time and distance
 //! `humanize`'s, and every move passes [`super::rules`] here, in-line or
 //! queued ([`super::queue`]), whoever planned it: [`Hand::go`] for a move
-//! made at once, [`Hand::step`] for one that waited its turn, [`Hand::press`]
+//! made at once, [`Hand::step`] for one that waited its turn, [`Hand::press_when`]
 //! for a press.
 //!
 //! What it knows belongs to one hand, but for where the pointer is: the
@@ -70,6 +70,13 @@ struct Moving {
 }
 
 impl Hand {
+    /// Ownership/phase loss cancels all queued execution progress. Ordinary
+    /// hand reset deliberately preserves a rest; suspension must not.
+    pub fn cancel(&mut self) {
+        self.queue = Queue::default();
+        self.moving = None;
+        self.stop_glances();
+    }
     pub fn new(ctx: Arc<AutoplayContext>) -> Self {
         Self {
             ctx,
@@ -596,13 +603,8 @@ impl Hand {
     /// is not there ([`Self::go`]), then rests on it about `touch.hover_ms`
     /// and holds the button about `touch.hold_ms` (`cdp_input`). False when
     /// the pointer could not be moved there or the press failed.
-    pub async fn press(&mut self, why: &str, to: Point, rect: CanvasRect, touch: Touch) -> bool {
-        self.press_when(why, to, rect, touch, |_| async { true })
-            .await
-    }
-
-    /// As `press`, with a final page check after the pointer has arrived
-    /// and hovered. Only a dispatched press returns true.
+    /// A required final permission check runs after travel and hover. This
+    /// executor never advances a UI phase. Only a dispatched press returns true.
     pub async fn press_when<F, Fut>(
         &mut self,
         why: &str,

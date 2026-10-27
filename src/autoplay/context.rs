@@ -20,11 +20,16 @@
 
 use chromiumoxide::page::Page;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Default)]
 pub struct AutoplayContext {
+    /// Input ownership generation, not a model/request epoch. Profile and
+    /// capture/tab replacement retire the old UI session here.
+    ui_session: AtomicU64,
+    ui_settings: AtomicU64,
     pub page: Arc<RwLock<Option<Page>>>,
     pub canvas_rect: Arc<RwLock<Option<CanvasRect>>>,
     /// Server-granted time budget for the current decision window.
@@ -52,6 +57,22 @@ pub struct AutoplayContext {
 impl AutoplayContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn invalidate_ui(&self) {
+        self.ui_session.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn ui_session(&self) -> u64 {
+        self.ui_session.load(Ordering::SeqCst)
+    }
+
+    pub fn settings_changed(&self) {
+        self.ui_settings.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn ui_settings(&self) -> u64 {
+        self.ui_settings.load(Ordering::SeqCst)
     }
 }
 
