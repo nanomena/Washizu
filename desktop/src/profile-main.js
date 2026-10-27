@@ -19,6 +19,9 @@ export async function startProfiles(root) {
   app.setPath('userData', path.join(root, 'launcher', 'browser'))
   if (!app.requestSingleInstanceLock()) { app.exit(0); return }
   const store = new ProfileStore(root).load()
+  // Import current per-site controls once. Subsequent settings edits affect
+  // future accounts, never an already-open account's runtime configuration.
+  if (!fs.existsSync(path.join(root, 'launcher', 'defaults.json'))) store.saveDefaults(store.defaults())
   const forwarded = ['core', 'dock', 'spout'].flatMap(name => {
     const value = app.commandLine.getSwitchValue(name)
     return value ? [`--${name}=${value}`] : []
@@ -31,7 +34,7 @@ export async function startProfiles(root) {
   let revision = 0
   // list_profiles and profiles-updated share this exact runtime protocol.
   // Persistent registry entries keep their original schema and homes.
-  const state = () => ({ revision, profiles: store.list(), clients: sessions.list(), error })
+  const state = () => ({ revision, profiles: store.list(), clients: sessions.list(), defaults: store.defaults(), error })
   const changed = () => { revision++; window?.webContents.send('akagi:event', 'profiles-updated', state()) }
   const fitGuide = () => {
     if (!window) return
@@ -62,6 +65,8 @@ export async function startProfiles(root) {
       const values = args && typeof args === 'object' ? args : {}
       if (method === 'create_profile') { store.create(values.name, values.platform); fitGuide() }
       else if (method === 'rename_profile') store.rename(values.id, values.name)
+      else if (method === 'delete_profile') { const profile = store.get(values.id); sessions.remove(profile.id, () => store.delete(profile.id)); fitGuide() }
+      else if (method === 'save_profile_defaults') store.saveDefaults(values.defaults)
       else if (method === 'open_profile') { const profile = store.get(values.id); error = ''; sessions.open(profile.id) }
       else if (method !== 'list_profiles') throw new Error('未知的档案操作。')
       if (method !== 'list_profiles') changed()

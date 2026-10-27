@@ -6,7 +6,10 @@ clients, each with its own game view, dock and local DevTools port.
 ## Account profiles
 
 Opening Washizu shows saved accounts. Create a Mahjong Soul or Tenhou profile,
-or rename and open one already saved. Multiple different profiles can run
+or manage and open one already saved. Management can rename a profile or remove
+its registration after confirmation; its browser storage, configuration and
+history remain on disk. Running or cleanup-unconfirmed profiles cannot be
+removed. Multiple different profiles can run
 simultaneously. Opening a starting or active profile again focuses its existing
 client. The first **Open** shows and focuses the account as soon as its dock
 loads; no second **Show** click is needed. First opening, repeated Open and
@@ -32,8 +35,9 @@ display names, platforms and the last opening time. Fresh profiles live under
 window state and bot settings. Renaming a profile never changes its directory.
 `ProfileSessions` owns a map keyed by profile id, with explicit `starting`,
 `active`, `closing` and `failed` states. The chooser's list/event protocol is
-`{revision, profiles, clients, error}`; runtime client states are separate from
-the unchanged persistent registry schema.
+`{revision, profiles, clients, defaults, error}`; runtime client states are
+separate from the persistent registry. Removed entries remain in its `deleted`
+list without deleting their data directories.
 
 An existing home is adopted **in place** as the first profile. Its browser,
 Local State, cookies, bot settings and history are never moved, copied or
@@ -44,13 +48,15 @@ Packaged launches discover the sibling `../data` home or the former
 defaults to `<appData>/Washizu-development` and never discovers production data.
 Do not use production data for development or tests.
 
-New profiles do not copy another account's bot settings or credentials.
-Mahjong Soul starts with the core's built-in bot and autoplay off. Tenhou
-uses the `/3/` Web client and new Tenhou profiles keep the bot and autoplay
-off. Ordinary four-player miai service qualification is complete; actual
-Web3 automated games and consecutive-game flow still need online acceptance.
-Separate login, capture and records do not imply that online automation has
-been accepted. The original account retains its configured miai.
+Chooser Settings holds application language and separate Mahjong Soul/Tenhou
+defaults for future profiles. On first use it imports the existing profiles'
+portable controls once; later edits are saved in `launcher/defaults.json` and
+never rewrite an existing profile's configuration. New profiles enable the
+core's built-in bot and inherit the selected autoplay mode, pointer controls,
+result confirmation and OBS preference. Tenhou uses the `/3/` Web client;
+client auto-win remains unavailable there. Credentials, browser storage,
+external model packages, model settings, endpoints and ports are never copied.
+External miai setup remains per profile; the original account keeps its own.
 
 `main.js` chooses the launcher or account process. `profile-main.js` owns the
 chooser and starts an account with an internal `--profile=<id>` argument;
@@ -70,7 +76,7 @@ canvas or page zoom: body text remains 13 DIP and headings use Golos Text 500
 with the same system CJK fallback as the monitor.
 
 `profile-layout.js` derives its content size: 640 wide = 48 outer padding +
-352 name + 88 platform + 152 actions. Its vertical Grid is 48 outer padding +
+240 name + 88 platform + 264 actions. Its vertical Grid is 48 outer padding +
 48 toolbar + 24 status + (32 header + 2..4 × 64 account rows) + 24 footer,
 giving 304/368/432 DIP heights. More rows scroll inside the list. Account
 state and language changes keep the same slots. Small displays cap its size

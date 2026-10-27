@@ -103,7 +103,9 @@ jobs:
       - name: Shell — smoke
         if: runner.os == 'Linux'
         working-directory: desktop
-        run: xvfb-run -a npm run smoke
+        run: |
+          xvfb-run -a npm run smoke
+          xvfb-run -a npm run smoke:profiles
 
       - name: Restore bundled runtime cache
         uses: actions/cache@v4

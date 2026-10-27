@@ -16,6 +16,8 @@ vi.mock('@/lib/host', () => ({
     if (method === 'create_profile') next.profiles.push({ id: 'new-id', name: String(args!.name), platform: args!.platform as 'Tenhou', lastOpened: null })
     if (method === 'rename_profile') next.profiles = next.profiles.map(p => p.id === args!.id ? { ...p, name: String(args!.name) } : p)
     if (method === 'open_profile' && !next.clients.some(c => c.id === args!.id)) next.clients.push({ id: String(args!.id), state: 'starting', cleanup: 'unconfirmed', error: '' })
+    if (method === 'delete_profile') next.profiles = next.profiles.filter(p => p.id !== args!.id)
+    if (method === 'save_profile_defaults') next.defaults = args!.defaults as ProfileState['defaults']
     fixture.state = next
     return next
   },
@@ -24,7 +26,7 @@ import { Profiles } from './Profiles'
 
 beforeEach(() => {
   setLang('zh-CN')
-  fixture.state = { revision: 1, profiles: [{ id: 'existing', name: 'Main', platform: 'Majsoul', lastOpened: null }], clients: [], error: '' }
+  fixture.state = { revision: 1, profiles: [{ id: 'existing', name: 'Main', platform: 'Majsoul', lastOpened: null }], clients: [], error: '', defaults: { Majsoul: { autoplay: 'play', quick_confirm: true, pointer_lean: true, pointer_trail: true, auto_win: true, obs_output: true }, Tenhou: { autoplay: 'continue', quick_confirm: true, pointer_lean: true, pointer_trail: true, auto_win: false, obs_output: true } } }
   fixture.initial = null; fixture.calls = []; fixture.failure = ''
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open') } })
@@ -33,6 +35,38 @@ afterEach(() => { cleanup(); Reflect.deleteProperty(HTMLDialogElement.prototype,
 const ready = async () => waitFor(() => expect((screen.getByRole('button', { name: '新建档案' }) as HTMLButtonElement).disabled).toBe(false))
 
 describe('account profiles', () => {
+  it('keeps language inside settings and saves per-platform new-profile defaults', async () => {
+    render(<Profiles />); await ready()
+    expect(screen.queryByRole('combobox', { name: '界面语言' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '设置' }))
+    expect(screen.getByRole('combobox', { name: '界面语言' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '雀魂' }))
+    expect(screen.getByRole('radio', { name: '打牌' }).getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: '天凤' }))
+    expect(screen.getByRole('radio', { name: '连战' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.queryByRole('switch', { name: '客户端自动和牌' })).toBeNull()
+    fireEvent.click(screen.getByRole('switch', { name: '光标轨迹' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '新建档案' })).toBeTruthy())
+    expect(fixture.state!.defaults.Tenhou.pointer_trail).toBe(false)
+    expect(fixture.state!.defaults.Majsoul.pointer_trail).toBe(true)
+  })
+  it('confirms deletion and explains that local data is retained', async () => {
+    render(<Profiles />); await ready()
+    fireEvent.click(screen.getByRole('button', { name: '管理 Main' }))
+    fireEvent.click(screen.getByRole('button', { name: '删除档案' }))
+    expect(screen.getByText(/本地登录资料和记录保留/)).toBeTruthy()
+    expect(fixture.calls.some(([method]) => method === 'delete_profile')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
+    await waitFor(() => expect(screen.queryByText('Main')).toBeNull())
+    expect(fixture.calls).toContainEqual(['delete_profile', { id: 'existing' }])
+  })
+  it('does not offer deletion of a running or cleanup-unconfirmed profile', async () => {
+    fixture.state!.clients = [{ id: 'existing', state: 'active', cleanup: 'unconfirmed', error: '' }]
+    render(<Profiles />); await ready()
+    fireEvent.click(screen.getByRole('button', { name: '管理 Main' }))
+    expect((screen.getByRole('button', { name: '删除档案' }) as HTMLButtonElement).disabled).toBe(true)
+  })
   it('shows adopted data without inventing a logged-in or model-ready status', async () => {
     render(<Profiles />); await ready()
     expect(screen.getByText('Main')).toBeTruthy()
@@ -52,7 +86,7 @@ describe('account profiles', () => {
   })
   it('renames a profile without changing its id or platform', async () => {
     render(<Profiles />); await ready()
-    fireEvent.click(screen.getByRole('button', { name: '改名 Main' }))
+    fireEvent.click(screen.getByRole('button', { name: '管理 Main' }))
     const form = within(screen.getByRole('dialog'))
     expect((form.getByLabelText('平台') as HTMLSelectElement).disabled).toBe(true)
     fireEvent.change(form.getByLabelText('档案名称'), { target: { value: 'Renamed' } })
@@ -68,7 +102,7 @@ describe('account profiles', () => {
     await waitFor(() => expect(screen.getByText('正在打开…')).toBeTruthy())
     expect((screen.getByRole('button', { name: '打开 Second' }) as HTMLButtonElement).disabled).toBe(false)
     expect((screen.getByRole('button', { name: '新建档案' }) as HTMLButtonElement).disabled).toBe(false)
-    expect((screen.getByRole('button', { name: '改名 Main' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: '管理 Main' }) as HTMLButtonElement).disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: '打开 Second' }))
     await waitFor(() => expect(fixture.state!.clients).toHaveLength(2))
   })

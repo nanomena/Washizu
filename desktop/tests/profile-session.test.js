@@ -29,6 +29,23 @@ function fixture(t) {
   return { root, a, b, sessions, settings }
 }
 
+test('removal is forbidden until the same lifecycle owner confirms cleanup and process exit', async t => {
+  const { a, sessions } = fixture(t)
+  let removed = false
+  sessions.open(a.id)
+  const child = sessions.clients.get(a.id)?.child
+  assert.ok(child)
+  assert.throws(() => sessions.remove(a.id, () => { removed = true }), /关闭/)
+  await once(child, 'message')
+  assert.throws(() => sessions.remove(a.id, () => { removed = true }), /关闭/)
+  const closed = once(child, 'close')
+  child.kill(); await closed
+  assert.throws(() => sessions.remove(a.id, () => { removed = true }), /关闭/)
+  assert.equal(removed, false)
+  sessions.remove('closed-id', () => { removed = true })
+  assert.equal(removed, true)
+})
+
 test('two profiles run concurrently and duplicate opens only focus their existing processes', async t => {
   const { root, a, b, sessions } = fixture(t)
   sessions.open(a.id)
