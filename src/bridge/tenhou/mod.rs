@@ -1249,6 +1249,29 @@ mod tests {
     }
 
     #[test]
+    fn captured_web3_exhaustive_draw_preserves_our_known_tenpai_hand() {
+        let mut bridge = TenhouBridge::new(None, None);
+        let events: Vec<_> =
+            include_str!("../../../tests/fixtures/tenhou-web3-exhaustive-20261027.jsonl")
+                .lines()
+                .flat_map(|frame| bridge.parse(Direction::Down, frame.as_bytes()).events)
+                .collect();
+        assert_eq!(events.len(), 154);
+        assert!(matches!(events.last(), Some(MjaiEvent::EndKyoku)));
+        let MjaiEvent::Ryukyoku {
+            tehais: Some(hands),
+            deltas: Some(delta),
+            ..
+        } = &events[152]
+        else {
+            panic!("real exhaustive draw")
+        };
+        assert_eq!(delta, &[1000, -3000, 1000, 1000]);
+        assert!(hands[3].as_ref().is_some_and(|hand| !hand.is_empty()));
+        assert!(hands[1].is_none());
+    }
+
+    #[test]
     fn ignores_up_direction() {
         let mut b = TenhouBridge::new(None, None);
         let out = b.parse(Direction::Up, br#"{"tag":"INIT"}"#);

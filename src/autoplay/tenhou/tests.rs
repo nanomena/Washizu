@@ -98,14 +98,18 @@ fn incomplete_or_incorrect_riichi_does_not_issue_a_declaration() {
     }
 }
 #[test]
-fn accepted_riichi_unknown_clock_closed_window_and_other_actor_issue_no_discard() {
+fn accepted_riichi_still_plans_a_discard_but_invalid_windows_and_other_actors_do_not() {
     let action = MjaiEvent::Dahai {
         actor: 0,
         pai: "5m".into(),
         tsumogiri: true,
     };
     let mut st = state(&[17, 0, 19]);
-    assert!(plan(&action, &st, true).presses.is_empty());
+    st.in_riichi = true;
+    let locked = plan(&action, &st, true);
+    assert_eq!(locked.presses.len(), 1);
+    assert_eq!(locked.presses[0].role, PressRole::Discard);
+    assert_eq!(locked.presses[0].confirmation, Confirmation::ClientCommand);
     assert!(plan(
         &MjaiEvent::Dahai {
             actor: 1,
@@ -289,7 +293,10 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
     // Real own REACH, not an invented follow-up event; no declaration button
     // remains in the new native input window.
     watch.note_sent(InputKind::Reach);
-    state.in_riichi = true;
+    assert!(
+        !state.in_riichi,
+        "step 2 has not happened before the declaring discard"
+    );
     state.window.as_mut().unwrap().ops = 0;
     state.window.as_mut().unwrap().opened_at += Duration::from_nanos(1);
     let echoed = crate::monitor::DecisionContext {
@@ -320,4 +327,40 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
     ));
     assert_eq!(controller.intent().unwrap().role, PressRole::Discard);
     assert_ne!(controller.phase(), Some(TurnPhase::WaitingDeclaration));
+    // The declaring discard receives its own permit under the real step-1
+    // window, with no acceptance flag and no second decision source.
+    facts.command = false;
+    let mut discard = observation;
+    discard.ready = true;
+    discard.target = Some(InputTarget {
+        identity: TargetIdentity {
+            window: next.window.clone().unwrap(),
+            hand: next.hand.iter().map(u32::to_string).collect(),
+            control: "native-tile-19".into(),
+        },
+        bounds: rect,
+        viewport: raw.viewport,
+    });
+    let Effect::Press { permit, .. } = controller.next(&facts, Some(&discard), now) else {
+        panic!("declaring discard permit")
+    };
+    assert!(controller.consume(permit, &facts, &discard, (125.0, 420.0), 100, now));
+    assert!(controller.dispatched(permit, true, now));
+    assert!(
+        matches!(
+            controller.next(&facts, Some(&discard), now),
+            Effect::Observe
+        ),
+        "dispatch alone does not prove acceptance"
+    );
+    watch.note_sent(InputKind::Discard);
+    facts.input = watch.ticket();
+    facts.command = true;
+    assert!(matches!(
+        controller.next(&facts, Some(&discard), now),
+        Effect::Finished {
+            outcome: crate::autoplay::transaction::Outcome::ClientAccepted,
+            ..
+        }
+    ));
 }

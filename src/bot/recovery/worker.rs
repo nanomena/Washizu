@@ -51,6 +51,8 @@ enum PrimaryState {
     },
     Blocked {
         reason: String,
+        retry_at: Instant,
+        attempts: u32,
     },
 }
 
@@ -62,7 +64,7 @@ impl PrimaryState {
                 through,
                 reason: reason.clone(),
             },
-            Self::Blocked { reason } => RunnerHealth::Blocked {
+            Self::Blocked { reason, .. } => RunnerHealth::Blocked {
                 through,
                 reason: reason.clone(),
             },
@@ -85,6 +87,9 @@ impl PrimaryWorker {
                 let replay_attempt = match &state {
                     PrimaryState::Recovering {
                         attempts, retry_at, ..
+                    }
+                    | PrimaryState::Blocked {
+                        attempts, retry_at, ..
                     } if work.decide && Instant::now() >= *retry_at => {
                         Some(attempts.saturating_add(1))
                     }
@@ -92,8 +97,9 @@ impl PrimaryWorker {
                 };
                 let can_run = match &state {
                     PrimaryState::Ready => work.event.is_some() || work.decide,
-                    PrimaryState::Recovering { .. } => replay_attempt.is_some(),
-                    PrimaryState::Blocked { .. } => false,
+                    PrimaryState::Recovering { .. } | PrimaryState::Blocked { .. } => {
+                        replay_attempt.is_some()
+                    }
                 };
                 let mut response = None;
                 if can_run {
@@ -156,7 +162,16 @@ impl PrimaryWorker {
                             tracing::warn!(context = ?work.context, committed_through = through, %reason,
                                 "primary transaction not committed");
                             state = if semantic_failure(&reply) {
-                                PrimaryState::Blocked { reason }
+                                // Block this prefix, not the worker's entire
+                                // lifetime. Rebuild only the complete real
+                                // history on a later eligible decision. It
+                                // must commit and pass the coordinator's legal
+                                // set before primary can own any new input.
+                                PrimaryState::Blocked {
+                                    reason,
+                                    retry_at: Instant::now() + backoff(attempts),
+                                    attempts,
+                                }
                             } else {
                                 // The service already retried inference once.
                                 // No immediate second replay or per-event retry.
@@ -263,6 +278,114 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn semantic_failure_rebuilds_the_complete_real_prefix_after_backoff() {
+        use std::sync::{Arc, Mutex};
+        struct Semantic {
+            through: u64,
+            failed: bool,
+            calls: Arc<Mutex<Vec<Vec<MjaiEvent>>>>,
+        }
+        #[async_trait]
+        impl BotRunner for Semantic {
+            async fn react(&mut self, events: &[MjaiEvent]) -> anyhow::Result<BotResponse> {
+                self.calls.lock().unwrap().push(events.to_vec());
+                self.through += events.len() as u64;
+                if !self.failed && self.through == 2 {
+                    self.failed = true;
+                    self.through = 1;
+                    return Ok(BotResponse {
+                        request: None,
+                        action: MjaiEvent::None,
+                        meta: Some(json!({
+                            "delivery":{"through":1},"failure":{"kind":"semantic"},"unavailable":"injected semantic desync"
+                        })),
+                    });
+                }
+                Ok(BotResponse {
+                    request: None,
+                    action: MjaiEvent::None,
+                    meta: Some(json!({"delivery":{"through":self.through}})),
+                })
+            }
+            async fn reset(&mut self) -> anyhow::Result<()> {
+                self.through = 0;
+                Ok(())
+            }
+        }
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mut events = crate::bot::recovery::tests::opening();
+        events.push(MjaiEvent::Dahai {
+            actor: 0,
+            pai: "N".into(),
+            tsumogiri: true,
+        });
+        events.push(MjaiEvent::Tsumo {
+            actor: 0,
+            pai: "E".into(),
+        });
+        let journal = Arc::new(Mutex::new(events.clone()));
+        let (output, mut reports) = mpsc::unbounded_channel();
+        let worker = PrimaryWorker::spawn(
+            Box::new(Semantic {
+                through: 0,
+                failed: false,
+                calls: calls.clone(),
+            }),
+            journal,
+            output,
+            None,
+        );
+        for (index, event) in events.into_iter().enumerate() {
+            if index == 4 {
+                tokio::time::sleep(Duration::from_millis(2100)).await;
+            }
+            let seq = index as u64 + 1;
+            worker
+                .input
+                .send(Observation {
+                    context: DecisionContext {
+                        game: 1,
+                        round: 1,
+                        event_seq: seq,
+                    },
+                    decide: matches!(event, MjaiEvent::Tsumo { .. }),
+                    event: Some(event),
+                    through: seq,
+                })
+                .unwrap();
+            let Report::Primary {
+                health, response, ..
+            } = tokio::time::timeout(Duration::from_secs(3), reports.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("primary")
+            };
+            if (2..=4).contains(&seq) {
+                assert!(matches!(health, RunnerHealth::Blocked { .. }));
+                assert!(response.is_none(), "blocked state is never a decision");
+            }
+            if seq == 5 {
+                assert_eq!(health, RunnerHealth::Ready { through: 5 });
+                assert!(response.is_some());
+            }
+        }
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            3,
+            "no duplicate retry layers or per-event resets"
+        );
+        assert_eq!(calls[2].len(), 5, "recovery skips no real events");
+        assert!(matches!(calls[2][0], MjaiEvent::StartGame { .. }));
+        assert!(
+            matches!(calls[2][3], MjaiEvent::Dahai { .. }),
+            "standby-era confirmed move is replayed"
+        );
+    }
 
     #[tokio::test]
     async fn blocked_forecast_does_not_delay_the_second_formal_decision() {

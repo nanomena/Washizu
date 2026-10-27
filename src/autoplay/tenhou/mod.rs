@@ -79,11 +79,10 @@ impl TenhouAutoplay {
             .clock
             .as_ref()
             .and_then(|raw| self.clock(&key, raw, observed_at));
-        if matches!(action, MjaiEvent::Reach { .. })
-            && state.in_riichi
-            && state.is_tsumo
-            && protocol_window.ops == 0
-        {
+        // REACH step 1 opens the declaring discard window. Acceptance (step 2)
+        // only follows that discard, so requiring in_riichi here deadlocks it.
+        // The common controller still requires the exact real step-1 echo.
+        if matches!(action, MjaiEvent::Reach { .. }) && state.is_tsumo && protocol_window.ops == 0 {
             observation.continuation = Some(DeclarationFacts {
                 window: proof,
                 hand: input.hand.iter().map(u32::to_string).collect(),
@@ -145,7 +144,7 @@ fn semantic_plan(ctx: &ActionContext<'_>, state: &TenhouState) -> TurnPlan {
     };
     match ctx.action {
         MjaiEvent::Dahai { .. } => {
-            if ctx.self_riichi_accepted || discard_tile(ctx.action, state).is_none() {
+            if discard_tile(ctx.action, state).is_none() {
                 return plan;
             }
             press(PressRole::Discard, Confirmation::ClientCommand);

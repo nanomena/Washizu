@@ -168,7 +168,22 @@ impl Engine {
     /// clones are rules-only and never commit a proposed declaration.
     pub fn legal_replies(&self) -> Vec<BotAction> {
         let seat = self.seat;
-        let expand = |legal: Vec<Action>, discarder, drawn, reach: Vec<Action>| {
+        let expand = |legal: Vec<Action>,
+                      discarder,
+                      drawn,
+                      reach: Vec<Action>,
+                      hand: &[u8],
+                      locked: bool| {
+            // MJAI's tile parser gives identical plain copies the same id.
+            // A matching drawn id therefore does not make every copy a draw.
+            let copies = |tile| {
+                let is_drawn = drawn == Some(tile);
+                let mut flags = vec![is_drawn];
+                if is_drawn && !locked && hand.iter().filter(|t| **t == tile).count() > 1 {
+                    flags.push(false);
+                }
+                flags
+            };
             legal
                 .iter()
                 .flat_map(|a| {
@@ -176,11 +191,27 @@ impl Engine {
                         reach
                             .iter()
                             .filter_map(|d| d.tile)
-                            .map(|tile| BotAction::Reach {
-                                pai: tid_to_mjai(tile),
-                                tsumogiri: Some(drawn == Some(tile)),
+                            .flat_map(|tile| {
+                                copies(tile)
+                                    .into_iter()
+                                    .map(move |tsumogiri| BotAction::Reach {
+                                        pai: tid_to_mjai(tile),
+                                        tsumogiri: Some(tsumogiri),
+                                    })
                             })
                             .collect::<Vec<_>>()
+                    } else if a.action_type == ActionType::Discard {
+                        a.tile
+                            .into_iter()
+                            .flat_map(|tile| {
+                                copies(tile)
+                                    .into_iter()
+                                    .map(move |tsumogiri| BotAction::Dahai {
+                                        pai: tid_to_mjai(tile),
+                                        tsumogiri,
+                                    })
+                            })
+                            .collect()
                     } else {
                         vec![build_bot_action(a, seat, discarder, drawn, None)]
                     }
@@ -204,6 +235,8 @@ impl Engine {
                     state.last_discard.map(|d| d.0),
                     state.drawn_tile,
                     reach,
+                    &state.players[seat as usize].hand,
+                    state.players[seat as usize].riichi_declared,
                 )
             }
             Backend::Three { state, .. } => {
@@ -222,6 +255,8 @@ impl Engine {
                     state.last_discard.map(|d| d.0),
                     state.drawn_tile,
                     reach,
+                    &state.players[seat as usize].hand,
+                    state.players[seat as usize].riichi_declared,
                 )
             }
         }

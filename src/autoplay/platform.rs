@@ -8,7 +8,7 @@ use chromiumoxide::page::Page;
 use riichienv_core::action::Action;
 use std::time::Instant;
 
-/// A physical control's complete identity, supplied by the actual client.
+/// A physical control's identity, bound to client or confirmed protocol facts.
 /// Window and hand are distinct from the coordinator's protocol window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetIdentity {

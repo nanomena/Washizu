@@ -238,6 +238,24 @@ pub(super) fn draw(msg: &Value, state: &State) -> Result<MjaiEvent> {
                 .collect(),
         );
     }
+    // Web /3/ omits hai0: our concealed tiles are already known locally.
+    // In an exhaustive draw, the actual noten settlement identifies whether
+    // our hand is disclosed. Zero payment means all tenpai only if every
+    // other real seat was disclosed. Do not invent unknown opponents' tiles.
+    let own = state.seat as usize;
+    let own_tenpai = payment.delta[own] > 0
+        || (payment.delta.iter().all(|delta| *delta == 0)
+            && hands
+                .iter()
+                .enumerate()
+                .all(|(seat, hand)| seat == own || hand.is_some()));
+    if reason == "exhaustive" && hands[own].is_none() && own_tenpai {
+        ensure!(
+            !state.hand.is_empty(),
+            "missing own hand at exhaustive draw"
+        );
+        hands[own] = Some(state.hand.iter().copied().map(tenhou_to_mjai_one).collect());
+    }
     Ok(MjaiEvent::Ryukyoku {
         deltas: Some(payment.delta),
         tehais: Some(hands),
@@ -250,6 +268,60 @@ pub(super) fn draw(msg: &Value, state: &State) -> Result<MjaiEvent> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn web_draw_omits_own_tiles_but_not_our_positive_tenpai_settlement() {
+        // Real /3/ frame: observer absolute seat 3 gains 1000; hai0 is absent.
+        let state = State {
+            seat: 3,
+            hand: vec![0, 1, 2, 4, 5, 6, 8],
+            ..State::default()
+        };
+        let raw = json!({"tag":"RYUUKYOKU","ba":"0,0",
+            "sc":"250,10,250,10,250,-30,250,10",
+            "hai1":"46,55,89,91,94,98,102",
+            "hai3":"41,42,43,48,52,92,95,116,117,118"});
+        let MjaiEvent::Ryukyoku {
+            tehais: Some(hands),
+            deltas: Some(delta),
+            ..
+        } = draw(&raw, &state).unwrap()
+        else {
+            panic!("draw")
+        };
+        assert_eq!(delta, vec![1000, -3000, 1000, 1000]);
+        assert_eq!(
+            hands[3],
+            Some(state.hand.iter().copied().map(tenhou_to_mjai_one).collect())
+        );
+        assert!(hands[1].is_none());
+        assert!(hands[0].is_some() && hands[2].is_some());
+    }
+
+    #[test]
+    fn zero_payment_uses_other_public_reveals_without_disclosing_a_noten_hand() {
+        let state = State {
+            seat: 0,
+            hand: vec![0, 1, 2, 4, 5, 6, 8],
+            ..State::default()
+        };
+        for all_tenpai in [false, true] {
+            let mut raw = json!({"sc":"250,0,250,0,250,0,250,0"});
+            if all_tenpai {
+                for key in ["hai1", "hai2", "hai3"] {
+                    raw[key] = json!("0,1,2,4,5,6,8");
+                }
+            }
+            let MjaiEvent::Ryukyoku {
+                tehais: Some(hands),
+                ..
+            } = draw(&raw, &state).unwrap()
+            else {
+                panic!("draw")
+            };
+            assert_eq!(hands[0].is_some(), all_tenpai);
+        }
+    }
 
     // Public double-ron fixture, with sequential sc baselines, from
     // kobalab/tenhou-log@03fc4a38/test/convlog.js (original protocol decoder).
@@ -421,6 +493,7 @@ mod tests {
     fn sanma_omits_the_rotated_ghost_and_rejects_its_payment_or_reveal() {
         let state = State {
             seat: 1,
+            hand: vec![0, 1, 2, 4, 5, 6, 8],
             is_3p: true,
             num_players: 3,
             ..State::default()

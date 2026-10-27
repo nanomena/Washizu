@@ -708,6 +708,42 @@ async fn a_post_pon_frame_ending_in_dora_still_opens_its_discard_decision() {
 }
 
 #[test]
+fn captured_web3_duplicate_draw_has_both_real_discard_copies_in_the_full_legal_set() {
+    use crate::bridge::{Bridge, Direction, TenhouBridge};
+    let mut bridge = TenhouBridge::new(None, None);
+    let mut standby = standby::LocalStandby::new(3, 4).unwrap();
+    let mut seq = 0;
+    for frame in
+        include_str!("../../../tests/fixtures/tenhou-web3-exhaustive-20261027.jsonl").lines()
+    {
+        for event in bridge.parse(Direction::Down, frame.as_bytes()).events {
+            seq += 1;
+            standby.observe(&event).unwrap();
+            if seq == 49 {
+                let legal = standby.legal();
+                for tsumogiri in [false, true] {
+                    let reply = BotResponse {
+                        request: None,
+                        meta: None,
+                        action: MjaiEvent::Dahai {
+                            actor: 3,
+                            pai: "4m".into(),
+                            tsumogiri,
+                        },
+                    };
+                    assert!(
+                        standby::legal_response(&reply, &legal),
+                        "copy={tsumogiri}; {legal:?}"
+                    );
+                }
+                return;
+            }
+        }
+    }
+    panic!("real seq49 was not reached");
+}
+
+#[test]
 fn full_riichi_legality_requires_the_legal_discard_and_its_physical_copy() {
     let mut events = serde_json::to_value(opening()).unwrap();
     events[1]["tehais"][0] =

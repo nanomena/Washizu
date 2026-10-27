@@ -57,190 +57,96 @@ impl MajsoulAutoplay {
 }
 
 #[derive(Deserialize)]
-struct VisibleControl {
-    name: String,
-    bounds: CanvasRect,
-}
-#[derive(Deserialize)]
-struct VisibleTile {
-    tile: String,
-    drawn: bool,
-}
-#[derive(Deserialize)]
 struct ClientView {
     viewport: CanvasRect,
-    tiles: Vec<VisibleTile>,
-    can_discard: bool,
-    controls: Vec<VisibleControl>,
-    candidates: Vec<VisibleControl>,
+    clear: bool,
 }
 
-// Read actual Laya state and control bounds. No handler, timer, or selection
-// is invoked. The public pointer receives viewport CSS coordinates only.
-const READ_VIEW: &str = r#"(()=>{
- const d=window.view?.DesktopMgr?.Inst, u=window.uiscript, c=document.querySelector('canvas');
- if(!d?.gameing||!d.mainrole||!c||!window.Laya?.stage)return null;
- const r=c.getBoundingClientRect(), stage=window.Laya.stage, me=d.mainrole;
- if(!(r.width>0&&r.height>0&&stage.width>0&&stage.height>0)||!Array.isArray(me.hand))return null;
- const visible=n=>{for(let p=n;p;p=p.parent){if(p.visible===false||p.destroyed||Number.isFinite(p.alpha)&&p.alpha<0.95)return false;}return n?.visible===true;};
- const bounds=n=>{if(!visible(n)||typeof n.localToGlobal!=='function'||!(n.width>0&&n.height>0))return null;
-  const a=n.localToGlobal(new Laya.Point(0,0)),b=n.localToGlobal(new Laya.Point(n.width,n.height));
-  const x=r.x+Math.min(a.x,b.x)*r.width/stage.width,y=r.y+Math.min(a.y,b.y)*r.height/stage.height;
-  const width=Math.abs(b.x-a.x)*r.width/stage.width,height=Math.abs(b.y-a.y)*r.height/stage.height;
-  return [x,y,width,height].every(Number.isFinite)&&width>0&&height>0?{x,y,width,height}:null;};
- const raw=[...me.hand];if(me.last_tile&&!raw.includes(me.last_tile))raw.push(me.last_tile);
- const tiles=raw.map(t=>({tile:t.val?.toString(false),drawn:t===me.last_tile}));
- if(tiles.some(t=>typeof t.tile!=='string'))return null;
- const controls=[],candidates=[];
- for(const panel of [u?.UI_ChiPengHu?.Inst,u?.UI_LiQiZiMo?.Inst]){
-  if(panel?.enable!==true)continue;
-  const row=panel.container_btns;
-  if(row&&visible(row))for(let i=0;i<row.numChildren;i++){const n=row.getChildAt(i),b=bounds(n);if(b)controls.push({name:n.name,bounds:b});}
-  const cancel=bounds(panel.btn_cancel);if(cancel)controls.push({name:'btn_cancel',bounds:cancel});
-  const detail=panel.container_Detail;
-  if(detail&&visible(detail)){const choices=detail.getChildByName('container_chooses');
-   if(choices)for(let i=0;i<choices.numChildren;i++){const n=choices.getChildAt(i),b=bounds(n);if(b&&/^c\d+$/.test(n.name))candidates.push({name:n.name,bounds:b});}}
- }
- return {viewport:{x:r.x,y:r.y,width:r.width,height:r.height},tiles,can_discard:me.can_discard===true,controls,candidates};
-})()"#;
+const READ_SURFACE: &str = include_str!("surface.js");
 
-async fn read_view(page: &Page) -> Result<Option<ClientView>> {
-    let response = page.evaluate(READ_VIEW).await?;
-    let value = response
-        .value()
-        .ok_or_else(|| anyhow!("Majsoul input observation returned no value"))?;
-    if value.is_null() {
-        return Ok(None);
+async fn read_view(page: &Page, point: Option<(f64, f64)>) -> Result<Option<ClientView>> {
+    #[derive(Deserialize)]
+    struct Surface {
+        view: Option<ClientView>,
     }
-    Ok(Some(serde_json::from_value(value.clone())?))
-}
-
-// Mirrors the client's read-only hit queries at the actual cursor position.
-// It never calls onMouseDown, selection, discard, or operation handlers.
-const VALIDATE_POINT: &str = r#"(request=>{
- const d=window.view?.DesktopMgr?.Inst,me=d?.mainrole,c=document.querySelector('canvas'),u=window.uiscript;
- const mouse=window.Laya?.MouseManager?.instance,p=request.point;
- if(!d?.gameing||!me||!c||!mouse||document.elementFromPoint(p[0],p[1])!==c)return false;
- if(Math.abs(mouse.mouseX-p[0])>1||Math.abs(mouse.mouseY-p[1])>1)return false;
- const raw=[...me.hand];if(me.last_tile&&!raw.includes(me.last_tile))raw.push(me.last_tile);
- const hand=raw.map(t=>`${t.val?.toString(false)}:${t===me.last_tile}`);
- if(JSON.stringify(hand)!==JSON.stringify(request.hand))return false;
- if(request.slot!==null){
-  if(me.can_discard!==true||typeof me.needCheckMouse!=='function'||!me.needCheckMouse()||typeof me.getMouseInfo!=='function')return false;
-  const info=me.getMouseInfo();return info?.pai===raw[request.slot]&&info.pai.valid===true&&!info.pai.val.baida;
- }
- const visible=n=>{for(let a=n;a;a=a.parent)if(a.visible===false||a.destroyed||Number.isFinite(a.alpha)&&a.alpha<0.95)return false;return n?.visible===true;};
- const r=c.getBoundingClientRect(),stage=Laya.stage,x=(p[0]-r.x)*stage.width/r.width,y=(p[1]-r.y)*stage.height/r.height;
- let nodes=[];
- for(const panel of [u?.UI_ChiPengHu?.Inst,u?.UI_LiQiZiMo?.Inst]){
-  if(panel?.enable!==true)continue;
-  if(request.control.startsWith('candidate:')){
-   const n=panel.container_Detail?.getChildByName('container_chooses')?.getChildByName(request.control.slice(10));if(n)nodes.push(n);
-  }else{const n=request.control==='btn_cancel'?panel.btn_cancel:panel.container_btns?.getChildByName(request.control);if(n)nodes.push(n);}
- }
- nodes=nodes.filter(n=>visible(n)&&typeof n.hitTestPoint==='function'&&n.hitTestPoint(x,y));
- return nodes.length===1&&(mouse._target===nodes[0]||typeof nodes[0].contains==='function'&&nodes[0].contains(mouse._target));
-})"#;
-
-async fn validate_point(
-    page: &Page,
-    view: &ClientView,
-    control: &str,
-    slot: Option<usize>,
-    point: (f64, f64),
-) -> Result<bool> {
-    let request = serde_json::json!({"point":point,"control":control,"slot":slot,
-        "hand":view.tiles.iter().map(|t|format!("{}:{}",t.tile,t.drawn)).collect::<Vec<_>>()});
+    // The wrapper preserves a real null as data through CDP's RemoteObject.
+    let request = serde_json::to_string(&point)?;
     let result = page
-        .evaluate(format!("({VALIDATE_POINT})({request})"))
+        .evaluate_expression(format!("({READ_SURFACE})({request})"))
         .await?;
-    Ok(result.value().and_then(serde_json::Value::as_bool) == Some(true))
+    let value = result
+        .value()
+        .ok_or_else(|| anyhow!("Majsoul surface observation returned no value"))?;
+    Ok(serde_json::from_value::<Surface>(value.clone())?.view)
 }
 
-fn normalize_tile(raw: &str) -> Option<String> {
-    match raw {
-        "1z" => Some("E".into()),
-        "2z" => Some("S".into()),
-        "3z" => Some("W".into()),
-        "4z" => Some("N".into()),
-        "5z" => Some("P".into()),
-        "6z" => Some("F".into()),
-        "7z" => Some("C".into()),
-        "0m" => Some("5mr".into()),
-        "0p" => Some("5pr".into()),
-        "0s" => Some("5sr".into()),
-        _ if raw.len() == 2
-            && matches!(raw.as_bytes()[0], b'1'..=b'9')
-            && matches!(raw.as_bytes()[1], b'm' | b'p' | b's') =>
-        {
-            Some(raw.into())
-        }
-        _ => None,
-    }
+async fn sorted_table(page: &Page, rect: CanvasRect) -> Result<bool> {
+    use crate::autoplay::pixels::{self, Glyph};
+    let (image, scale) = pixels::shot(page).await?;
+    Ok(pixels::toggle_in(&image, scale, rect, coords::AUTO_SORT) == Glyph::Lit)
 }
 
-fn hand_matches(view: &ClientView, ctx: &ActionContext<'_>) -> bool {
-    let Some(player) = ctx
-        .snapshot
-        .players
-        .iter()
-        .find(|player| player.seat == ctx.our_seat)
-    else {
-        return false;
-    };
-    let Some(mut hand) = view
-        .tiles
-        .iter()
-        .map(|tile| normalize_tile(&tile.tile))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return false;
-    };
-    let mut expected = player.tehai.clone();
-    hand.sort();
-    expected.sort();
-    hand == expected
-}
-
-fn tile_bounds(rect: CanvasRect, point: (f64, f64)) -> CanvasRect {
-    let (x, y) = rect.pixel(point.0 - 0.24, point.1 - 0.35);
+fn target_bounds(rect: CanvasRect, point: (f64, f64)) -> CanvasRect {
+    let reach = reach_of(point);
+    let (x, y) = rect.pixel(point.0 - reach.half_x, point.1 - reach.half_y);
     CanvasRect {
         x,
         y,
-        width: rect.width * 0.48 / 16.0,
-        height: rect.height * 0.7 / 9.0,
+        width: rect.width * 2.0 * reach.half_x / 16.0,
+        height: rect.height * 2.0 * reach.half_y / 9.0,
+    }
+}
+
+fn tile_bounds(rect: CanvasRect, point: (f64, f64)) -> CanvasRect {
+    target_bounds(rect, point)
+}
+
+/// The already confirmed protocol hand, in the client's established sorted
+/// rack order. This does not claim Unity exposes native hand objects.
+fn protocol_tiles(ctx: &ActionContext<'_>) -> Option<Vec<(String, bool)>> {
+    let player = ctx.snapshot.players.get(ctx.our_seat as usize)?;
+    let mut hand = player.tehai.clone();
+    if hand.iter().any(|tile| tile == "?") {
+        return None;
+    }
+    hand.sort_by(|a, b| compare_pai(a, b));
+    if is_dealer_opening(ctx) {
+        return Some(hand.into_iter().map(|tile| (tile, false)).collect());
+    }
+    let drawn = player
+        .drawn_tile
+        .as_deref()
+        .or(ctx.last_self_tsumo)
+        .filter(|_| hand.len() % 3 == 2);
+    if let Some(tile) = drawn {
+        let index = hand.iter().rposition(|t| t == tile)?;
+        let tile = hand.remove(index);
+        let mut tiles: Vec<_> = hand.into_iter().map(|tile| (tile, false)).collect();
+        tiles.push((tile, true));
+        Some(tiles)
+    } else {
+        Some(hand.into_iter().map(|tile| (tile, false)).collect())
     }
 }
 
 fn layout(view: &ClientView, ctx: &ActionContext<'_>) -> Option<PointerLayout> {
-    if !hand_matches(view, ctx) {
+    if !view.clear {
         return None;
     }
+    let hand = protocol_tiles(ctx)?;
     let opening = is_dealer_opening(ctx);
-    let closed = view
-        .tiles
-        .iter()
-        .filter(|tile| opening || !tile.drawn)
-        .count();
-    let mut index = 0;
-    let tiles = view
-        .tiles
-        .iter()
-        .map(|tile| {
-            let drawn = tile.drawn && !opening;
-            let point = if drawn {
-                get_pai_coord(13, closed)
+    let rack = hand.iter().filter(|(_, drawn)| !drawn).count();
+    let tiles = hand
+        .into_iter()
+        .enumerate()
+        .map(|(index, (tile, drawn))| {
+            let point = if opening {
+                *TILES.get(index)?
             } else {
-                let point = if opening {
-                    *TILES.get(index)?
-                } else {
-                    get_pai_coord(index, closed)
-                };
-                index += 1;
-                point
+                get_pai_coord(if drawn { 13 } else { index }, rack)
             };
             Some(TileTarget {
-                tile: normalize_tile(&tile.tile)?,
+                tile,
                 drawn,
                 bounds: tile_bounds(view.viewport, point),
             })
@@ -259,24 +165,6 @@ fn layout(view: &ClientView, ctx: &ActionContext<'_>) -> Option<PointerLayout> {
         },
     };
     result.valid().then_some(result)
-}
-
-fn button_name(ctx: &ActionContext<'_>) -> Option<&'static str> {
-    Some(match ctx.action {
-        MjaiEvent::Dahai { .. } if ctx.self_riichi_accepted => "btn_cancel",
-        MjaiEvent::Reach { .. } => "btn_lizhi",
-        MjaiEvent::Chi { .. } => "btn_chi",
-        MjaiEvent::Pon { .. } => "btn_peng",
-        MjaiEvent::Daiminkan { .. } | MjaiEvent::Ankan { .. } | MjaiEvent::Kakan { .. } => {
-            "btn_gang"
-        }
-        MjaiEvent::Hora { .. } if hora_is_tsumo(ctx) => "btn_zimo",
-        MjaiEvent::Hora { .. } => "btn_hu",
-        MjaiEvent::Ryukyoku { .. } => "btn_liuju",
-        MjaiEvent::Kita { .. } => "btn_babei",
-        MjaiEvent::None => "btn_cancel",
-        _ => return None,
-    })
 }
 
 #[async_trait::async_trait]
@@ -323,7 +211,13 @@ impl SiteAdapter for MajsoulAutoplay {
         page: &Page,
         ctx: &ActionContext<'_>,
     ) -> Result<Option<PointerLayout>> {
-        Ok(read_view(page).await?.and_then(|view| layout(&view, ctx)))
+        let Some(view) = read_view(page, None).await? else {
+            return Ok(None);
+        };
+        if !sorted_table(page, view.viewport).await? {
+            return Ok(None);
+        }
+        Ok(layout(&view, ctx))
     }
 
     async fn observe(
@@ -331,7 +225,7 @@ impl SiteAdapter for MajsoulAutoplay {
         page: &Page,
         ctx: &ActionContext<'_>,
         intent: &PressIntent,
-        actual_point: Option<(f64, f64)>,
+        actual: Option<(f64, f64)>,
     ) -> Result<SiteObservation> {
         let budget = *self
             .context
@@ -350,11 +244,14 @@ impl SiteAdapter for MajsoulAutoplay {
             }),
             continuation: None,
         };
-        let Some(view) = read_view(page).await? else {
+        if intent.action != *ctx.action {
+            return Ok(observation);
+        }
+        let Some(view) = read_view(page, actual).await? else {
             return Ok(observation);
         };
         observation.layout = layout(&view, ctx);
-        if !hand_matches(&view, ctx) || intent.action != *ctx.action {
+        if !view.clear || observation.layout.is_none() {
             return Ok(observation);
         }
         let Some(budget) = budget else {
@@ -375,68 +272,39 @@ impl SiteAdapter for MajsoulAutoplay {
         let Some(point) = selected else {
             return Ok(observation);
         };
-        let (control, bounds) = match intent.role {
-            PressRole::Discard => {
-                if !view.can_discard {
-                    return Ok(observation);
-                }
-                (
-                    format!("tile:{}:{}", point.x_norm, point.y_norm),
-                    tile_bounds(view.viewport, (point.x_norm, point.y_norm)),
-                )
-            }
-            PressRole::Candidate => {
-                let count = view.candidates.len();
-                let kan = matches!(
-                    ctx.action,
-                    MjaiEvent::Ankan { .. } | MjaiEvent::Kakan { .. }
-                );
-                let Some(index) = (0..count).find(|i| {
-                    (if kan {
-                        kan_candidate_pos(*i, count)
-                    } else {
-                        candidate_pos(*i, count)
-                    }) == Some((point.x_norm, point.y_norm))
-                }) else {
-                    return Ok(observation);
-                };
-                let name = format!("c{index}");
-                let Some(control) = view.candidates.iter().find(|c| c.name == name) else {
-                    return Ok(observation);
-                };
-                (format!("candidate:{name}"), control.bounds)
-            }
-            _ => {
-                let Some(name) = button_name(ctx) else {
-                    return Ok(observation);
-                };
-                let controls: Vec<_> = view.controls.iter().filter(|c| c.name == name).collect();
-                let [control] = controls.as_slice() else {
-                    return Ok(observation);
-                };
-                (name.to_owned(), control.bounds)
-            }
-        };
-        let window = window_identity(crate::bot::control::InputWindow::Majsoul(budget).proof());
-        if let Some(actual) = actual_point {
-            if !bounds.contains(actual.0, actual.1) {
+        let point = (point.x_norm, point.y_norm);
+        let bounds = target_bounds(view.viewport, point);
+        if intent.role == PressRole::Discard {
+            let Some(tile) = observation
+                .layout
+                .as_ref()
+                .and_then(|l| l.tiles.iter().find(|t| t.bounds == bounds))
+            else {
                 return Ok(observation);
-            }
-            let slot = if intent.role == PressRole::Discard {
-                let Some(slot) = observation
-                    .layout
-                    .as_ref()
-                    .and_then(|l| l.tiles.iter().position(|t| t.bounds == bounds))
-                else {
-                    return Ok(observation);
-                };
-                Some(slot)
-            } else {
-                None
             };
-            if !validate_point(page, &view, &control, slot, actual).await? {
+            let (pai, drawn) = match ctx.action {
+                MjaiEvent::Dahai { pai, tsumogiri, .. } => (pai, Some(*tsumogiri)),
+                MjaiEvent::Reach {
+                    pai: Some(pai),
+                    tsumogiri,
+                    ..
+                } => (pai, *tsumogiri),
+                _ => return Ok(observation),
+            };
+            if tile.tile != *pai
+                || (!is_dealer_opening(ctx) && drawn.is_some_and(|d| d != tile.drawn))
+            {
                 return Ok(observation);
             }
+        }
+        if actual.is_some_and(|p| !bounds.contains(p.0, p.1)) {
+            return Ok(observation);
+        }
+        // Unity keeps the rack inside WASM. The protocol mapping is usable
+        // only while the actual table shows automatic sorting enabled.
+        // A covered table or manual rack never gets final input permission.
+        if actual.is_some() && !sorted_table(page, view.viewport).await? {
+            return Ok(observation);
         }
         if *self
             .context
@@ -449,13 +317,13 @@ impl SiteAdapter for MajsoulAutoplay {
         }
         observation.target = Some(InputTarget {
             identity: TargetIdentity {
-                window,
-                hand: view
-                    .tiles
-                    .iter()
-                    .map(|t| format!("{}:{}", t.tile, t.drawn))
+                window: window_identity(crate::bot::control::InputWindow::Majsoul(budget).proof()),
+                hand: protocol_tiles(ctx)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(tile, drawn)| format!("{tile}:{drawn}"))
                     .collect(),
-                control,
+                control: format!("{:?}:{}:{}", intent.role, point.0, point.1),
             },
             bounds,
             viewport: view.viewport,
@@ -1239,6 +1107,25 @@ fn riichi_prompt_pending(ctx: &ActionContext, dahai_pai: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_unity_table_qualifies_the_actual_sorting_glyph() {
+        use crate::autoplay::pixels::{self, Glyph};
+        let image = pixels::decode_png(include_bytes!(
+            "../../../tests/fixtures/majsoul-unity-table-20261027.png"
+        ))
+        .unwrap();
+        let rect = CanvasRect {
+            x: 7.0,
+            y: 0.0,
+            width: 1762.0,
+            height: 1000.0,
+        };
+        assert_eq!(
+            pixels::toggle_in(&image, 1.0, rect, coords::AUTO_SORT),
+            Glyph::Lit
+        );
+    }
     #[test]
     fn semantic_reach_has_no_site_timing_and_only_the_discard_finishes_input() {
         let snapshot = snapshot_with_oya(
@@ -1287,19 +1174,7 @@ mod tests {
                 width: 1280.0,
                 height: 720.0,
             },
-            tiles: vec![
-                VisibleTile {
-                    tile: "0m".into(),
-                    drawn: false,
-                },
-                VisibleTile {
-                    tile: "5m".into(),
-                    drawn: true,
-                },
-            ],
-            can_discard: false,
-            controls: vec![],
-            candidates: vec![],
+            clear: true,
         };
         let actual = layout(&view, &context).unwrap();
         assert_eq!(actual.tiles[0].tile, "5mr");
@@ -1308,8 +1183,8 @@ mod tests {
         assert!(actual.tiles[1].drawn);
         let expected = tile_bounds(view.viewport, get_pai_coord(13, 1));
         assert_eq!(actual.tiles[1].bounds, expected);
-        view.tiles[0].tile = "5m".into();
-        assert!(!hand_matches(&view, &context));
+        view.clear = false;
+        assert!(layout(&view, &context).is_none());
     }
 
     /// Each kind of target has its own reach, and the hand's drawn tile,
