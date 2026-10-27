@@ -51,6 +51,10 @@ our seat can act, so an `MjaiEvent::None` reaching autoplay is a *decline*
 turn". That distinction is not visible in the reply itself, which is why it
 is settled upstream; see `src/bot/README.md` → "Deciding what to ask".
 
+Replies carrying a `meta.unavailable` reason are recorded upstream but withheld
+from this bus. A lost or unavailable model therefore cannot become a Pass
+press, even if its stderr fault notification arrives after the reply.
+
 It has to be settled somewhere. One Tenhou frame can carry three seats'
 actions, and when the bot was asked about all of them, the fillers answered
 first: a real `hora` arrived to find a pass already pressed into its window.
