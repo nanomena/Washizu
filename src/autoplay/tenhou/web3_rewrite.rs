@@ -11,6 +11,7 @@ const PRODUCER: &str = include_str!("web3.js");
 const MARKER: &str = "/*washizu-web3-bridge*/";
 const EPOCH: &str = "__washizuWeb3Epoch";
 const UI_EPOCH: &str = "__washizuWeb3UiEpoch";
+const DISCONNECT_METADATA: &str = "BYE:function(__disconnect){__state.connected&=~(1<<~~__disconnect.who);__status.__statusRefresh();return 1}";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RewriteError {
@@ -561,7 +562,16 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
     // a close/reopen cycle, or if the client reuses every tile/clock DOM node.
     // Raw end-of-hand frames retire a retained clock before delayed result
     // animation starts. Only an actual native clock opening restores readiness.
+    // An opponent disconnect only updates the connectivity mask and status
+    // painting. Verify its entire body before excluding it from input identity:
+    // otherwise BYE arriving during pacing cancels our unchanged legal action.
+    let disconnect = s.unique("disconnect metadata callback", DISCONNECT_METADATA)?;
+    // The anchor starts at the property key; method_at requires a body token.
+    let disconnect = s.method_at(input_object, s.pair(disconnect + 3)? + 2)?;
     for method in s.methods(input_object)? {
+        if method.body.open == disconnect.body.open {
+            continue;
+        }
         let invalidate = if matches!(
             method.name.as_str(),
             "T" | "D" | "N" | "REACH" | "AGARI" | "RYUUKYOKU" | "GO" | "TAIKYOKU" | "INIT"
@@ -681,5 +691,24 @@ mod tests {
             .unwrap();
         assert_eq!(source.name("__f"), "Renamed");
         assert_eq!(source.name("__p"), "flags");
+    }
+
+    #[test]
+    fn disconnect_metadata_exemption_requires_the_complete_status_only_body() {
+        let body = "BYE:function(e){s.connected&=~(1<<~~e.who);ui.draw();return 1}";
+        let mut source = Source::new(body).unwrap();
+        assert!(source
+            .unique("disconnect metadata callback", DISCONNECT_METADATA)
+            .is_ok());
+        for changed in [
+            body.replace("ui.draw();", "ui.draw();clock.close();"),
+            body.replace("ui.draw();", "ui.draw();hand.pop();"),
+            body.replace("connected&=", "connected|="),
+        ] {
+            let mut source = Source::new(&changed).unwrap();
+            assert!(source
+                .unique("disconnect metadata callback", DISCONNECT_METADATA)
+                .is_err());
+        }
     }
 }
