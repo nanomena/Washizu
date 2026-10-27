@@ -150,10 +150,12 @@ impl<'a> PacingPolicy<'a> {
             .unwrap_or_else(|| super::decide(&input, rng));
         let readiness_ms = ctx
             .earliest_press_at
-            .map_or(0, |at| millis(at.saturating_duration_since(origin)))
-            .max(super::functional_floor(&input));
-        let start_ms = decision
-            .total_target_ms
+            .map_or(0, |at| millis(at.saturating_duration_since(origin)));
+        // Historical rendering pads are already included in the sampled total.
+        // An observed ready target must not pay them again before input starts.
+        // Style gives way to the actual clock; only observed readiness is hard.
+        let total_target_ms = decision.total_target_ms.min(super::budget_cap(&input, decision.allow_bank));
+        let start_ms = total_target_ms
             .saturating_sub(ctx.click_overhead_ms)
             .max(readiness_ms)
             .max(elapsed_ms);
@@ -174,7 +176,7 @@ impl<'a> PacingPolicy<'a> {
         }
         let start_at = origin + Duration::from_millis(u64::from(start_ms));
         Ok(PacingPlan {
-            total_target_ms: decision.total_target_ms,
+            total_target_ms,
             start_at,
             wait_ms: millis(start_at.saturating_duration_since(ctx.now)),
             allow_bank: decision.allow_bank,

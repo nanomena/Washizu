@@ -26,13 +26,13 @@
 //!   error, timeout, wrong return shape, out-of-range delay) falls back
 //!   to the built-in model and is logged **once** per distinct error,
 //!   not once per hand.
-//! - The result is clamped by [`budget_cap`] and [`functional_floor`] —
+//! - The result is clamped by [`budget_cap`] and [`preferred_floor`] —
 //!   a script can neither overrun the server clock nor click into a
 //!   dealing animation.
 //! - The script never sees or influences the chosen action.
 
 use super::PolicySource;
-use super::{budget_cap, functional_floor, DelayDecision, DelayInput};
+use super::{budget_cap, preferred_floor, DelayDecision, DelayInput};
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -222,7 +222,7 @@ impl DelayScript {
                 // Enforce the non-negotiables on the script's answer.
                 let target = target_ms
                     .min(budget_cap(input, allow_bank))
-                    .max(functional_floor(input));
+                    .max(preferred_floor(input));
                 Some(DelayDecision {
                     total_target_ms: target,
                     allow_bank,

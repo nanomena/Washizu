@@ -59,18 +59,12 @@ pub struct DelayModelConfig {
     /// profile directory; absent means use the active bot's declared policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_override: Option<std::path::PathBuf>,
-    /// Minimum total thinking time per decision, ms. This is a
-    /// functional floor, not a style knob: Mahjong Soul needs time to
-    /// render tiles after the triggering frame, and a click issued
-    /// before the UI exists is silently lost. Applies in every mode and
-    /// cannot be undercut by the Lua script.
+    /// Preferred minimum total decision time, ms. Actual target readiness
+    /// is observed separately. The common policy clips this preference when
+    /// necessary to leave enough time for input before the real deadline.
     pub min_delay_ms: u32,
-    /// UI-readiness floor for decisions that click an **action button**
-    /// (chi/pon/kan, ron/tsumo, riichi, skip, kyuushu, kita), ms. The
-    /// buttons appear only after the triggering discard's animation and
-    /// their own pop-in — noticeably later than hand tiles render — so
-    /// they need a higher floor than plain discards. Applies in every
-    /// mode and cannot be undercut by the Lua script.
+    /// Preferred minimum total time for action-button decisions, ms.
+    /// It is included once in the target, never added after observed readiness.
     pub min_button_delay_ms: u32,
     /// Base distribution shape (built-in model; also the fallback when
     /// the Lua script fails).

@@ -241,7 +241,7 @@ pub fn decide<R: Rng + ?Sized>(input: &DelayInput, rng: &mut R) -> DelayDecision
     // which is strictly worse than shaving budget headroom (and in
     // practice the base window is minutes, the floor a few seconds).
     target = target.min(budget_cap(input, allow_bank));
-    target = target.max(functional_floor(input));
+    target = target.max(preferred_floor(input));
 
     DelayDecision {
         total_target_ms: target,
@@ -294,24 +294,22 @@ pub fn budget_cap(input: &DelayInput, allow_bank: bool) -> u32 {
             let configured_base = input
                 .cfg
                 .pre_click_delay_max_ms
-                .saturating_add(functional_floor(input));
+                .saturating_add(preferred_floor(input));
             d.no_budget_cap_ms.max(configured_base)
         }
     }
 }
 
-/// The minimum target no policy — built-in or script — may go below.
-///
-/// All components are about the client UI rather than style — a click
-/// issued before the UI exists is silently lost (the reason the legacy
-/// model had a hard lower bound):
+/// Preferred total target used while sampling a pacing decision. The public
+/// policy may shorten it to fit the actual clock once the adapter has observed
+/// readiness. These historical rendering pads are not proof of readiness:
 /// - `min_delay_ms` covers tile render latency after the triggering
 ///   frame;
 /// - `min_button_delay_ms` covers action buttons (chi/pon/kan, ron,
 ///   riichi, skip, ...), which appear only after the triggering
 ///   discard's animation plus their own pop-in;
 /// - the dealer-opening pad covers the 14-tile hand-sort animation.
-pub fn functional_floor(input: &DelayInput) -> u32 {
+pub fn preferred_floor(input: &DelayInput) -> u32 {
     let d = input.delay_cfg;
     let mut floor = d.min_delay_ms;
     if input.kind.clicks_action_button() {
@@ -563,7 +561,7 @@ mod tests {
             dec.total_target_ms,
             c.pre_click_delay_max_ms + c.dealer_first_discard_extra_delay_ms
         );
-        assert!(dec.total_target_ms >= functional_floor(&i));
+        assert!(dec.total_target_ms >= preferred_floor(&i));
     }
 
     /// Rule bonuses are additive and off by default.
@@ -798,7 +796,7 @@ mod tests {
     /// The functional floor (animation wait) wins over the cap: losing
     /// the click to the animation is worse than shaving headroom.
     #[test]
-    fn functional_floor_beats_cap() {
+    fn preferred_floor_beats_cap() {
         let c = cfg(); // dealer pad 2000ms default
         let d = DelayModelConfig::default();
         let mut i = input(&c, &d);
