@@ -24,7 +24,7 @@ function snapshot() {
   const now = Date.now()
   return {
     revision: 1, context, names: [], red_fives: true,
-    game: null, view: null, round_ended: false, game_ended: true,
+    game: null, view: null, round_ended: false, game_ended: !process.argv.includes('--live-game'),
     capture, bot: { state: 'ready', bot: 'stand-in', actor_id: 0 },
     service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null,
     brand: 'Stand-in', facts: [], autoplay_enabled: false,
@@ -84,6 +84,8 @@ createInterface({ input: process.stdin }).on('line', line => {
     process.stdout.write('', () => process.exit(mode === 'shutdown-failure' ? 1 : 0))
   }
   if (process.argv.includes('--delay-release') && homeAt >= 0) {
-    setTimeout(() => { fs.writeFileSync(path.join(process.argv[homeAt + 1], 'fake-core-released'), 'released'); finish() }, 250)
+    const releaseAt = process.argv.indexOf('--release-delay')
+    const delay = releaseAt >= 0 ? Number(process.argv[releaseAt + 1]) : 250
+    setTimeout(() => { fs.writeFileSync(path.join(process.argv[homeAt + 1], 'fake-core-released'), 'released'); finish() }, delay)
   } else finish()
 })

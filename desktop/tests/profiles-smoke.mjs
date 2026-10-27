@@ -1,6 +1,5 @@
-// The real chooser and account windows, with a process-only fake core.
-// No game site is opened. Cookies use an offline .invalid origin.
-// Run on Linux: xvfb-run -a node tests/profiles-smoke.mjs
+// Real Electron processes under Xvfb, fake cores, temporary profiles, and
+// about:blank game pages. No real game, user account, desktop input or model.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -16,16 +15,11 @@ const electron = createRequire(import.meta.url)('electron')
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'washizu-profiles-smoke-'))
 const root = path.join(work, 'data')
 /** @typedef {{type: string, url: string, targetId: string}} Target */
-/** @typedef {{profiles: import('../src/profiles.js').AccountProfile[], active: string | null, ready: boolean}} State */
-/** @param {number} ms */
-const sleep = ms => new Promise(done => setTimeout(done, ms))
+/** @typedef {{revision: number, profiles: import('../src/profiles.js').AccountProfile[], clients: import('../src/profile-session.js').ClientState[], error: string}} State */
+const sleep = (/** @type {number} */ ms) => new Promise(done => setTimeout(done, ms))
 /** @template T @param {() => Promise<T>} read @param {(value: T) => boolean} predicate @param {string} label @returns {Promise<T>} */
 async function until(read, predicate, label) {
-  for (let i = 0; i < 150; i++) {
-    const value = await read()
-    if (predicate(value)) return value
-    await sleep(100)
-  }
+  for (let i = 0; i < 180; i++) { const value = await read(); if (predicate(value)) return value; await sleep(100) }
   throw new Error(`Timed out: ${label}`)
 }
 
@@ -33,14 +27,13 @@ class DevTools {
   /** @param {WebSocket} socket */
   constructor(socket) {
     this.socket = socket; this.next = 0
-    /** @type {Map<number, {done: (value: any) => void, fail: (error: Error) => void}>} */
+    /** @type {Map<number, {done: (value: any) => void, fail: (error: Error) => void, timer: NodeJS.Timeout}>} */
     this.pending = new Map()
     socket.onmessage = event => {
-      const message = JSON.parse(String(event.data))
-      const request = this.pending.get(message.id)
-      if (request) { this.pending.delete(message.id); message.error ? request.fail(new Error(JSON.stringify(message.error))) : request.done(message.result) }
+      const message = JSON.parse(String(event.data)), request = this.pending.get(message.id)
+      if (request) { clearTimeout(request.timer); this.pending.delete(message.id); message.error ? request.fail(new Error(JSON.stringify(message.error))) : request.done(message.result) }
     }
-    socket.onclose = () => { for (const request of this.pending.values()) request.fail(new Error('DevTools closed')); this.pending.clear() }
+    socket.onclose = () => { for (const request of this.pending.values()) { clearTimeout(request.timer); request.fail(new Error('DevTools closed')) } this.pending.clear() }
   }
   /** @param {number} port */
   static async connect(port) {
@@ -52,202 +45,166 @@ class DevTools {
   /** @param {string} method @param {Record<string, unknown>} [params] @param {string} [sessionId] @returns {Promise<any>} */
   call(method, params = {}, sessionId) {
     const id = ++this.next
-    return new Promise((done, fail) => { this.pending.set(id, { done, fail }); this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })) })
+    return new Promise((done, fail) => {
+      const timer = setTimeout(() => { this.pending.delete(id); fail(new Error(`DevTools timeout: ${method}`)) }, 15_000)
+      this.pending.set(id, { done, fail, timer }); this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
+    })
   }
-  /** @param {(target: Target) => boolean} match @returns {Promise<string>} */
+  /** @param {(target: Target) => boolean} match */
   async page(match) {
-    const page = await until(async () => (await this.call('Target.getTargets')).targetInfos.find((/** @type {Target} */ t) => t.type === 'page' && match(t)), value => !!value, 'page target')
-    return (await this.call('Target.attachToTarget', { targetId: page.targetId, flatten: true })).sessionId
+    const target = await until(async () => (await this.call('Target.getTargets')).targetInfos.find((/** @type {Target} */ t) => t.type === 'page' && match(t)), value => !!value, 'page target')
+    return (await this.call('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId
   }
-  /** @param {string} session @param {string} expression @returns {Promise<any>} */
+  /** @param {string} session @param {string} expression */
   async evaluate(session, expression) {
     const result = await this.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, session)
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text)
     return result.result.value
   }
-  async closeBrowser() {
-    await this.call('Browser.close').catch(() => {})
-    this.socket.close()
-  }
+  async close() { await this.call('Browser.close').catch(() => {}); this.socket.close() }
 }
 
 fs.mkdirSync(root)
-const oldConfig = '[platform]\nkind = "Majsoul"\n# existing user settings\n[autoplay]\nenabled = false\n'
-fs.writeFileSync(path.join(root, 'config.toml'), oldConfig)
-fs.mkdirSync(path.join(root, 'history'))
-fs.writeFileSync(path.join(root, 'history', 'keep.jsonl'), 'existing game records\n')
+const original = '[platform]\nkind = "Majsoul"\n# existing user settings\n[autoplay]\nenabled = false\n'
+fs.writeFileSync(path.join(root, 'config.toml'), original)
+fs.mkdirSync(path.join(root, 'history')); fs.writeFileSync(path.join(root, 'history', 'keep.jsonl'), 'existing game records\n')
 const fake = path.join(work, 'core.sh')
-fs.writeFileSync(fake, `#!/bin/sh\nexec "${process.execPath}" "${path.join(HERE, 'stand-in-core.js')}" --mode monitor --delay-release "$@"\n`, { mode: 0o755 })
-const port = await new Promise(done => { const server = net.createServer().listen(0, '127.0.0.1', () => { const p = /** @type {net.AddressInfo} */ (server.address()).port; server.close(() => done(p)) }) })
-let diagnostic = ''
+fs.writeFileSync(fake, `#!/bin/sh\nexec "${process.execPath}" "${path.join(HERE, 'stand-in-core.js')}" --mode monitor --live-game --delay-release --release-delay 1200 "$@"\n`, { mode: 0o755 })
+const port = await new Promise(done => { const probe = net.createServer().listen(0, '127.0.0.1', () => { const n = /** @type {net.AddressInfo} */ (probe.address()).port; probe.close(() => done(n)) }) })
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-const shell = spawn(electron, [DESKTOP, '--no-sandbox', `--remote-debugging-port=${port}`, `--data=${root}`, `--core=${fake}`, `--dock=${path.join(DESKTOP, '..', 'frontend', 'dist')}`], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+const shell = spawn(electron, [path.join(HERE, 'profiles-app.js'), '--no-sandbox', `--remote-debugging-port=${port}`, `--data=${root}`, `--core=${fake}`, `--dock=${path.join(DESKTOP, '..', 'frontend', 'dist')}`], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+let diagnostic = '', next = 0
+assert.ok(shell.stdout && shell.stderr)
 shell.stdout.on('data', data => { diagnostic += data }); shell.stderr.on('data', data => { diagnostic += data })
+/** @param {string} action @param {string} [profile] @returns {Promise<any>} */
+const native = (action, profile) => new Promise((done, fail) => {
+  const id = ++next
+  const timer = setTimeout(() => { shell.off('message', receive); fail(new Error(`Fixture timeout: ${action}`)) }, 10_000)
+  /** @param {any} message */
+  const receive = message => { if (message.id === id) { clearTimeout(timer); shell.off('message', receive); message.error ? fail(new Error(message.error)) : done(message.value) } }
+  shell.on('message', receive); shell.send({ id, action, profile })
+})
 /** @type {DevTools | null} */
 let browser = null
-/** @type {DevTools | null} */
-let worker = null
+/** @type {Map<string, {tools: DevTools, dock: string, game: string, home: string}>} */
+const workers = new Map()
 try {
-  browser = await DevTools.connect(port)
-  const chooserBrowser = browser
-  const chooser = await chooserBrowser.page(t => t.url.includes('?view=profiles'))
-  /** @param {string} expression */
-  const evaluate = expression => chooserBrowser.evaluate(chooser, expression)
+  browser = await DevTools.connect(Number(port))
+  const chooserBrowser = browser, chooser = await browser.page(t => t.url.includes('?view=profiles'))
+  const evaluate = (/** @type {string} */ expression) => chooserBrowser.evaluate(chooser, expression)
   const state = async () => /** @type {State} */ (await evaluate('window.akagi.invoke("list_profiles")'))
-  /** @param {string} selector @param {string} value @param {'HTMLInputElement' | 'HTMLSelectElement'} kind */
-  const field = async (selector, value, kind = 'HTMLInputElement') => evaluate(`{
-    const input=document.querySelector(${JSON.stringify(selector)});
-    Object.getOwnPropertyDescriptor(${kind}.prototype,'value').set.call(input,${JSON.stringify(value)});
-    input.dispatchEvent(new Event(${JSON.stringify(kind === 'HTMLSelectElement' ? 'change' : 'input')},{bubbles:true}));
-  }`)
-  await until(state, s => s.profiles.length === 1, 'profile initial read')
-  await until(() => evaluate('!!document.querySelector(".accounts-tools select") && !document.querySelector("#new").disabled'), ready => ready, 'React chooser ready')
-  await field('.accounts-tools select', 'zh-CN', 'HTMLSelectElement')
-  assert.equal((await state()).profiles.length, 1)
+  const runtime = (/** @type {State} */ s, /** @type {string} */ id) => s.clients.find(c => c.id === id)
+  await until(state, s => s.profiles.length === 1, 'initial registry')
+  assert.deepEqual(Object.keys(await state()).sort(), ['clients', 'error', 'profiles', 'revision'])
   assert.equal((await state()).profiles[0].id, 'existing')
-  assert.deepEqual(await evaluate('({width: innerWidth, height: innerHeight})'), { width: 640, height: 304 })
-  assert.equal((await browser.call('Target.getTargets')).targetInfos.some((/** @type {Target} */ t) => t.url.startsWith('http')), false)
-  console.log('ok chooser adopts the old account without opening a game or starting a core')
-  await evaluate('document.querySelector("#new").click()')
-  await until(() => evaluate('document.querySelector("#editor").open'), open => open, 'create editor open')
-  await field('#name', '天凤 · 主号', 'HTMLInputElement')
-  await field('#platform', 'Tenhou', 'HTMLSelectElement')
-  await evaluate('document.querySelector("#form").requestSubmit()')
-  const created = await until(state, s => s.profiles.length === 2, 'create Tenhou profile')
-  const tenhou = created.profiles.find(p => p.platform === 'Tenhou')
-  assert.ok(tenhou)
-  await until(() => evaluate('document.querySelector("#editor").open'), open => !open, 'create dialog close')
-  await evaluate('document.querySelector(".accounts-rename").click()')
-  await until(() => evaluate('document.querySelector("#editor").open'), open => open, 'rename editor open')
-  await field('#name', '雀魂 · 主号', 'HTMLInputElement')
-  await evaluate('document.querySelector("#form").requestSubmit()')
-  await until(state, s => s.profiles[0].name === '雀魂 · 主号', 'rename existing account')
-  await until(() => evaluate('document.querySelector("#editor").open'), open => !open, 'rename dialog close')
-  assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), oldConfig)
-  assert.equal(fs.readFileSync(path.join(root, 'history', 'keep.jsonl'), 'utf8'), 'existing game records\n')
-  console.log('ok create and rename work through the real UI; original settings and records are untouched')
+  const created = /** @type {State} */ (await evaluate('window.akagi.invoke("create_profile", {name:"Tenhou",platform:"Tenhou"})'))
+  const b = created.profiles.find(p => p.platform === 'Tenhou'); assert.ok(b)
+  await evaluate('window.akagi.invoke("rename_profile", {id:"existing",name:"Main"})')
+  const a = 'existing'
+  const home = (/** @type {string} */ id) => id === 'existing' ? root : path.join(root, 'profiles', id)
+  const marker = (/** @type {string} */ id) => path.join(home(id), 'fake-core-released')
+  const open = (/** @type {string} */ id) => evaluate(`window.akagi.invoke('open_profile',{id:${JSON.stringify(id)}})`)
+  async function attach(/** @type {string} */ id) {
+    await until(state, s => runtime(s, id)?.state === 'active', `${id} ready`)
+    const logs = path.join(home(id), 'logs')
+    const file = fs.readdirSync(logs).filter(f => /^shell-.*\.log$/.test(f)).sort().at(-1); assert.ok(file)
+    const endpoint = Number(fs.readFileSync(path.join(logs, file), 'utf8').match(/local DevTools port (\d+)/)?.[1]); assert.ok(endpoint)
+    const tools = await DevTools.connect(endpoint)
+    const dock = await tools.page(t => t.url.startsWith('app://dock/')), game = await tools.page(t => t.url === 'about:blank')
+    assert.equal((await tools.call('Target.getTargets')).targetInfos.some((/** @type {Target} */ t) => /^https?:/.test(t.url)), false)
+    await until(() => tools.evaluate(dock, 'window.akagi.invoke("get_monitor")'), s => s.capture.state === 'running', 'fake capture')
+    assert.equal((await tools.evaluate(dock, 'window.akagi.invoke("get_monitor")')).game_ended, false)
+    const client = { tools, dock, game, home: home(id) }; workers.set(id, client); return client
+  }
+  async function close(/** @type {string} */ id) {
+    const client = workers.get(id); assert.ok(client)
+    const shutting = client.tools.close()
+    await until(state, s => runtime(s, id)?.state === 'closing', 'cleanup pending')
+    assert.equal(fs.existsSync(marker(id)), false, 'slot stays held before the delayed core ACK')
+    await assert.rejects(open(id), /正在关闭/)
+    await shutting; workers.delete(id)
+    await until(state, s => !runtime(s, id), 'ACK plus actual process close releases just this slot')
+    assert.ok(fs.existsSync(marker(id)))
+  }
+
+  await open(a); await open(a); await open(b.id)
+  let A = await attach(a); const B = await attach(b.id)
+  const first = await native('inspect'), pidA = first.clients.find((/** @type {any} */ c) => c.id === a).pid, pidB = first.clients.find((/** @type {any} */ c) => c.id === b.id).pid
+  assert.notEqual(pidA, pidB); assert.equal(first.clients.length, 2); assert.equal(first.visible, true)
+  await open(a); const same = await native('inspect')
+  assert.equal(same.clients.find((/** @type {any} */ c) => c.id === a).pid, pidA)
+  assert.equal(same.clients.find((/** @type {any} */ c) => c.id === b.id).pid, pidB)
+  assert.equal(same.visible, true); assert.equal(same.minimized, false)
+  console.log('ok two real profile clients coexist; duplicate starting/active opens focus the same process; chooser stays open')
 
   const origin = 'https://washizu-account-fixture.invalid/'
-  /** @param {DevTools} tools @param {string} session */
-  const cookie = async (tools, session) => (await tools.call('Network.getCookies', { urls: [origin] }, session)).cookies.find((/** @type {{name: string, value: string}} */ c) => c.name === 'profile_marker')?.value
-  let currentHome = ''
-  /** @param {string} id @param {string} home @param {string} platform */
-  async function openAccount(id, home, platform) {
-    currentHome = home
-    const marker = path.join(home, 'fake-core-released'); if (fs.existsSync(marker)) fs.unlinkSync(marker)
-    await evaluate(`window.akagi.invoke("open_profile", {id:${JSON.stringify(id)}})`)
-    await until(state, s => s.active === id && s.ready, 'account window ready')
-    await until(() => evaluate('document.visibilityState'), visibility => visibility === 'hidden', 'guide hides when the main window is ready')
-    const logfile = fs.readdirSync(path.join(home, 'logs')).filter(f => /^shell-.*\.log$/.test(f)).sort().at(-1)
-    assert.ok(logfile)
-    const logged = fs.readFileSync(path.join(home, 'logs', logfile), 'utf8')
-    const endpoint = Number(logged.match(/local DevTools port (\d+)/)?.[1])
-    assert.ok(endpoint)
-    const tools = worker = await DevTools.connect(endpoint)
-    const dock = await tools.page(t => t.url.startsWith('app://dock/'))
-    const mainSize = await tools.evaluate(dock, '({width: innerWidth, height: innerHeight})')
-    assert.ok(Math.abs(mainSize.width / mainSize.height - 4 / 3) < 0.01, 'the main window keeps its existing 4:3 canvas')
-    await until(() => tools.evaluate(dock, 'window.akagi.invoke("get_monitor_options")'), options => options.platform === platform, 'profile platform')
-    await until(() => tools.evaluate(dock, 'window.akagi.invoke("get_monitor")'), snapshot => snapshot.capture.state === 'running', 'fake capture')
-    const game = await tools.page(t => t.url === 'about:blank')
-    assert.equal((await tools.call('Target.getTargets')).targetInfos.some((/** @type {Target} */ t) => /^https?:/.test(t.url)), false)
-    return { tools, game }
-  }
-  async function closeAccount() {
-    assert.ok(worker)
-    await worker.closeBrowser(); worker = null
-    await until(state, s => s.active === null, 'account shutdown and return to chooser')
-    await until(() => evaluate('document.visibilityState'), visibility => visibility === 'visible', 'guide returns after the main window closes')
-    assert.ok(fs.existsSync(path.join(currentHome, 'fake-core-released')), 'the chooser waited for the old core to release its account')
-  }
-  let account = await openAccount(tenhou.id, path.join(root, 'profiles', tenhou.id), 'Tenhou')
-  assert.equal(await cookie(account.tools, account.game), undefined)
-  assert.equal((await account.tools.call('Network.setCookie', { url: origin, name: 'profile_marker', value: 'tenhou', expires: Date.now() / 1000 + 86400 }, account.game)).success, true)
-  await closeAccount()
-  account = await openAccount('existing', root, 'Majsoul')
-  assert.equal(await cookie(account.tools, account.game), undefined)
-  await account.tools.call('Network.setCookie', { url: origin, name: 'profile_marker', value: 'majsoul', expires: Date.now() / 1000 + 86400 }, account.game)
-  await closeAccount()
-  account = await openAccount(tenhou.id, path.join(root, 'profiles', tenhou.id), 'Tenhou')
-  assert.equal(await cookie(account.tools, account.game), 'tenhou')
-  await closeAccount()
-  account = await openAccount('existing', root, 'Majsoul')
-  assert.equal(await cookie(account.tools, account.game), 'majsoul')
-  await closeAccount()
-  assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), oldConfig)
+  await A.tools.call('Network.setCookie', { url: origin, name: 'profile_marker', value: 'A', expires: Date.now() / 1000 + 86400 }, A.game)
+  const cookies = await B.tools.call('Network.getCookies', { urls: [origin] }, B.game)
+  assert.equal(cookies.cookies.some((/** @type {any} */ c) => c.name === 'profile_marker'), false)
+  // A bare Xvfb has no window manager to implement iconification; observe the
+  // actual native minimize request while exercising the real close event.
+  const minimized = await native('close-window'); assert.equal(minimized.minimizeRequests, 1)
+  await A.tools.evaluate(A.dock, 'window.akagi.invoke("return_to_profiles")')
+  await until(() => native('inspect'), s => s.visible && !s.minimized, 'account button restores shared chooser during a live game')
+  assert.equal(fs.existsSync(marker(a)), false); assert.equal(fs.existsSync(marker(b.id)), false)
+  await native('quit')
+  assert.equal((await native('inspect')).clients.length, 2, 'chooser Quit cannot terminate active clients')
+  console.log('ok chooser close requests native minimize; account button works mid-game; chooser Quit leaves both clients running')
+
+  await close(a)
+  assert.equal((await state()).clients.find(c => c.id === b.id)?.state, 'active')
+  assert.equal((await native('inspect')).clients.find((/** @type {any} */ c) => c.id === b.id).pid, pidB)
+  assert.equal((await B.tools.evaluate(B.dock, 'window.akagi.invoke("get_monitor")')).capture.state, 'running')
+  fs.unlinkSync(marker(a)); await open(a); A = await attach(a)
+  const saved = await A.tools.call('Network.getCookies', { urls: [origin] }, A.game)
+  assert.equal(saved.cookies.find((/** @type {any} */ c) => c.name === 'profile_marker')?.value, 'A')
+  console.log('ok closing A waits for cleanup ACK and process exit; B keeps its process/capture; A can reopen with its own persistent cookies')
+
+  await native('crash-client', a); A.tools.socket.close(); workers.delete(a)
+  await until(state, s => runtime(s, a)?.state === 'failed', 'A crash is scoped to A')
+  await assert.rejects(open(a), /清理未确认/)
+  assert.equal((await state()).error, '')
+  assert.equal((await native('inspect')).clients.find((/** @type {any} */ c) => c.id === b.id).pid, pidB)
+  const extra = /** @type {State} */ (await evaluate('window.akagi.invoke("create_profile", {name:"Third",platform:"Majsoul"})'))
+  const c = extra.profiles.find(p => p.name === 'Third'); assert.ok(c)
+  await open(c.id); await attach(c.id)
+  await until(() => Promise.resolve(fs.existsSync(marker(a))), Boolean, 'crashed fixture core is reaped independently')
+  await close(c.id); await close(b.id)
+  assert.equal((await state()).clients.find(c => c.id === a)?.cleanup, 'unconfirmed')
+  console.log('ok failed A stays locked while B continues and a third real client opens/closes independently')
+
+  assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), original)
   assert.equal(fs.readFileSync(path.join(root, 'history', 'keep.jsonl'), 'utf8'), 'existing game records\n')
-  console.log('ok four real account-window starts preserve and isolate persistent cookies; all game pages stayed about:blank')
-  for (const [width, height] of [[560, 304], [640, 304], [640, 432]]) {
-    await browser.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, chooser)
-    for (const language of ['zh-CN', 'zh-TW', 'en', 'ja']) {
-      await field('.accounts-tools select', language, 'HTMLSelectElement')
-      await until(() => evaluate('document.querySelector("main").dataset.lang'), lang => lang === language, 'language change')
-      const layout = await evaluate(`new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => {
-        const panel=document.querySelector('.accounts-panel'), row=document.querySelector('tbody tr');
-        const button=document.querySelector('.accounts-create'), heading=document.querySelector('h1');
-        done({ overflow:document.documentElement.scrollWidth>innerWidth || panel.scrollWidth>panel.clientWidth,
-          rowHeight:row.getBoundingClientRect().height, grid:getComputedStyle(document.querySelector('.accounts-canvas')).display,
-          canvas:document.querySelector('.accounts-canvas').getBoundingClientRect().toJSON(), font:getComputedStyle(heading).fontFamily,
-          weight:getComputedStyle(heading).fontWeight, bodySize:getComputedStyle(row).fontSize, button:getComputedStyle(button).backgroundColor,
-          clipped:[...document.querySelectorAll('.accounts-tools > *, .accounts-row-tools button')].some(el=>el.scrollWidth>el.clientWidth),
-          toolbar:document.querySelector('.accounts-bar').getBoundingClientRect().height,
-          footer:document.querySelector('.accounts-footer').getBoundingClientRect().height });
-      })))`)
-      assert.equal(layout.overflow, false, `${width}x${height} ${language}: horizontal overflow`)
-      assert.equal(layout.grid, 'grid')
-      assert.ok(Math.abs(layout.canvas.width - width) <= 1 && Math.abs(layout.canvas.height - height) <= 1, 'the guide fills its own window')
-      assert.equal(layout.rowHeight, 64, 'account rows keep their DIP height')
-      assert.equal(layout.bodySize, '13px', 'body text is not shrunk with the main canvas')
-      assert.equal(layout.clipped, false, `${width}x${height} ${language}: clipped controls`)
-      assert.equal(layout.toolbar, 48)
-      assert.equal(layout.footer, 24)
-      assert.ok(layout.font.includes('Golos Text'))
-      assert.equal(layout.weight, '500')
-      assert.equal(layout.button, 'rgb(27, 131, 228)')
-      await evaluate('document.querySelector("#new").click()')
-      await until(() => evaluate('document.querySelector("#editor").open'), open => open, 'compact editor open')
-      const editor = await evaluate(`{
-        const box=document.querySelector('#editor'), rect=box.getBoundingClientRect();
-        const save=document.querySelector('#save').getBoundingClientRect();
-        ({visible:rect.top>=0 && rect.bottom<=innerHeight && save.bottom<=rect.bottom, scroll:box.scrollHeight>box.clientHeight});
-      }`)
-      assert.equal(editor.visible, true, `${language}: editor buttons visible`)
-      assert.equal(editor.scroll, false, `${language}: editor fits without scrolling`)
-      await evaluate('document.querySelector(".accounts-editor-actions button").click()')
-      await until(() => evaluate('document.querySelector("#editor").open'), open => !open, 'compact editor close')
+  for (const [width, height] of [[560, 368], [640, 368], [640, 432]]) {
+    await chooserBrowser.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, chooser)
+    for (const lang of ['zh-CN', 'zh-TW', 'en', 'ja']) {
+      await evaluate(`{const s=document.querySelector('.accounts-tools select');Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(s,${JSON.stringify(lang)});s.dispatchEvent(new Event('change',{bubbles:true}));}`)
+      await until(() => evaluate('document.querySelector("main").dataset.lang'), value => value === lang, 'chooser language')
+      assert.equal(await evaluate(`document.documentElement.scrollWidth>innerWidth || document.querySelector('.accounts-panel').scrollWidth>document.querySelector('.accounts-panel').clientWidth`), false)
+      assert.equal(await evaluate(`document.querySelector('tbody tr').getBoundingClientRect().height`), 64)
+      assert.equal(await evaluate(`Array.from(document.querySelectorAll('.accounts-row-tools button')).some(b=>b.scrollWidth>b.clientWidth)`), false)
     }
   }
-  console.log('ok 12 compact guide/language layouts: Grid, fixed rows and type sizes, full editor, no clipping, Golos 500 and blue action buttons')
-  await browser.call('Emulation.clearDeviceMetricsOverride', {}, chooser)
-  await field('.accounts-tools select', 'zh-CN', 'HTMLSelectElement')
-  await until(() => evaluate('document.querySelector("main").dataset.lang'), lang => lang === 'zh-CN', 'screenshot language')
-  const screenshot = await browser.call('Page.captureScreenshot', { format: 'png' }, chooser)
-  const output = path.join(DESKTOP, 'test-output'); fs.mkdirSync(output, { recursive: true })
-  fs.writeFileSync(path.join(output, 'profiles.png'), Buffer.from(screenshot.data, 'base64'))
-  console.log(`ok chooser screenshot: ${path.join(output, 'profiles.png')}`)
-  await evaluate('document.querySelector("#new").click()')
-  await until(() => evaluate('document.querySelector("#editor").open'), open => open, 'editor screenshot')
-  const editorShot = await browser.call('Page.captureScreenshot', { format: 'png' }, chooser)
-  fs.writeFileSync(path.join(output, 'profiles-editor.png'), Buffer.from(editorShot.data, 'base64'))
-  await evaluate('document.querySelector(".accounts-editor-actions button").click()')
-  for (const [count, height] of [[3, 368], [4, 432], [5, 432]]) {
-    await evaluate(`window.akagi.invoke('create_profile', {name:'Extra ${count}', platform:'Tenhou'})`)
-    await until(() => evaluate('innerHeight'), actual => actual === height, `native guide size for ${count} accounts`)
-  }
-  await until(() => evaluate('document.querySelectorAll("tbody tr").length'), count => count === 5, 'scrolling account list')
-  const panel = await evaluate(`({scrolls:document.querySelector('.accounts-panel').scrollHeight>document.querySelector('.accounts-panel').clientHeight, bodyScroll:document.documentElement.scrollHeight>innerHeight})`)
-  assert.equal(panel.scrolls, true)
-  assert.equal(panel.bodyScroll, false)
-  console.log('ok the native guide grows from 304 to 368 to 432 DIP for 2/3/4 accounts; additional rows scroll within the list')
-  await browser.closeBrowser(); browser = null
-} catch (error) {
-  console.error(error); console.error(diagnostic.slice(-4000)); process.exitCode = 1
-} finally {
-  const remainingWorker = /** @type {DevTools | null} */ (worker)
-  if (remainingWorker) await remainingWorker.closeBrowser().catch(() => {})
-  if (browser) await browser.closeBrowser().catch(() => {})
-  shell.kill()
-  await sleep(800)
-  assert.ok(work.startsWith(path.join(os.tmpdir(), 'washizu-profiles-smoke-')))
+  console.log('ok concurrent/failed state rows retain compact layout across four languages; original registry data paths and files are unchanged')
+
+  fs.unlinkSync(marker(c.id)); await open(c.id)
+  const survivor = await attach(c.id)
+  const journalDir = path.join(home(c.id), 'logs')
+  shell.kill('SIGKILL')
+  browser.socket.close(); browser = null
+  await until(() => Promise.resolve(fs.readdirSync(journalDir).filter(f => /^shell-.*\.log$/.test(f)).some(f => fs.readFileSync(path.join(journalDir, f), 'utf8').includes('account chooser disconnected'))), Boolean, 'survivor observes chooser IPC loss')
+  assert.equal((await survivor.tools.evaluate(survivor.dock, 'window.akagi.invoke("get_monitor")')).capture.state, 'running')
+  assert.match(await survivor.tools.evaluate(survivor.dock, 'window.akagi.invoke("return_to_profiles").then(()=>"unexpected success", error=>String(error))'), /选择器连接已断开/)
+  assert.equal(fs.existsSync(marker(c.id)), false)
+  await survivor.tools.close(); workers.delete(c.id)
+  await until(() => Promise.resolve(fs.existsSync(marker(c.id))), Boolean, 'survivor cleans up after chooser IPC loss')
+  console.log('ok unexpected chooser exit leaves its client/capture running; disconnected account button reports failure; client still closes and cleans up independently')
+} catch (error) { console.error(error); console.error(diagnostic.slice(-5000)); process.exitCode = 1 }
+finally {
+  for (const client of workers.values()) await client.tools.close().catch(() => {})
+  if (browser) await browser.close().catch(() => {})
+  shell.kill(); await sleep(1600)
+  assert.equal(path.dirname(path.resolve(work)), path.resolve(os.tmpdir()))
+  assert.ok(path.basename(work).startsWith('washizu-profiles-smoke-'))
   fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 }

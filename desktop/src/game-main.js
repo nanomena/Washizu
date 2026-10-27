@@ -261,7 +261,10 @@ function openWindow(ready) {
   page.setWindowOpenHandler(() => ({ action: 'deny' }))
   page.on('will-navigate', (event, url) => { if (!url.startsWith(DOCK)) event.preventDefault() })
   page.on('render-process-gone', () => page.reload())
-  page.once('did-finish-load', () => { frame.show(); process.send?.({ type: 'profile-ready' }) })
+  page.once('did-finish-load', () => {
+    frame.show()
+    if (process.connected) process.send?.({ type: 'profile-ready' }, error => { if (error) note(`account chooser notification failed: ${error.message}`) })
+  })
   page.on('did-fail-load', (_event, _code, description, _url, isMainFrame) => {
     if (isMainFrame) fail('The interface could not be loaded.', `${description}\n${DOCK_FILES}`)
   })
@@ -795,12 +798,16 @@ async function prepare() {
     if (stoppingCore) return
     stoppingCore = true
     quitting = true
-    // The launcher must not open another account until the old core and its
-    // managed service have released their input and connection ownership.
+    if (process.connected) process.send?.({ type: 'profile-closing' }, error => { if (error) note(`account chooser notification failed: ${error.message}`) })
+    // Only this profile's slot waits for this core/model cleanup ACK.
     void core.stop().then(() => new Promise(resolve => {
       if (process.connected && process.send) process.send({ type: 'profile-released' }, () => resolve(undefined))
       else resolve(undefined)
-    })).then(() => { profileReleased = true; app.quit() }, error => { dialog.showErrorBox('Washizu 无法关闭当前档案', String(error)); app.exit(1) })
+    })).then(() => { profileReleased = true; app.quit() }, error => {
+      note(`profile cleanup failed: ${String(error)}`)
+      if (process.connected && process.send) process.send({ type: 'profile-shutdown-failed', error: String(error) }, () => app.exit(1))
+      else { dialog.showErrorBox('Washizu 无法关闭当前档案', String(error)); app.exit(1) }
+    })
   })
   process.on('message', message => {
     if (message && typeof message === 'object' && 'type' in message && message.type === 'focus') {
@@ -808,7 +815,8 @@ async function prepare() {
       window?.show(); window?.focus()
     }
   })
-  process.on('disconnect', () => app.quit())
+  // Losing the chooser must not terminate every otherwise-independent game.
+  process.on('disconnect', () => note('account chooser disconnected; this client continues independently'))
 
   // The user's hand on the game's picture, when the game is drawn offscreen:
   // sent as it happens, answered with nothing.
@@ -850,7 +858,7 @@ async function start() {
     ...(process.platform === 'darwin' ? [/** @type {Electron.MenuItemConstructorOptions} */ ({ role: 'appMenu' })] : []),
     { label: '账号档案', submenu: [
       { label: `当前：${PROFILE.name}`, enabled: false },
-      { label: '返回账号档案…', accelerator: 'CmdOrCtrl+Shift+P', click: () => void returnToProfiles() },
+      { label: '显示账号选择器…', accelerator: 'CmdOrCtrl+Shift+P', click: () => void returnToProfiles().catch(error => note(String(error))) },
       { type: 'separator' }, { role: 'quit', label: '关闭当前档案' },
     ] },
     { label: '关于', submenu: [{ label: '关于 Washizu', click: () => void dialog.showMessageBox({ type: 'info', title: '关于 Washizu', message: 'Washizu', detail: '基于 Shinkuan 的 Akagi v3。\nApache-2.0 许可证；版权与第三方声明见随附的 LICENSE.txt 和 NOTICE。' }) }] },
@@ -883,19 +891,10 @@ async function start() {
   }
 }
 
-/** Returning closes the complete account runtime. A live game is never
- * detached into the next account's state. Lobby reservations are client-owned.
- */
+/** Show the shared chooser without stopping capture, core, model or game. */
 async function returnToProfiles() {
-  try {
-    const snapshot = /** @type {{ game_ended: boolean }} */ (await running().call('get_monitor'))
-    if (!snapshot.game_ended) {
-      await dialog.showMessageBox({ type: 'info', title: '当前对局仍在进行', message: '请先完成当前对局，再返回账号档案。' })
-      return
-    }
-    const choice = await dialog.showMessageBox({ type: 'question', title: '返回账号档案', message: '关闭当前平台窗口并返回账号档案？', detail: '登录状态、设置和记录会保留。请先在游戏内取消匹配预约。', buttons: ['返回账号档案', '取消'], defaultId: 1, cancelId: 1 })
-    if (choice.response === 0) app.quit()
-  } catch (error) { await dialog.showMessageBox({ type: 'error', title: '无法返回账号档案', message: String(error) }) }
+  if (!process.connected || !process.send) throw new Error('账号选择器连接已断开，请重新打开 Washizu 选择器。')
+  await new Promise((resolve, reject) => process.send?.({ type: 'profile-show-chooser' }, error => error ? reject(error) : resolve(undefined)))
 }
 
 fs.mkdirSync(DATA, { recursive: true })

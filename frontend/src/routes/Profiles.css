@@ -28,11 +28,12 @@
 .accounts-meta { display: flex; gap: 8px; color: var(--m-dim); font-size: 11px; line-height: 18px; white-space: nowrap; overflow: hidden; }
 .accounts-meta > span { overflow: hidden; text-overflow: ellipsis; }
 .accounts-original { flex: none; }
+.accounts-client { color: var(--m-live); }.accounts-client[data-error="true"] { color: var(--m-bad); }
 .accounts-row-tools { justify-content: flex-end; gap: 8px; }
 .accounts .accounts-action-heading { text-align: right; padding-right: 16px; }
 .accounts-row-tools .mbtn { width: 56px; height: 32px; padding: 0; font-size: 12px; }
 .accounts .accounts-empty { color: var(--m-dim); text-align: center; padding: 28px 16px; }
-.accounts-footer { color: var(--m-dim); font-size: 11px; }
+.accounts-footer { color: var(--m-dim); font-size: 11px; gap: 16px; }.accounts-footer > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .accounts select, .accounts input { font: inherit; color: var(--m-ink); border: 1px solid var(--m-line); border-radius: 6px; padding: 6px 8px; background: var(--m-panel); }
 .accounts :is(input, select):focus-visible { outline: 2px solid var(--m-live); outline-offset: 2px; }
 .accounts-editor { color: var(--m-ink); background: var(--m-panel); border: 1px solid var(--m-line); border-radius: 10px; box-shadow: var(--m-shadow); width: 384px; max-height: calc(100% - 24px); padding: 20px; margin: auto; }

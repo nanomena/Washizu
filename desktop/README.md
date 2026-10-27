@@ -1,27 +1,35 @@
 # Washizu desktop
 
-The Electron application: an account chooser, then an account's game view and
-dock, with its own local DevTools port.
+The Electron application: a shared account chooser and independent account
+clients, each with its own game view, dock and local DevTools port.
 
 ## Account profiles
 
 Opening Washizu shows saved accounts. Create a Mahjong Soul or Tenhou profile,
-or rename and open one already saved. The game window's folder button and
-Accounts menu return to the chooser after the current game has ended. Cancel
-any lobby reservation in the game before returning. Closing an account waits
-for its core to stop and acknowledge managed-service cleanup. The account
-process then acknowledges release to the chooser. Another account cannot open
-until both that acknowledgement and the old process's close have arrived.
-An abnormal exit or missing cleanup acknowledgement keeps the slot locked
-and displays the failure; it is never treated as successful release.
+or rename and open one already saved. Multiple different profiles can run
+simultaneously. Opening a starting or active profile again focuses its existing
+client. The game window's folder button and Accounts menu show the shared
+chooser during a game without stopping that client. Closing the chooser while
+clients run minimizes it; Quit is prevented until those clients have closed.
+If the chooser process is lost, its clients continue independently.
+
+Closing an account waits for its core to stop and acknowledge managed-service
+cleanup. The account process then acknowledges release to the chooser. Only
+that profile stays occupied until both the acknowledgement and the process's
+close arrive. An abnormal exit or missing cleanup acknowledgement locks only
+that profile and displays the failure. Other profiles remain usable. A proven
+failure to start can be retried. With no live clients, the chooser can exit
+even when a failed profile remains locked.
 The chooser itself starts no core, model, game page or network connection.
 
 `--data` names the account library root. Its `profiles.json` stores stable ids,
 display names, platforms and the last opening time. Fresh profiles live under
 `profiles/<id>/`, each with its own configuration, `browser/`, history, logs,
 window state and bot settings. Renaming a profile never changes its directory.
-Only one account window is enabled; `ProfileSession` keeps that ownership in
-one place for future multi-window work.
+`ProfileSessions` owns a map keyed by profile id, with explicit `starting`,
+`active`, `closing` and `failed` states. The chooser's list/event protocol is
+`{revision, profiles, clients, error}`; runtime client states are separate from
+the unchanged persistent registry schema.
 
 An existing home is adopted **in place** as the first profile. Its browser,
 Local State, cookies, bot settings and history are never moved, copied or
@@ -49,8 +57,8 @@ by source development.
 
 The chooser is another view of the same React/TypeScript frontend and uses
 its existing fonts, palette, buttons and four-language text catalog. The chooser
-is a small, non-resizable, always-on-top guide that hides when the account's
-main window is ready and returns after that window closes. It has no game
+is a small, non-resizable, always-on-top guide that stays open when clients
+start and shows each profile's runtime status and failure. It has no game
 canvas or page zoom: body text remains 13 DIP and headings use Golos Text 500
 with the same system CJK fallback as the monitor.
 
@@ -73,11 +81,15 @@ xvfb-run -a npm run smoke:profiles
 xvfb-run -a npm run smoke
 ```
 
-Both smoke tests use a fake core and temporary data. The account smoke opens
-four real Electron account windows with game pages kept at `about:blank`,
-checks independent persistent cookies on an offline `.invalid` origin, and
-waits for a delayed fake core to finish before returning to the chooser. It
-writes `desktop/test-output/profiles.png`; it never visits a game site.
+Both smoke tests use a fake core and temporary data. The profile smoke opens
+multiple real Electron account clients with game pages kept at `about:blank`,
+checks independent persistent cookies on an offline `.invalid` origin,
+chooser close/Quit and mid-game account-button behavior, and the cleanup-ACK
+plus process-close boundary. It crashes one fixture client to verify that
+only its profile locks while other clients continue or open independently.
+Four-language compact layouts are checked without visiting a game site.
+On bare Xvfb, which has no window manager, the fixture observes the actual
+native minimize request rather than claiming OS iconification was verified.
 The real-process service shutdown regressions and commands are documented in
 [`src/bot/SERVICE-LIFETIME.md`](../src/bot/SERVICE-LIFETIME.md).
 
