@@ -38,7 +38,7 @@ pub struct Hand {
     at: Option<Point>,
     /// What the bot expects of the seat's next turn, and when the pointer
     /// next looks at it. `None` on the seat's own turn and outside a hand.
-    lean: Option<Lean>,
+    lean: Option<crate::bot::forecast::ForecastLean>,
     glance_at: Option<Instant>,
     /// When our draw came, the bot expected to throw it: a tsumogiri then
     /// lifts the pointer straight up off the hand rather than taking it to
@@ -221,11 +221,49 @@ impl Hand {
 
     /// A new lean from the bot. The pointer keeps its own pace; only a
     /// changed mind brings its next look forward, by a reaction time.
-    pub fn take_lean(&mut self, lean: Lean) {
-        let changed = self.lean.as_ref().and_then(|l| l.first()) != lean.first();
+    pub fn take_lean(&mut self, lean: crate::bot::forecast::ForecastLean) {
+        if !lean.is_live() {
+            return;
+        }
+        if self.lean.as_ref().is_some_and(|old| old.key != lean.key) {
+            self.drop_forecast_looks();
+        }
+        let changed = self.live_lean().and_then(|l| l.first()) != lean.lean.first();
         self.lean = Some(lean);
         if let (true, Some(at)) = (changed, self.glance_at) {
             self.glance_at = Some(at.min(after_a_reaction()));
+        }
+    }
+
+    fn live_lean(&self) -> Option<&Lean> {
+        self.lean
+            .as_ref()
+            .filter(|forecast| forecast.is_live())
+            .map(|forecast| &forecast.lean)
+    }
+
+    pub fn forecast_current(&self, context: Option<crate::monitor::DecisionContext>) -> bool {
+        self.lean
+            .as_ref()
+            .is_some_and(|forecast| forecast.is_current(context))
+    }
+
+    pub fn retain_current_forecast(&mut self, context: Option<crate::monitor::DecisionContext>) {
+        if self.lean.is_some() && !self.forecast_current(context) {
+            self.lean = None;
+            self.looked_at = None;
+            self.drop_forecast_looks();
+        }
+    }
+
+    fn drop_forecast_looks(&mut self) {
+        self.queue.drop_looks();
+        if self
+            .moving
+            .as_ref()
+            .is_some_and(|moving| matches!(moving.motion.errand, Errand::Look(_)))
+        {
+            self.moving = None;
         }
     }
 
@@ -234,7 +272,7 @@ impl Hand {
     /// longer kept clear.
     pub fn drew(&mut self) {
         self.expected_tsumogiri =
-            self.lean.as_ref().and_then(|lean| lean.first()) == Some(Spot::Draw);
+            self.live_lean().and_then(|lean| lean.first()) == Some(Spot::Draw);
         self.sight.draw_slot = None;
     }
 
@@ -254,7 +292,7 @@ impl Hand {
     pub fn stop_glances(&mut self) {
         self.glance_at = None;
         self.lean = None;
-        self.queue.drop_looks();
+        self.drop_forecast_looks();
     }
 
     /// The spot this look goes to, if it goes anywhere (see
@@ -262,10 +300,9 @@ impl Hand {
     pub fn next_glance(&mut self) -> Option<Spot> {
         let mut rng = rand::rng();
         let spot = self
-            .lean
-            .as_ref()
+            .live_lean()
             .and_then(|lean| lean::glance(lean, &mut rng));
-        let wait = lean::wait_ms(self.lean.as_ref(), &mut rng);
+        let wait = lean::wait_ms(self.live_lean(), &mut rng);
         self.glance_at = Some(Instant::now() + Duration::from_millis(u64::from(wait)));
         spot
     }
@@ -273,6 +310,9 @@ impl Hand {
     /// Look at `spot` of a hand at rest holding `tehai`, on the canvas at
     /// `rect`: the look waits its turn in the queue.
     pub fn look_at(&mut self, mut spot: Spot, tehai: &[String], rect: CanvasRect) {
+        if self.live_lean().is_none() {
+            return;
+        }
         self.sync_with_user();
         let pointer = self.at.map(|(x, y)| rect.norm(x, y));
         let leg = {
@@ -286,7 +326,7 @@ impl Hand {
             };
             // Weighing two tiles is a look between neighbours: one far from
             // the likeliest is not looked at, the likeliest is.
-            let first = self.lean.as_ref().and_then(|lean| lean.first());
+            let first = self.live_lean().and_then(|lean| lean.first());
             if let Some(likeliest) = first.filter(|main| *main != spot) {
                 if let Some(main) = point(&likeliest, &mut rng) {
                     if (at.0 - main.0).abs() > LOOK_REACH {
@@ -414,6 +454,9 @@ impl Hand {
     /// start of the next waiting. Nothing of ours moves while the user's hand
     /// is on the mouse.
     pub async fn step(&mut self) {
+        if self.live_lean().is_none() {
+            self.drop_forecast_looks();
+        }
         if crate::autoplay::cdp_input::user_active() {
             if let Some(moving) = self.moving.take() {
                 info!(
@@ -493,7 +536,12 @@ impl Hand {
         } else {
             along(moving.from, moving.motion.to, moving.motion.bend, t)
         };
-        if !self.send(point).await {
+        let forecast = if matches!(moving.motion.errand, Errand::Look(_)) {
+            self.lean.clone()
+        } else {
+            None
+        };
+        if !self.send_for(point, forecast.as_ref()).await {
             self.moving = None;
             return;
         }
@@ -534,6 +582,14 @@ impl Hand {
         let Some(moving) = self.moving.take() else {
             return;
         };
+        if matches!(moving.motion.errand, Errand::Look(_)) && self.live_lean().is_none() {
+            return;
+        }
+        let forecast = if matches!(moving.motion.errand, Errand::Look(_)) {
+            self.lean.clone()
+        } else {
+            None
+        };
         // Cut short, the pointer is on neither what it left nor what it went for.
         self.looked_at = None;
         let (at, then) = moving.last;
@@ -567,7 +623,7 @@ impl Hand {
             } else {
                 queue::braking(at, stop, u)
             };
-            if !self.send(point).await {
+            if !self.send_for(point, forecast.as_ref()).await {
                 break;
             }
             self.at = Some(point);
@@ -584,7 +640,18 @@ impl Hand {
 
     /// Put the pointer at `point` in one frame. False when it could not be.
     async fn send(&self, point: Point) -> bool {
+        self.send_for(point, None).await
+    }
+
+    async fn send_for(
+        &self,
+        point: Point,
+        forecast: Option<&crate::bot::forecast::ForecastLean>,
+    ) -> bool {
         let page_guard = self.ctx.page.read().await;
+        if forecast.is_some_and(|forecast| !forecast.is_live()) {
+            return false;
+        }
         let Some(page) = page_guard.as_ref() else {
             return false;
         };

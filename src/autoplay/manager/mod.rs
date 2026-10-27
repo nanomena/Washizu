@@ -162,6 +162,8 @@ impl AutoplayManager {
 
         loop {
             self.sync_ui().await;
+            let context = self.current_context();
+            self.hand.retain_current_forecast(context);
             // The pointer's own pace between turns, apart from any event.
             let glance_at = self.hand.glance_due();
             // And its presses between decisions.
@@ -185,7 +187,10 @@ impl AutoplayManager {
                     self.table_act().await;
                 }
                 msg = lean_rx.recv() => match msg {
-                    Ok(lean) => self.hand.take_lean(lean),
+                    Ok(lean) => {
+                        let requested = { let cfg = self.cfg.read().await; cfg.monitor.pointer_lean && cfg.autoplay.enabled };
+                        if requested && lean.is_current(self.current_context()) { self.hand.take_lean(lean); }
+                    },
                     Err(RecvError::Lagged(_)) => {}
                     Err(RecvError::Closed) => return Ok(()),
                 },
@@ -421,6 +426,8 @@ impl AutoplayManager {
             self.hand.stop_glances();
             return;
         }
+        let context = self.current_context();
+        self.hand.retain_current_forecast(context);
         let Some(spot) = self.hand.next_glance() else {
             return;
         };
@@ -448,6 +455,9 @@ impl AutoplayManager {
         let Some(rect) = self.canvas.resolve(&self.ctx).await else {
             return;
         };
+        if !self.hand.forecast_current(self.current_context()) {
+            return;
+        }
         // Where its next draw lands is kept clear until the tile is there.
         self.hand.saw_hand(tehai.len(), rect);
         self.hand.look_at(spot, &tehai, rect);

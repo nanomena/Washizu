@@ -448,3 +448,33 @@ original request as positioned responses. Direct `delivered` is separate from
 positioned acknowledged `through`; unavailable direct responses never report
 ready. Incomplete executable riichi is withheld, without speculative feeding
 or suppressing its later real echo.
+
+## Optional forecast channel
+
+A positioned bot can declare `[forecast] entry = "forecast.py"`. This lightweight
+JSONL relay uses the bot's existing Python environment and resolved settings;
+it connects to the existing model service, without creating a second model.
+Formal event requests never compute forecasts. Their replies may reference a
+committed snapshot in `meta.forecast = {session, through, position}`, where
+`through` must equal the validated `meta.delivery.through` and the actual
+delivered prefix. `session` is an opaque reference owned by the formal connection.
+
+The separate relay receives `{session, through, position}` and returns
+`{type:"forecast", session, through, position, status:"ready"|"obsolete"|"unavailable",
+lean?:{lines, options}, reason?:string}`. The core checks the result against its
+original request before considering it. There is one request in flight and
+only the latest pending snapshot. Every real context change immediately revokes
+the old result; old stdout is consumed without rebinding it to a new request.
+
+The managed bot owns this relay. Its close cancels pending work and reaps only
+its child. Formal recovery revokes old session references; optional transport
+failures never reset the formal runner or alter decision-source health. Forecasts
+only supply pointer looks, with context/owner checks at receipt and execution.
+Runners without this channel report unsupported instead of peeking on the formal
+pipe. `bot::forecast::subscribe_status()` exposes the separate serializable
+`ForecastStatus` (`disabled`, `unsupported`, `waiting`, `running`, `ready`, or
+`unavailable`); opaque sessions stay out of this public status.
+After a committed action, `meta.forecast_error` reports snapshot capture failure
+only. The core consumes this internal field into forecast status/notification,
+preserving the formal receipt, action and health. Wire identities and status
+payloads reject unknown fields; unavailable results require an explicit reason.
