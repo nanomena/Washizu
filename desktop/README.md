@@ -43,9 +43,11 @@ Do not use production data for development or tests.
 
 New profiles do not copy another account's bot settings or credentials.
 Mahjong Soul starts with the core's built-in bot and autoplay off. Tenhou
-starts with the bot and autoplay off: this change provides its separate
-login, capture and records, while miai rule/reward/settlement qualification
-remains separate work. The original account retains its configured miai.
+uses the `/3/` Web client and new Tenhou profiles keep the bot and autoplay
+off. Ordinary four-player miai service qualification is complete; actual
+Web3 automated games and consecutive-game flow still need online acceptance.
+Separate login, capture and records do not imply that online automation has
+been accepted. The original account retains its configured miai.
 
 `main.js` chooses the launcher or account process. `profile-main.js` owns the
 chooser and starts an account with an internal `--profile=<id>` argument;
@@ -59,7 +61,7 @@ by source development.
 
 The chooser is another view of the same React/TypeScript frontend and uses
 its existing fonts, palette, buttons and four-language text catalog. The chooser
-is a small, non-resizable, always-on-top guide that stays open when clients
+is a small, non-resizable guide that stays open when clients
 start and shows each profile's runtime status and failure. It has no game
 canvas or page zoom: body text remains 13 DIP and headings use Golos Text 500
 with the same system CJK fallback as the monitor.
