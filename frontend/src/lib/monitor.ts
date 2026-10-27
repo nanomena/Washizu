@@ -31,7 +31,7 @@ export type AutoplayLevel = 'off' | 'play' | 'continue'
 export const AUTOPLAY_LEVELS: readonly AutoplayLevel[] = ['off', 'play', 'continue']
 export function levelOf(s: MonitorSnapshot | null, options: MonitorConfig): AutoplayLevel | null {
   if (!s) return null
-  return !s.autoplay_enabled ? 'off' : options.auto_continue ? 'continue' : 'play'
+  return !s.autoplay_enabled ? 'off' : options.platform !== 'Tenhou' && options.auto_continue ? 'continue' : 'play'
 }
 /** What a level does, in a line. */
 export function levelAbout(level: AutoplayLevel): string {

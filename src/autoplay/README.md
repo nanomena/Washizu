@@ -136,15 +136,21 @@ Button presses additionally poll for their element, because the window in
 which it exists is bounded by animation on one side and resolution on the
 other.
 
-Both action steps are dropped when the decision window they were planned
-against is no longer the live one (its `opened_at` is its identity): a
-button press because the client would no longer be offering it anyway, and
-a discard because the client's handler is *not* guarded — it applies the
-tile to the local board whether or not it is our turn, so a stale call
-desyncs the board rather than merely wasting a frame. The one exemption is
-the riichi tile: the declaration press itself replaces the window (the
-server acks with `REACH step=1` and the bridge re-opens it), so for that
-plan the moved window is expected, and the tile is still owed.
+`tenhou/input.rs` owns the lifetime of one already selected plan. Immediately
+before each button/discard dispatch, it requires the original request/window,
+unchanged physical hand, capture session, settings revision and manual-input
+revision, with automation still enabled. Capture retirement clears both
+platform window slots. A changed fact cancels the plan even if the user's
+mouse has since come to rest. This module neither chooses a policy nor retries
+an uncertain dispatch. The source coordinator remains the sole policy owner.
+
+The only cross-window continuation is the discard after a riichi button this
+plan actually dispatched. It accepts the original window or the next real
+own-seat REACH echo, in the same game/round at exactly the next event sequence,
+with riichi declared and the unchanged physical hand. An opponent's echo,
+another intervening event or a replacement session cannot grant permission.
+A bridge-ahead-of-tracker echo waits only within the original known clock's
+upper bound; it never attaches an old response to a newly sampled request.
 
 **Riichi** is one plan, not two: the declaration button and then the tile
 the bot named on its `Reach`. The client takes them as separate inputs and
@@ -152,19 +158,10 @@ sits on its clock until it has both, and nothing prompts a second bot
 decision here — the `reach` the server echoes back is our own action coming
 home, not a new question.
 
-`Reach.pai` is a V3 extension; mjai itself has no such field, so a correct
-third-party mjai bot declares riichi as a bare `reach` with no tile. The
-tile is resolved **before** the plan is built, in `bot::manager`: when a
-bot's reaction is a bare `reach` and autoplay is on, the manager feeds the
-same runner a synthetic `reach` and reads back the declaring `dahai` —
-exactly the declare → echo → discard shape mjai prescribes — then fills
-`Reach.pai`. The built-in native bot does this internally already; the
-manager generalises it to any runner. The follow-up is gated on autoplay
-because it mutates a stateful bot as though riichi were declared, which is
-only safe when we then commit that declaration; in analysis mode the human
-may decline. The bridge's later own-seat `reach` echo is dropped from the
-runner's view (`drop_next_own_reach`) so a stateful bot never applies
-`reach` twice. See issue #257.
+`Reach.pai` is a V3 extension. The primary miai and native standby resolve
+their declaring tile internally before returning a combined response. A
+third-party bare `reach` is declined as a whole: no synthetic declaration is
+fed to a stateful runner, and real bridge echoes are never suppressed.
 
 If that resolution fails (the bot answers with something other than a
 dahai, or the follow-up errors), the plan still sees a bare `reach` and
@@ -192,9 +189,17 @@ current decision window — not a sleep length. The caller subtracts what
 the window has already consumed before emitting the `Step::Sleep`:
 `majsoul::push_pre_delay` deducts network and bot inference time
 from the server's own budget, plus the upcoming click sequence's duration.
-`tenhou::push_pre_delay` has neither to deduct — Tenhou publishes no
-per-window budget and nothing is being clicked — so the target *is* the
-sleep.
+`tenhou::push_pre_delay` starts its delay after the visible client clock. Its
+budget uses the known standard clock's base time; the per-hand bank cap is
+not treated as an observed remaining balance. Unknown/private clocks receive
+no automatic input permit. Current primary-model qualification covers normal
+speed four-player red-five/open-tanyao ranked tables; fast rules are explicitly
+refused by that adapter. Live real-account input remains a separate check.
+
+`desktop/tests/tenhou-client-smoke.mjs` boots the current official client with
+the actual core's response interception, in a hidden temporary browser, with
+bot/automatic input disabled. It checks that the discard handler is reachable
+and cleanup acknowledged; it performs no login or gameplay action.
 
 Layers, in order:
 

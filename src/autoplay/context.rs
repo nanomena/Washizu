@@ -61,6 +61,13 @@ impl AutoplayContext {
 
     pub fn invalidate_ui(&self) {
         self.ui_session.fetch_add(1, Ordering::SeqCst);
+        // Both slots belong to the retired capture/tab session. A late bot
+        // answer must not bind to a stale window after the page changes.
+        *self.time_budget.write().expect("budget lock poisoned") = None;
+        *self
+            .tenhou_state
+            .write()
+            .expect("Tenhou state lock poisoned") = None;
     }
 
     pub fn ui_session(&self) -> u64 {
@@ -116,6 +123,33 @@ impl CanvasRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retiring_a_capture_clears_both_platform_windows() {
+        use crate::autoplay::budget::{BudgetSource, TimeBudget};
+        use crate::autoplay::tenhou_state::{DecisionWindow, TenhouState, TurnClock};
+        let context = AutoplayContext::new();
+        let opened_at = std::time::Instant::now();
+        *context.time_budget.write().unwrap() = Some(TimeBudget {
+            fixed_ms: 5_000,
+            add_ms: 10_000,
+            opened_at,
+            source: BudgetSource::DealTile,
+        });
+        *context.tenhou_state.write().unwrap() = Some(TenhouState {
+            window: Some(DecisionWindow {
+                ops: 0,
+                opened_at,
+                clock: Some(TurnClock::NORMAL),
+            }),
+            ..Default::default()
+        });
+        let session = context.ui_session();
+        context.invalidate_ui();
+        assert_ne!(context.ui_session(), session);
+        assert!(context.time_budget.read().unwrap().is_none());
+        assert!(context.tenhou_state.read().unwrap().is_none());
+    }
 
     #[test]
     fn pixel_translation_centre() {

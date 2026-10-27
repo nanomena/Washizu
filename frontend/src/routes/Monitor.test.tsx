@@ -88,18 +88,21 @@ describe('monitor user states', () => {
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'return_to_profiles')).toBe(true))
   })
 
-  it('names the Tenhou profile and keeps unqualified automatic input unavailable', async () => {
+  it('offers Tenhou play without promising automatic rematching', async () => {
     fixture.options = { always_on_top: false, platform: 'Tenhou', profile_name: '天凤主号' }
+    fixture.snapshot!.autoplay_enabled = false
     render(<Monitor />)
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
     fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
-    expect(screen.getByText('天凤档案支持独立登录、保存设置与记录。自动操作尚未完成验证，当前由你手动操作。')).toBeTruthy()
+    expect(screen.getByText('天凤四人普通速度段位场：显示建议或自动打牌；对局由你开始。')).toBeTruthy()
+    expect(screen.queryByRole('radio', { name: '连战' })).toBeNull()
+    fireEvent.click(screen.getAllByRole('radio', { name: '打牌' })[0])
+    await waitFor(() => expect(fixture.calls.some(([cmd, params]) => cmd === 'set_monitor_autoplay' && (params as {enabled?: boolean}).enabled === true)).toBe(true))
     fireEvent.click(screen.getByRole('button', { name: '应用' }))
     expect(screen.getByText('天凤主号')).toBeTruthy()
     expect(screen.getByText('天凤')).toBeTruthy()
     expect(screen.getByText('Washizu')).toBeTruthy()
-    expect(fixture.calls.some(([cmd]) => cmd === 'set_monitor_autoplay')).toBe(false)
 
   })
 

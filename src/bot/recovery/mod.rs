@@ -432,7 +432,7 @@ fn inference_deadline(
                 )
         }),
         Some(InputWindow::Tenhou(w)) => Some({
-            crate::autoplay::tenhou_state::TURN_BASE_MS.saturating_sub(
+            w.clock.map_or(0, |clock| clock.fixed_ms).saturating_sub(
                 u32::try_from(now.saturating_duration_since(w.opened_at).as_millis())
                     .unwrap_or(u32::MAX),
             )

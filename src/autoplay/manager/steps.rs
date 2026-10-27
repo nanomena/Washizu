@@ -5,6 +5,7 @@ use super::AutoplayManager;
 use crate::autoplay::context::CanvasRect;
 use crate::autoplay::platform::{PlanResult, Step};
 use crate::autoplay::pointer::{Approach, Touch};
+use crate::autoplay::tenhou::input::{Effect, Facts, Owner, Run, Verdict};
 use crate::schema::MjaiEvent;
 use chromiumoxide::page::Page;
 use std::time::{Duration, Instant};
@@ -27,6 +28,18 @@ impl AutoplayManager {
         // tile go out in one plan (the declaring discard is pre-resolved onto
         // `Reach.pai`), so the reach action alone identifies it.
         let declares_reach = matches!(action, MjaiEvent::Reach { .. });
+        let mut tenhou = if decision.platform == crate::config::Platform::Tenhou {
+            let Some(state) = decision.tenhou_state.as_ref() else {
+                return false;
+            };
+            let Some(run) = Run::new(decision.request, state, action, decision.input_owner) else {
+                warn!("autoplay: no original Tenhou input permit");
+                return false;
+            };
+            Some(run)
+        } else {
+            None
+        };
         let mut clicked = false;
         let mut click_index = 0;
         for step in &plan.steps {
@@ -53,12 +66,9 @@ impl AutoplayManager {
                     }
                 }
                 Step::DomClick { selectors, label } => {
-                    if self.tenhou_window_moved(decision.planned_window) {
-                        warn!(
-                            "autoplay: decision window closed mid-delay — dropping stale {label}"
-                        );
+                    let Some(run) = tenhou.as_mut() else {
                         return false;
-                    }
+                    };
                     let page_guard = self.ctx.page.read().await;
                     let Some(page) = page_guard.as_ref() else {
                         warn!("autoplay: no page handle — cannot press {label}");
@@ -74,33 +84,31 @@ impl AutoplayManager {
                     // observable from here — a single look loses the race
                     // either way. Wait for the element instead, bounded by
                     // what is left of the turn.
-                    if !press_when_offered(page, selectors, label).await {
+                    if !self.press_when_offered(page, selectors, label, run).await {
                         return false;
                     }
                 }
                 Step::Discard { tile_index } => {
-                    // The client's discard handler applies locally whether or
-                    // not it is our turn — its own UI only reaches it while
-                    // one is — so a stale call desyncs the board, not just
-                    // wastes a frame. The riichi plan is the exception: its
-                    // own button press replaces the window (the server acks
-                    // the declaration and the bridge re-opens it), and the
-                    // tile it owes is still this plan's to throw.
-                    if discard_needs_window_guard(action)
-                        && self.tenhou_window_moved(decision.planned_window)
-                    {
-                        warn!(
-                            "autoplay: decision window closed mid-delay — dropping stale discard"
-                        );
+                    let Some(run) = tenhou.as_mut() else {
                         return false;
-                    }
+                    };
                     let page_guard = self.ctx.page.read().await;
                     let Some(page) = page_guard.as_ref() else {
                         warn!("autoplay: no page handle — cannot discard");
                         return false;
                     };
+                    if !self
+                        .tenhou_effect_current(run, Effect::Discard(*tile_index))
+                        .await
+                    {
+                        warn!("autoplay: withholding obsolete Tenhou discard");
+                        return false;
+                    }
                     match crate::autoplay::cdp_input::discard_tile(page, *tile_index).await {
-                        Ok(true) => info!("autoplay: discarded tile index {tile_index}"),
+                        Ok(true) => {
+                            run.issued(Effect::Discard(*tile_index));
+                            info!("autoplay: discarded tile index {tile_index}");
+                        }
                         Ok(false) => {
                             warn!(
                                 "autoplay: the client script was not instrumented, so its \
@@ -172,47 +180,6 @@ impl AutoplayManager {
         }
         true
     }
-
-    /// Has the Tenhou decision window been replaced since we planned?
-    ///
-    /// The delay model sleeps for seconds, and a window can resolve in that
-    /// time — a claim we declined, or simply the next player acting. Acting on
-    /// the stale plan then answers a decision that is already over. The
-    /// window's `opened_at` is its identity, so a slot no longer holding the
-    /// same instant means what we planned for is gone.
-    ///
-    /// `None` planned means we never had a window to go stale (other
-    /// platforms), so nothing is dropped.
-    fn tenhou_window_moved(
-        &self,
-        planned: Option<crate::autoplay::tenhou_state::DecisionWindow>,
-    ) -> bool {
-        let Some(planned) = planned else {
-            return false;
-        };
-        let current = self
-            .ctx
-            .tenhou_state
-            .read()
-            .ok()
-            .and_then(|g| g.as_ref().and_then(|s| s.window));
-        current.map(|w| w.opened_at) != Some(planned.opened_at)
-    }
-}
-
-/// Does a `Step::Discard` for this action require the decision window it
-/// was planned against to still be open?
-///
-/// Everything but a riichi does: the window's identity is how a discard that
-/// out-waited its turn — the client timed out and threw for us, or a human
-/// beat the bot to it — is told apart from one that is still owed. A riichi
-/// plan cannot use that test, because passing its own declaration button is
-/// what replaces the window (the server acks with `REACH step=1` and the
-/// bridge re-opens it for the tile), so the move is expected rather than
-/// evidence of staleness — and the tile must still go out or the client sits
-/// on its clock and times the hand out.
-fn discard_needs_window_guard(action: &MjaiEvent) -> bool {
-    !matches!(action, MjaiEvent::Reach { .. })
 }
 
 /// Wait until the client is taking input, or give up.
@@ -265,102 +232,81 @@ async fn await_turn_ready(page: &Page, timeout_ms: u32) -> bool {
 /// successfully three times and missed four, all with the client offering
 /// nothing at the instant we looked. Polling turns that race into a
 /// bounded wait.
-async fn press_when_offered(page: &Page, selectors: &[String], label: &str) -> bool {
-    const POLL_INTERVAL: Duration = Duration::from_millis(120);
-    const WAIT_BUDGET: Duration = Duration::from_millis(2_400);
+impl AutoplayManager {
+    async fn tenhou_input_facts(&self) -> Facts {
+        let cfg = self.cfg.read().await;
+        let snapshot = self.monitor.snapshot();
+        let state = self.ctx.tenhou_state.read().ok().and_then(|s| s.clone());
+        Facts {
+            context: (snapshot.sync_error.is_none()
+                && !snapshot.round_ended
+                && !snapshot.game_ended)
+                .then_some(snapshot.context),
+            state,
+            owner: Owner {
+                session: self.ctx.ui_session(),
+                settings: self.ctx.ui_settings(),
+                user: crate::autoplay::cdp_input::user_revision(),
+            },
+            enabled: cfg.autoplay.enabled && cfg.platform.kind == crate::config::Platform::Tenhou,
+            manual: crate::autoplay::cdp_input::user_active(),
+            latest: snapshot.events.back().map(|event| event.event.clone()),
+        }
+    }
 
-    let deadline = Instant::now() + WAIT_BUDGET;
-    let mut attempts = 0u32;
-    loop {
-        attempts += 1;
-        match crate::autoplay::cdp_input::click_dom(page, selectors).await {
-            Ok(true) => {
-                info!("autoplay: pressed {label} ({selectors:?}) after {attempts} look(s)");
-                return true;
+    async fn tenhou_effect_current(&self, run: &Run, effect: Effect) -> bool {
+        loop {
+            match run.inspect(effect, &self.tenhou_input_facts().await) {
+                Verdict::Allowed => return true,
+                Verdict::Obsolete => return false,
+                Verdict::AwaitingEcho if Instant::now() < run.wait_deadline() => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                Verdict::AwaitingEcho => return false,
             }
-            Ok(false) => {}
-            Err(e) => {
-                warn!("autoplay: pressing {label} failed: {e:#}");
+        }
+    }
+
+    async fn press_when_offered(
+        &self,
+        page: &Page,
+        selectors: &[String],
+        label: &str,
+        run: &mut Run,
+    ) -> bool {
+        const POLL_INTERVAL: Duration = Duration::from_millis(120);
+        const WAIT_BUDGET: Duration = Duration::from_millis(2_400);
+
+        let deadline = Instant::now() + WAIT_BUDGET;
+        let mut attempts = 0u32;
+        loop {
+            if !self.tenhou_effect_current(run, Effect::Button).await {
+                warn!("autoplay: withholding obsolete Tenhou {label}");
                 return false;
             }
-        }
-        if Instant::now() >= deadline {
-            let offered = crate::autoplay::cdp_input::list_action_buttons(page).await;
-            warn!(
-                "autoplay: {label} button ({selectors:?}) never appeared in {:?}; \
+            attempts += 1;
+            match crate::autoplay::cdp_input::click_dom(page, selectors).await {
+                Ok(true) => {
+                    run.issued(Effect::Button);
+                    info!("autoplay: pressed {label} ({selectors:?}) after {attempts} look(s)");
+                    return true;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!("autoplay: pressing {label} failed: {e:#}");
+                    return false;
+                }
+            }
+            if Instant::now() >= deadline {
+                let offered = crate::autoplay::cdp_input::list_action_buttons(page).await;
+                warn!(
+                    "autoplay: {label} button ({selectors:?}) never appeared in {:?}; \
                  client is offering slots {offered:?} (its own order: highest first)",
-                WAIT_BUDGET
-            );
-            return false;
+                    WAIT_BUDGET
+                );
+                return false;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Regression (stale discard into a live board): the client's discard
-    /// handler applies locally even when the turn is over, so a discard must
-    /// be dropped once the window it was planned against is gone. The riichi
-    /// plan is exempt — its own button press is what replaces the window,
-    /// and the tile is still owed.
-    #[test]
-    fn a_discard_is_guarded_by_its_window_except_for_riichi() {
-        let dahai = MjaiEvent::Dahai {
-            actor: 0,
-            pai: "1m".into(),
-            tsumogiri: false,
-        };
-        assert!(discard_needs_window_guard(&dahai));
-        let reach = MjaiEvent::Reach {
-            actor: 0,
-            pai: Some("2m".into()),
-            tsumogiri: None,
-        };
-        assert!(!discard_needs_window_guard(&reach));
-    }
-
-    /// The window's `opened_at` is its identity: a slot holding a different
-    /// instant — or nothing — means the plan is stale. No planned window
-    /// (other platforms) never reports movement.
-    #[test]
-    fn tenhou_window_moved_tracks_the_slot() {
-        use crate::autoplay::tenhou_state::{DecisionWindow, TenhouState};
-        let m = AutoplayManager::for_tests();
-        let w1 = DecisionWindow {
-            ops: 0,
-            opened_at: Instant::now(),
-        };
-        let put = |window| {
-            *m.ctx.tenhou_state.write().unwrap() = Some(TenhouState {
-                seat: 0,
-                hand: vec![0],
-                melds: Vec::new(),
-                is_tsumo: true,
-                window,
-            });
-        };
-
-        put(Some(w1));
-        assert!(
-            !m.tenhou_window_moved(Some(w1)),
-            "same instant — still live"
-        );
-        assert!(
-            !m.tenhou_window_moved(None),
-            "nothing planned, nothing stale"
-        );
-
-        put(None);
-        assert!(m.tenhou_window_moved(Some(w1)), "window resolved — stale");
-
-        let w2 = DecisionWindow {
-            ops: 8,
-            opened_at: Instant::now(),
-        };
-        put(Some(w2));
-        assert!(m.tenhou_window_moved(Some(w1)), "window replaced — stale");
     }
 }

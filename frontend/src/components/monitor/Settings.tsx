@@ -62,7 +62,10 @@ const Line = ({ name, value, note }: { name: string; value: string; note?: strin
 function AutoplayRows({ snapshot: s, options, onLevel, onConfirm, onAutoWin, onLean, onTrail }: Props) {
   const sw = (name: string, on: boolean, onChange: ((on: boolean) => void) | null) => <Switch name={name} on={on} onChange={onChange} />
   const level = levelOf(s, options)
-  if (options.platform === 'Tenhou') return <p>{tr('天凤档案支持独立登录、保存设置与记录。自动操作尚未完成验证，当前由你手动操作。')}</p>
+  if (options.platform === 'Tenhou') return <>
+    <Row name={tr('自动操作')} about={tr('天凤四人普通速度段位场：显示建议或自动打牌；对局由你开始。')}
+      control={<AutoplayLevels level={level} onLevel={onLevel} levels={['off', 'play']} />} />
+  </>
   return <>
     <Row name={tr('自动操作')} about={levelAbout(level ?? 'off')} control={<AutoplayLevels level={level} onLevel={onLevel} />} />
     <Row name={tr('快速确认')} about={tr('和了或流局时，等确认按钮出现再点掉结算')} control={sw(tr('快速确认'), !!options.quick_confirm, onConfirm)} />

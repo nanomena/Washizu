@@ -39,15 +39,15 @@ fn selected_window_current(
 /// One decision's reading of the table.
 pub(super) struct Decision {
     pub(super) request: DecisionRequest,
+    pub(super) input_owner: crate::autoplay::tenhou::input::Owner,
     pub(super) ui_token: Option<crate::autoplay::ui::DecisionToken>,
     pub(super) cfg: MajsoulAutoplayConfig,
     delay_cfg: DelayModelConfig,
     pub(super) platform: Platform,
     /// Tenhou's planner needs the bridge's hand at Tenhou tile-index
     /// resolution; the slot stays empty on every other platform.
-    tenhou_state: Option<TenhouState>,
-    /// The Tenhou window we plan against, kept as its own identity for the
-    /// post-delay staleness check (`tenhou_window_moved`).
+    pub(super) tenhou_state: Option<TenhouState>,
+    /// The original Tenhou window, retained for the common delay/planning path.
     pub(super) planned_window: Option<DecisionWindow>,
     /// The server time budget for the current decision window (written by
     /// the Majsoul bridge; None off-Majsoul or pre-game). Its `opened_at` is
@@ -107,6 +107,11 @@ impl AutoplayManager {
         // Re-read config every time so `cfg.autoplay.enabled` can be
         // toggled at runtime via the Settings UI without restarting.
         let cfg_guard = self.cfg.read().await;
+        let input_owner = crate::autoplay::tenhou::input::Owner {
+            session: self.ctx.ui_session(),
+            settings: self.ctx.ui_settings(),
+            user: crate::autoplay::cdp_input::user_revision(),
+        };
         if !cfg_guard.autoplay.enabled {
             return None;
         }
@@ -196,6 +201,7 @@ impl AutoplayManager {
         };
         Some(Decision {
             request,
+            input_owner,
             ui_token: None,
             cfg,
             delay_cfg,

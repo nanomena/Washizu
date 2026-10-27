@@ -1,5 +1,6 @@
 /** English. Keys are the page's own Simplified Chinese text. */
 export const en: Record<string, string> = {
+  '天凤四人普通速度段位场：显示建议或自动打牌；对局由你开始。': 'Tenhou normal-speed four-player ranked tables: show suggestions or play automatically. Start each game yourself.',
   '本地备用': 'Local standby',
   '主模型': 'Primary model',
   '暂无有效来源': 'No validated source',
@@ -7,8 +8,6 @@ export const en: Record<string, string> = {
   '主模型恢复中': 'Primary recovering',
   '主模型不可用': 'Primary unavailable',
   '正在读取账号档案…': 'Loading accounts…',
-  '账号窗口已打开': 'Account window open',
-  '正在打开账号档案…': 'Opening account…',
   '新建档案': 'New profile',
   '已保存的账号档案': 'Saved account profiles',
   '名称': 'Name',
@@ -21,7 +20,6 @@ export const en: Record<string, string> = {
   '打开': 'Open',
   '新建一份档案，选择平台后登录账号。': 'Create a profile, choose a platform, then sign in.',
   '共 {0} 份档案': '{0} profiles',
-  '一次打开一个账号': 'One account at a time',
   '修改档案名称': 'Rename profile',
   '档案名称': 'Profile name',
   '取消': 'Cancel',
@@ -33,7 +31,6 @@ export const en: Record<string, string> = {
   '天凤视图在这里显示': 'The Tenhou view appears here',
   '打开天凤': 'Open Tenhou',
   '登录这个档案的天凤账号，登录资料和记录单独保存。': 'Sign in to this profile’s Tenhou account. Its login and records are saved separately.',
-  '天凤档案支持独立登录、保存设置与记录。自动操作尚未完成验证，当前由你手动操作。': 'Tenhou profiles keep separate logins, settings and records. Autoplay has not been qualified; play manually for now.',
   '请求': 'Request',
   '建议': 'Suggestion',
   '确认': 'Confirm',

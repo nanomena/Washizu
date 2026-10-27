@@ -121,7 +121,7 @@ function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail,
       <Round s={s} />
       <div className="md-controls">
         {/* The control is the setting, and says so by its colour: how far the model's actions may be carried out — not that one has been. */}
-        <span className="md-level"><span aria-hidden>{tr('自动操作')}</span><AutoplayLevels level={levelOf(s, options)} onLevel={onLevel} /></span>
+        <span className="md-level"><span aria-hidden>{tr('自动操作')}</span><AutoplayLevels level={levelOf(s, options)} onLevel={onLevel} levels={options.platform === 'Tenhou' ? ['off', 'play'] : undefined} /></span>
         <div className="mtools">{tools}</div>
       </div>
       <nav className="md-tabs" role="tablist" aria-label={tr('监视内容')}>
@@ -311,7 +311,7 @@ export function Monitor() {
 
       <div className="mon-canvas mon-canvas--dock">
         <Dock key={lang} m={m} tab={tab} setTab={setTab} tools={tools} options={options}
-          onLevel={ready && options.platform !== 'Tenhou' ? level => void setLevel(level) : null} onPin={ready && !busy ? pinned => void pin(pinned) : null}
+          onLevel={ready && !busy ? level => void setLevel(level) : null} onPin={ready && !busy ? pinned => void pin(pinned) : null}
           onTrail={ready && !busy ? enabled => void choose('set_monitor_trail', enabled) : null}
           onLean={ready && !busy ? enabled => void choose('set_monitor_lean', enabled) : null}
           onConfirm={ready && !busy && options.platform !== 'Tenhou' ? enabled => void choose('set_monitor_confirm', enabled) : null}

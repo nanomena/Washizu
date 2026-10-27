@@ -21,8 +21,8 @@
 //! the most obvious tell there is, so the same human-timing policy runs here
 //! (`autoplay::delay`). Tenhou never states its per-turn allowance on the
 //! wire, but it has one and enforces it by auto-discarding, so the lobby's
-//! standard clock is fed in as the budget — see
-//! `tenhou_state::TURN_BASE_MS`.
+//! standard clock is published in `tenhou_state::DecisionWindow.clock`.
+//! Unknown or private clocks do not receive automatic input permission.
 //!
 //! # Guards
 //!
@@ -41,6 +41,7 @@ use crate::schema::MjaiEvent;
 use tracing::{debug, warn};
 
 pub mod inject;
+pub(crate) mod input;
 
 const LOG: &str = "akagi::autoplay::tenhou";
 
@@ -143,11 +144,17 @@ fn push_pre_delay(steps: &mut Vec<Step>, ctx: &ActionContext, kind: DecisionKind
         // client's clock is actually up (`Step::AwaitReady`), and that clock
         // starts then, not when the frame reached us. Deducting the time
         // spent animating would spend a budget that had not started.
-        budget: ctx.tenhou.and_then(|t| t.window).map(|_| BudgetSnapshot {
-            fixed_ms: tenhou_state::TURN_BASE_MS,
-            add_ms: tenhou_state::TURN_BANK_MS,
-            elapsed_ms: 0,
-        }),
+        budget: ctx
+            .tenhou
+            .and_then(|t| t.window)
+            .and_then(|w| w.clock)
+            .map(|clock| BudgetSnapshot {
+                fixed_ms: clock.fixed_ms,
+                // The wire supplies the initial bank cap, not its current balance.
+                // Do not spend an unobserved remaining balance on artificial delay.
+                add_ms: 0,
+                elapsed_ms: 0,
+            }),
         click_overhead_ms: 0,
         cfg: ctx.cfg,
         delay_cfg: &delay_cfg,
@@ -508,6 +515,7 @@ mod tests {
             hand: tiles.to_vec(),
             melds: Vec::new(),
             is_tsumo: true,
+            in_riichi: false,
             window: None,
         }
     }
@@ -731,7 +739,9 @@ mod tests {
             hand: vec![0, 4, 8],
             melds: Vec::new(),
             is_tsumo: true,
+            in_riichi: false,
             window: Some(tenhou_state::DecisionWindow {
+                clock: Some(crate::autoplay::tenhou_state::TurnClock::NORMAL),
                 ops: tenhou_state::OP_REACH,
                 opened_at: std::time::Instant::now(),
             }),
@@ -800,7 +810,9 @@ mod tests {
             hand: vec![0, 4, 8],
             melds: Vec::new(),
             is_tsumo: true,
+            in_riichi: false,
             window: Some(tenhou_state::DecisionWindow {
+                clock: Some(crate::autoplay::tenhou_state::TurnClock::NORMAL),
                 ops: tenhou_state::OP_REACH,
                 opened_at: std::time::Instant::now(),
             }),
@@ -848,7 +860,9 @@ mod tests {
             hand: vec![0, 4, 8],
             melds: Vec::new(),
             is_tsumo: true,
+            in_riichi: false,
             window: Some(tenhou_state::DecisionWindow {
+                clock: Some(crate::autoplay::tenhou_state::TurnClock::NORMAL),
                 ops: tenhou_state::OP_REACH,
                 opened_at: std::time::Instant::now(),
             }),
@@ -895,7 +909,9 @@ mod tests {
             hand: vec![19, 17],
             melds: Vec::new(),
             is_tsumo: true,
+            in_riichi: false,
             window: Some(tenhou_state::DecisionWindow {
+                clock: Some(crate::autoplay::tenhou_state::TurnClock::NORMAL),
                 ops: 0,
                 opened_at: std::time::Instant::now(),
             }),
@@ -964,7 +980,9 @@ mod tests {
             hand: vec![0, 4, 8],
             melds: Vec::new(),
             is_tsumo: true,
+            in_riichi: false,
             window: Some(tenhou_state::DecisionWindow {
+                clock: Some(crate::autoplay::tenhou_state::TurnClock::NORMAL),
                 ops: tenhou_state::OP_CHI,
                 opened_at: std::time::Instant::now(),
             }),
@@ -1092,6 +1110,7 @@ mod budget_tests {
     #[test]
     fn elapsed_advances_with_the_window() {
         let w = DecisionWindow {
+            clock: Some(crate::autoplay::tenhou_state::TurnClock::NORMAL),
             ops: 0,
             opened_at: Instant::now() - std::time::Duration::from_millis(1500),
         };

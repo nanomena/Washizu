@@ -436,7 +436,10 @@ for line in sys.stdin:
         )
         .await
         .unwrap();
-        bot.set_react_timeout(std::time::Duration::from_millis(150));
+        // This includes interpreter startup after reset (over 200ms for the
+        // bundled Windows Python), while the partial writer stalls for 2s.
+        let timeout = std::time::Duration::from_millis(500);
+        bot.set_react_timeout(timeout);
         assert!(bot
             .react(&[MjaiEvent::None])
             .await
@@ -448,7 +451,7 @@ for line in sys.stdin:
             "partial response process was reaped"
         );
         bot.reset().await.unwrap();
-        assert_eq!(bot.react_timeout, std::time::Duration::from_millis(150));
+        assert_eq!(bot.react_timeout, timeout);
         let reply = bot.react(&[MjaiEvent::EndKyoku]).await.unwrap();
         assert_eq!(
             reply.meta.as_ref().unwrap()["game"],
