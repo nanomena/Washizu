@@ -54,7 +54,9 @@ async function main() {
     assert.equal(await read(`api.probeUi(${JSON.stringify({kind:join.kind,identity:join.identity})}).status`), 'changed')
     assert.deepEqual(await read('fixture.effects'), [])
     await read(`document.querySelector('#cover').remove()`)
-    await click(join)
+    // Removing an obstacle may change viewport/layout. Acquire a fresh target,
+    // as the FSM does after a refused effect; never reuse the stale witness.
+    await click(await target('join'))
     assert.equal(await read('api.readUi().lobby.reservationRequested'), true)
     for (const tag of ['TAIKYOKU', 'AGARI', 'RYUUKYOKU', 'OWARI', 'NINTEI']) {
       await read(`fixture.tag=${JSON.stringify(tag)};fixture.epoch++`)
