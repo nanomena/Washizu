@@ -37,15 +37,15 @@ pub struct AutoplayContext {
     /// the manager's delay model. Uses a `std::sync::RwLock` (not tokio)
     /// because the writer is the bridge's synchronous `parse()` path.
     pub time_budget: crate::autoplay::budget::SharedTimeBudget,
-    /// Counter of the client's own uplink input commands, bumped by the
-    /// Majsoul bridge as it parses. The manager takes a ticket before a
+    /// Counter of the client's own uplink input commands, bumped by both
+    /// website bridges as they parse. The controller takes a ticket before a
     /// click and asks afterwards whether the count moved — the proof that
     /// the click registered (see `autoplay::verify`).
     pub input_watch: crate::autoplay::verify::SharedInputWatch,
     /// Tenhou's hand at tile-index resolution plus its current decision
     /// window, written by the Tenhou bridge (see `autoplay::tenhou_state`).
-    /// Read by the Tenhou autoplay planner, which encodes a client frame
-    /// rather than synthesising clicks.
+    /// Read privately by the Tenhou adapter to match physical targets;
+    /// playing input uses the shared mouse controller.
     pub tenhou_state: crate::autoplay::tenhou_state::SharedTenhouState,
     /// Frame injection channel for platforms whose client is not a browser
     /// page (Riichi City): the manager sends built wire frames, the MITM
