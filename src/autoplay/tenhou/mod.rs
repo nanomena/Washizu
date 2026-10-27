@@ -238,6 +238,11 @@ impl SiteAdapter for TenhouAutoplay {
             let Some((tile, tsumogiri)) = discard_tile(&intent.action, &state) else {
                 return Ok(observation);
             };
+            if !input.tiles.iter().any(|candidate| {
+                candidate.tile == tile && candidate.legal && candidate.drawn == tsumogiri
+            }) {
+                return Ok(observation);
+            }
             if !input
                 .tiles
                 .iter()
