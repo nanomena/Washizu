@@ -75,6 +75,7 @@ impl PrimaryWorker {
         mut runner: Box<dyn BotRunner>,
         journal: SharedJournal,
         output: mpsc::UnboundedSender<Report>,
+        forecast: Option<crate::bot::forecast::ForecastInput>,
     ) -> Self {
         let (input, mut observations) = mpsc::unbounded_channel::<Observation>();
         let task = tokio::spawn(async move {
@@ -101,7 +102,7 @@ impl PrimaryWorker {
                         // Restart always replays the complete confirmed prefix,
                         // including actual moves made while on standby.
                         through = 0;
-                        replay(&mut runner, &journal, work.through).await
+                        replay(&mut runner, &journal, work.through, forecast.as_ref()).await
                     } else {
                         let result = runner
                             .react(work.event.as_slice())
@@ -120,18 +121,33 @@ impl PrimaryWorker {
                             tracing::warn!(context = ?work.context, reason = ?result.as_ref().err(),
                                 "primary transport failed; replaying confirmed game prefix");
                             through = 0;
-                            replay(&mut runner, &journal, work.through).await
+                            replay(&mut runner, &journal, work.through, forecast.as_ref()).await
                         } else {
                             result
                         }
                     };
                     match result {
-                        Ok(reply) if reply.unavailable_reason().is_none() => {
+                        Ok(mut reply) if reply.unavailable_reason().is_none() => {
                             through = work.through;
                             state = PrimaryState::Ready;
+                            if let Some(forecast) = &forecast {
+                                forecast.observe(
+                                    work.context,
+                                    &mut reply,
+                                    work.through,
+                                    work.decide,
+                                );
+                            } else if let Some(meta) =
+                                reply.meta.as_mut().and_then(|meta| meta.as_object_mut())
+                            {
+                                meta.remove("forecast_error");
+                            }
                             response = work.decide.then_some(reply);
                         }
                         Ok(reply) => {
+                            if let Some(forecast) = &forecast {
+                                forecast.revoke();
+                            }
                             // validate_delivery already proved this receipt.
                             through = reply.meta.as_ref().unwrap()["delivery"]["through"]
                                 .as_u64()
@@ -152,6 +168,9 @@ impl PrimaryWorker {
                             };
                         }
                         Err(reason) => {
+                            if let Some(forecast) = &forecast {
+                                forecast.revoke();
+                            }
                             tracing::warn!(context = ?work.context, attempts, %reason,
                                 "primary replay failed; waiting for the next eligible decision");
                             state = PrimaryState::Recovering {
@@ -206,7 +225,11 @@ async fn replay(
     runner: &mut Box<dyn BotRunner>,
     journal: &SharedJournal,
     through: u64,
+    forecast: Option<&crate::bot::forecast::ForecastInput>,
 ) -> Result<BotResponse, String> {
+    if let Some(forecast) = forecast {
+        forecast.revoke();
+    }
     runner
         .reset()
         .await
@@ -238,7 +261,118 @@ fn validate_delivery(reply: BotResponse, expected: u64) -> Result<BotResponse, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn blocked_forecast_does_not_delay_the_second_formal_decision() {
+        use crate::bot::forecast::tests::{context, receipt, Relay};
+        use std::sync::{Arc, Mutex};
+
+        struct Formal {
+            through: u64,
+            resets: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl BotRunner for Formal {
+            async fn react(&mut self, events: &[MjaiEvent]) -> anyhow::Result<BotResponse> {
+                self.through += events.len() as u64;
+                let mut reply = receipt(self.through, "committed-session");
+                if let Some(MjaiEvent::Tsumo { actor, pai }) = events.last() {
+                    reply.action = MjaiEvent::Dahai {
+                        actor: *actor,
+                        pai: pai.clone(),
+                        tsumogiri: true,
+                    };
+                    reply.meta.as_mut().unwrap()["forecast_error"] =
+                        json!("injected optional snapshot capture failure");
+                }
+                Ok(reply)
+            }
+            async fn reset(&mut self) -> anyhow::Result<()> {
+                self.resets
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.through = 0;
+                Ok(())
+            }
+        }
+        let relay = Relay::new(false);
+        let resets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (output, mut reports) = mpsc::unbounded_channel();
+        let worker = PrimaryWorker::spawn(
+            Box::new(Formal {
+                through: 0,
+                resets: resets.clone(),
+            }),
+            Arc::new(Mutex::new(vec![])),
+            output,
+            Some(relay.worker.input.clone()),
+        );
+        let mut events = crate::bot::recovery::tests::opening();
+        events.push(MjaiEvent::Dahai {
+            actor: 0,
+            pai: "N".into(),
+            tsumogiri: true,
+        });
+        events.push(MjaiEvent::Tsumo {
+            actor: 0,
+            pai: "E".into(),
+        });
+        let mut decisions = 0;
+        for (index, event) in events.into_iter().enumerate() {
+            let seq = index as u64 + 1;
+            let decide = matches!(event, MjaiEvent::Tsumo { .. });
+            relay.worker.input.advance(context(seq), true);
+            worker
+                .input
+                .send(Observation {
+                    context: context(seq),
+                    event: Some(event),
+                    through: seq,
+                    decide,
+                })
+                .unwrap();
+            let report = tokio::time::timeout(Duration::from_secs(2), reports.recv())
+                .await
+                .expect("formal event is independent of forecast I/O")
+                .unwrap();
+            let Report::Primary {
+                health, response, ..
+            } = report
+            else {
+                panic!("primary report");
+            };
+            assert_eq!(health, RunnerHealth::Ready { through: seq });
+            if decide {
+                let reply = response.unwrap();
+                assert!(matches!(reply.action, MjaiEvent::Dahai { .. }));
+                assert!(
+                    reply.meta.as_ref().unwrap().get("forecast_error").is_none(),
+                    "internal optional error is consumed"
+                );
+                decisions += 1;
+            } else {
+                assert!(response.is_none(), "optional forecasts are never actions");
+            }
+            if seq == 1 {
+                relay.entered().await;
+            }
+        }
+        assert_eq!(decisions, 2);
+        assert!(
+            !relay.files.path().join("release").exists(),
+            "forecast is still blocked when both decisions finish"
+        );
+        assert_eq!(
+            resets.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "optional latency causes no formal recovery"
+        );
+        drop(worker);
+        relay.release();
+        relay.worker.close().await;
+    }
+
     #[test]
     fn only_the_requested_committed_prefix_can_supply_a_primary_action() {
         let reply = |through| BotResponse {

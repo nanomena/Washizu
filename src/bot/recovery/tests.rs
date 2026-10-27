@@ -321,6 +321,7 @@ impl Rig {
             monitor.clone(),
             output,
             inspector,
+            None,
         );
         Self {
             budget_ms: 1_400,

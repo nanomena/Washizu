@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod control;
+pub mod forecast;
 mod lifecycle;
 pub mod manager;
 pub mod manifest;

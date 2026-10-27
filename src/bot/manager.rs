@@ -102,11 +102,23 @@ pub struct BotManager {
 }
 
 enum ManagedBot {
-    Direct(Box<dyn BotRunner>),
+    Direct(Box<dyn BotRunner>, Option<super::forecast::ForecastWorker>),
     Coordinated {
         game_id: Option<u64>,
         handle: super::recovery::RecoveryHandle,
+        forecast: Option<super::forecast::ForecastWorker>,
     },
+}
+
+impl ManagedBot {
+    fn forecast(&self) -> Option<&super::forecast::ForecastWorker> {
+        match self {
+            Self::Direct(_, worker)
+            | Self::Coordinated {
+                forecast: worker, ..
+            } => worker.as_ref(),
+        }
+    }
 }
 
 /// What a subprocess bot is told of the game it is started for, in
@@ -254,6 +266,15 @@ impl BotManager {
             can_act,
             context,
         } = tracked;
+        let requested = {
+            let cfg = self.config.read().await;
+            cfg.monitor.pointer_lean && cfg.autoplay.enabled
+        };
+        if let (Some(context), Some(worker)) =
+            (context, self.runner.as_ref().and_then(ManagedBot::forecast))
+        {
+            worker.input.advance(context, requested);
+        }
         if let MjaiEvent::StartGame {
             id: Some(seat),
             num_players,
@@ -264,6 +285,7 @@ impl BotManager {
             if let Some(ManagedBot::Coordinated {
                 game_id: Some(current),
                 handle,
+                ..
             }) = &self.runner
             {
                 if game_meta.as_ref().and_then(|m| m.game_id) == Some(*current)
@@ -280,6 +302,11 @@ impl BotManager {
                     })?;
                     return Ok(());
                 }
+            }
+        }
+        if matches!(event, MjaiEvent::StartGame { .. }) {
+            if let Some(worker) = self.runner.as_ref().and_then(ManagedBot::forecast) {
+                worker.stop();
             }
         }
         // Spawn the runner the moment we see the bot's seat in start_game.
@@ -326,6 +353,15 @@ impl BotManager {
             return Ok(());
         }
 
+        if let (Some(context), Some(worker)) =
+            (context, self.runner.as_ref().and_then(ManagedBot::forecast))
+        {
+            worker.input.advance(context, requested);
+            if matches!(event, MjaiEvent::EndGame { .. }) {
+                worker.stop();
+            }
+        }
+
         if let Some(ManagedBot::Coordinated { handle, .. }) = &self.runner {
             // The coordinator receives each real tracked event exactly once,
             // including confirmed standby moves. It never sees the direct
@@ -365,13 +401,10 @@ impl BotManager {
             self.is_decision_point(&event, can_act)
         };
         if !deciding {
-            if self.peeks(&event).await {
-                return self.peek().await;
-            }
             return Ok(());
         }
 
-        let Some(ManagedBot::Direct(runner)) = self.runner.as_mut() else {
+        let Some(ManagedBot::Direct(runner, _)) = self.runner.as_mut() else {
             unreachable!("coordinator returned above");
         };
         let batch = std::mem::take(&mut self.pending);
@@ -508,53 +541,6 @@ impl BotManager {
         Ok(())
     }
 
-    /// Whether to ask the bot at an event that is no decision of ours: with
-    /// the pointer's lean on, at every other seat's discard, so that a bot
-    /// playing its next turn out ahead can say what it expects of it (see
-    /// `autoplay::pointer::lean`).
-    async fn peeks(&mut self, e: &MjaiEvent) -> bool {
-        let Some(me) = self.actor_id else {
-            return false;
-        };
-        if !matches!(e, MjaiEvent::Dahai { actor, .. } if *actor != me) {
-            return false;
-        }
-        let config = self.config.read().await;
-        config.monitor.pointer_lean && config.autoplay.enabled
-    }
-
-    /// Ask the bot between our turns, for nothing but what it expects of the
-    /// next one. The answer is no decision: it goes to
-    /// `autoplay::pointer::lean` and nowhere else — never onto the response
-    /// bus, where a `none` would read as a pass — and nothing records or
-    /// shows it.
-    async fn peek(&mut self) -> Result<()> {
-        let Some(ManagedBot::Direct(runner)) = self.runner.as_mut() else {
-            return Ok(());
-        };
-        let batch = std::mem::take(&mut self.pending);
-        let resp = runner
-            .react(&batch)
-            .await
-            .context("bot react failed (between turns)")?;
-        self.direct_through += batch.len() as u64;
-        if !matches!(resp.action, MjaiEvent::None) {
-            warn!(
-                "bot manager: the bot answered {:?} where our seat had nothing to answer; ignored",
-                resp.action
-            );
-        }
-        let lean = resp
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("lean"))
-            .and_then(|lean| serde_json::from_value(lean.clone()).ok());
-        if let Some(lean) = lean {
-            crate::autoplay::pointer::lean::publish(lean);
-        }
-        Ok(())
-    }
-
     /// Two-phase spawn so the IPC layer can show a "Syncing deps…" spinner
     /// during the slow first-run path before the subprocess actually
     /// starts. Each branch publishes status + notification before
@@ -592,7 +578,13 @@ impl BotManager {
                         bot: bot_name.clone(),
                         actor_id,
                     });
-                    self.runner = Some(ManagedBot::Direct(runner));
+                    let worker = super::forecast::ForecastWorker::spawn(
+                        Ok(None),
+                        self.config.clone(),
+                        self.notify_tx.clone(),
+                        bot_name.clone(),
+                    );
+                    self.runner = Some(ManagedBot::Direct(runner, Some(worker)));
                     return Ok(());
                 }
                 Err(e) => {
@@ -762,7 +754,7 @@ impl BotManager {
         if let Some(m) = entry.manifest.as_ref() {
             // What Akagi asks of the bot beyond its settings, in a section
             // of its own (`akagi`, beside whatever the bot calls its own
-            // keys): `lean`, to be asked between turns as well (see `peeks`).
+            // keys): `lean`, the preference for a separate forecast relay.
             let lean = {
                 let config = self.config.read().await;
                 config.monitor.pointer_lean && config.autoplay.enabled
@@ -830,6 +822,26 @@ impl BotManager {
             .as_ref()
             .map(|m| m.bot.protocol)
             .unwrap_or_default();
+        let forecast_command = if protocol == manifest::BotProtocol::PositionedMjai
+            && self.recovery_clock.is_some()
+            && self.monitor.is_some()
+        {
+            entry
+                .manifest
+                .as_ref()
+                .and_then(|m| m.forecast.as_ref())
+                .map(|spec| bot.forecast_command(&spec.entry))
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        let forecast = super::forecast::ForecastWorker::spawn(
+            forecast_command,
+            self.config.clone(),
+            self.notify_tx.clone(),
+            bot_name.clone(),
+        );
+        let forecast_input = forecast.input.clone();
         self.runner = Some(match (protocol, &self.recovery_clock, &self.monitor) {
             (manifest::BotProtocol::PositionedMjai, Some(clock), Some(monitor)) => {
                 ManagedBot::Coordinated {
@@ -844,10 +856,12 @@ impl BotManager {
                         monitor.clone(),
                         self.out_tx.clone(),
                         self.inspector.clone(),
+                        Some(forecast_input),
                     ),
+                    forecast: Some(forecast),
                 }
             }
-            _ => ManagedBot::Direct(Box::new(bot)),
+            _ => ManagedBot::Direct(Box::new(bot), Some(forecast)),
         });
         Ok(())
     }
@@ -1078,7 +1092,7 @@ mod tests {
         // mirror that invariant here for status emissions to be realistic.
         mgr.actor_id = Some(2);
         mgr.active_name = "mock".into();
-        mgr.runner = Some(ManagedBot::Direct(Box::new(mock)));
+        mgr.runner = Some(ManagedBot::Direct(Box::new(mock), None));
         (mgr, calls, resp_rx, status_rx, notify_rx)
     }
 
@@ -1451,45 +1465,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_the_lean_on_an_unanswerable_discard_is_asked_and_its_lean_reaches_autoplay_alone()
-    {
-        let lean = serde_json::json!({"lines": 12, "options": [{"discard": true, "pai": "6s", "share": 0.8}]});
-        let reply = BotResponse {
-            request: None,
-            action: MjaiEvent::None,
-            meta: Some(serde_json::json!({ "lean": lean })),
-        };
-        let (mut mgr, calls, mut resp_rx, _, _) = manager_with_mock(vec![reply]);
+    async fn enabling_pointer_forecasts_never_peeks_on_the_formal_direct_pipe() {
+        let (mut mgr, calls, mut responses, _, _) = manager_with_mock(vec![]);
         {
-            let mut config = mgr.config.write().await;
-            config.monitor.pointer_lean = true;
-            config.autoplay.enabled = true;
+            let mut cfg = mgr.config.write().await;
+            cfg.monitor.pointer_lean = true;
+            cfg.autoplay.enabled = true;
         }
-        let mut leans = crate::autoplay::pointer::lean::subscribe();
-        mgr.handle_tracked(tracked(dahai(0), Some(false)))
-            .await
-            .unwrap();
-        assert_eq!(
-            calls.lock().await.len(),
-            1,
-            "asked at the other seat's discard"
-        );
-        assert!(
-            resp_rx.try_recv().is_err(),
-            "no decision goes on the response bus"
-        );
-        let got = leans.try_recv().expect("the lean goes to autoplay");
-        assert_eq!(
-            got.first(),
-            Some(crate::autoplay::pointer::lean::Spot::Hand("6s".into()))
-        );
-
-        // With the lean off the same discard asks nothing.
-        let (mut off, calls, _, _, _) = manager_with_mock(vec![]);
-        off.handle_tracked(tracked(dahai(0), Some(false)))
+        mgr.handle_tracked(tracked(dahai(1), Some(false)))
             .await
             .unwrap();
         assert!(calls.lock().await.is_empty());
+        assert!(responses.try_recv().is_err());
+        assert_eq!(mgr.pending.len(), 1);
     }
 
     #[tokio::test]
@@ -1557,9 +1545,10 @@ mod tests {
         );
         mgr.actor_id = Some(2);
         mgr.active_name = "mock".into();
-        mgr.runner = Some(ManagedBot::Direct(Box::new(MockBotRunner::failing(
-            "kaboom",
-        ))));
+        mgr.runner = Some(ManagedBot::Direct(
+            Box::new(MockBotRunner::failing("kaboom")),
+            None,
+        ));
 
         // Trigger a decision point — react() returns error.
         let err = mgr.handle(dahai(0)).await.unwrap_err();
@@ -2035,7 +2024,7 @@ mod tests {
         );
         mgr.actor_id = Some(2);
         let (mock, _calls) = MockBotRunner::new(vec![]);
-        mgr.runner = Some(ManagedBot::Direct(Box::new(mock)));
+        mgr.runner = Some(ManagedBot::Direct(Box::new(mock), None));
 
         let handle = tokio::spawn(async move { mgr.run(rx).await });
         drop(events); // last sender → channel closes
@@ -2208,7 +2197,7 @@ mod tests {
             )
             .unwrap(),
         ]);
-        mgr.runner = Some(ManagedBot::Direct(Box::new(runner)));
+        mgr.runner = Some(ManagedBot::Direct(Box::new(runner), None));
         feed_direct(
             &mut mgr,
             &mut tracker,

@@ -46,11 +46,12 @@ impl RecoveryHandle {
         monitor: MonitorHandle,
         output: BotResponseBus,
         inspector: InspectorWriter,
+        forecast: Option<crate::bot::forecast::ForecastInput>,
     ) -> Self {
         let (input, events) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             Coordinator::new(
-                primary, seat, players, name, config, clock, monitor, output, inspector,
+                primary, seat, players, name, config, clock, monitor, output, inspector, forecast,
             )
             .run(events)
             .await;
@@ -110,11 +111,17 @@ impl Coordinator {
         monitor: MonitorHandle,
         output: BotResponseBus,
         inspector: InspectorWriter,
+        forecast: Option<crate::bot::forecast::ForecastInput>,
     ) -> Self {
         let (reports_tx, reports) = mpsc::unbounded_channel();
         let journal = journal::Journal::new();
         Self {
-            primary: PrimaryWorker::spawn(primary, journal.events.clone(), reports_tx.clone()),
+            primary: PrimaryWorker::spawn(
+                primary,
+                journal.events.clone(),
+                reports_tx.clone(),
+                forecast,
+            ),
             journal,
             standby: StandbyWorker::spawn(seat, players, reports_tx),
             reports,

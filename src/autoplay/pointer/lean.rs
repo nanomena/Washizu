@@ -11,8 +11,8 @@
 //! ```
 //!
 //! its likeliest next answers with their shares, and how many lines of play
-//! they rest on. The manager hands that to this module and nowhere else: it
-//! is no decision, and nothing shows it.
+//! they rest on. The independent forecast worker binds the result to its
+//! owner and real context before handing it here. It is never a decision.
 //!
 //! When the pointer moves is this module's to say, not the table's. After the
 //! seat's discard it rests a while; then, every so often, it looks at one of
@@ -82,19 +82,19 @@ impl Lean {
 /// How many lines a lean must rest on before the pointer follows it.
 pub const MIN_LINES: f64 = 4.0;
 
-static LEANS: OnceLock<broadcast::Sender<Lean>> = OnceLock::new();
+static LEANS: OnceLock<broadcast::Sender<crate::bot::forecast::ForecastLean>> = OnceLock::new();
 
-fn leans() -> &'static broadcast::Sender<Lean> {
+fn leans() -> &'static broadcast::Sender<crate::bot::forecast::ForecastLean> {
     LEANS.get_or_init(|| broadcast::channel(16).0)
 }
 
 /// Pass on what a bot said of its next turn.
-pub fn publish(lean: Lean) {
+pub fn publish(lean: crate::bot::forecast::ForecastLean) {
     let _ = leans().send(lean);
 }
 
 /// Every lean from now on.
-pub fn subscribe() -> broadcast::Receiver<Lean> {
+pub fn subscribe() -> broadcast::Receiver<crate::bot::forecast::ForecastLean> {
     leans().subscribe()
 }
 

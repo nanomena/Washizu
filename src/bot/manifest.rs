@@ -50,6 +50,8 @@ pub struct Manifest {
     /// [`crate::bot::service`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<ForecastSpec>,
     pub settings: BTreeMap<String, FieldSpec>,
 }
 
@@ -60,6 +62,7 @@ impl Default for Manifest {
             bot: ManifestBot::default(),
             source: None,
             service: None,
+            forecast: None,
             settings: BTreeMap::new(),
         }
     }
@@ -116,6 +119,12 @@ pub enum BotProtocol {
 pub struct ServiceSpec {
     /// The script, relative to the bot directory. Its directory holds the
     /// service's own `pyproject.toml`, so its environment is not the bot's.
+    pub entry: String,
+}
+
+/// Lightweight optional relay in the bot's own environment. It owns no model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForecastSpec {
     pub entry: String,
 }
 
