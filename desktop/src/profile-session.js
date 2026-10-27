@@ -25,6 +25,15 @@ export class ProfileSessions extends EventEmitter {
   list() { return [...this.clients.values()].map(({ id, state, cleanup, error }) => ({ id, state, cleanup, error })) }
   get liveCount() { return [...this.clients.values()].filter(slot => slot.child !== null).length }
 
+  /** The lifecycle owner alone decides whether a profile is safe to remove.
+   * @param {string} id @param {() => void} remove */
+  remove(id, remove) {
+    const slot = this.clients.get(id)
+    if (slot && (slot.child || slot.cleanup === 'unconfirmed')) throw new Error('请先关闭此档案窗口，等待清理完成后再删除。')
+    remove()
+    this.clients.delete(id)
+  }
+
   /** Opening the same live profile requests focus, never another process.
    * @param {string} id */
   open(id) {

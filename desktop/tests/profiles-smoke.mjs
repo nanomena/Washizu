@@ -15,7 +15,7 @@ const electron = createRequire(import.meta.url)('electron')
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'washizu-profiles-smoke-'))
 const root = path.join(work, 'data')
 /** @typedef {{type: string, url: string, targetId: string}} Target */
-/** @typedef {{revision: number, profiles: import('../src/profiles.js').AccountProfile[], clients: import('../src/profile-session.js').ClientState[], error: string}} State */
+/** @typedef {{revision: number, profiles: import('../src/profiles.js').AccountProfile[], clients: import('../src/profile-session.js').ClientState[], defaults: import('../src/profile-defaults.js').ProfileDefaults, error: string}} State */
 const sleep = (/** @type {number} */ ms) => new Promise(done => setTimeout(done, ms))
 /** @template T @param {() => Promise<T>} read @param {(value: T) => boolean} predicate @param {string} label @returns {Promise<T>} */
 async function until(read, predicate, label) {
@@ -95,7 +95,7 @@ try {
   const state = async () => /** @type {State} */ (await evaluate('window.akagi.invoke("list_profiles")'))
   const runtime = (/** @type {State} */ s, /** @type {string} */ id) => s.clients.find(c => c.id === id)
   await until(state, s => s.profiles.length === 1, 'initial registry')
-  assert.deepEqual(Object.keys(await state()).sort(), ['clients', 'error', 'profiles', 'revision'])
+  assert.deepEqual(Object.keys(await state()).sort(), ['clients', 'defaults', 'error', 'profiles', 'revision'])
   assert.equal((await state()).profiles[0].id, 'existing')
   const created = /** @type {State} */ (await evaluate('window.akagi.invoke("create_profile", {name:"Tenhou",platform:"Tenhou"})'))
   const b = created.profiles.find(p => p.platform === 'Tenhou'); assert.ok(b)
@@ -175,14 +175,32 @@ try {
 
   assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), original)
   assert.equal(fs.readFileSync(path.join(root, 'history', 'keep.jsonl'), 'utf8'), 'existing game records\n')
-  for (const [width, height] of [[560, 368], [640, 368], [640, 432]]) {
+  for (const [width, height] of [[560, 304], [560, 368], [640, 368], [640, 432]]) {
     await chooserBrowser.call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, chooser)
     for (const lang of ['zh-CN', 'zh-TW', 'en', 'ja']) {
-      await evaluate(`{const s=document.querySelector('.accounts-tools select');Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(s,${JSON.stringify(lang)});s.dispatchEvent(new Event('change',{bubbles:true}));}`)
+      await evaluate(`document.querySelector('.accounts-tools button').click()`)
+      await until(() => evaluate(`!!document.querySelector('.accounts-settings .mselect')`), Boolean, 'chooser application settings')
+      await evaluate(`{const s=document.querySelector('.accounts-settings .mselect');Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(s,${JSON.stringify(lang)});s.dispatchEvent(new Event('change',{bubbles:true}));}`)
       await until(() => evaluate('document.querySelector("main").dataset.lang'), value => value === lang, 'chooser language')
+      for (const index of [1, 2]) {
+        await evaluate(`document.querySelectorAll('.accounts-settings .mset-groups button')[${index}].click()`)
+        await until(() => evaluate(`document.querySelectorAll('.accounts-settings .mset-groups button')[${index}].getAttribute('aria-pressed')`), value => value === 'true', 'platform defaults')
+        assert.equal(await evaluate(`document.querySelectorAll('.accounts-settings .mset-row').length`), 6)
+        assert.equal(await evaluate(`document.documentElement.scrollWidth>innerWidth || Array.from(document.querySelectorAll('.accounts-settings button')).some(b=>b.scrollWidth>b.clientWidth)`), false)
+      }
+      await evaluate(`document.querySelector('.accounts-tools button').click()`)
+      await until(() => evaluate(`!!document.querySelector('.accounts-panel')`), Boolean, 'account list restored')
       assert.equal(await evaluate(`document.documentElement.scrollWidth>innerWidth || document.querySelector('.accounts-panel').scrollWidth>document.querySelector('.accounts-panel').clientWidth`), false)
       assert.equal(await evaluate(`document.querySelector('tbody tr').getBoundingClientRect().height`), 64)
+      if (height === 304) assert.equal(await evaluate(`{const panel=document.querySelector('.accounts-panel');panel.scrollHeight>panel.clientHeight}`), true, 'the short viewport exercises a scrolling account list')
       assert.equal(await evaluate(`Array.from(document.querySelectorAll('.accounts-row-tools button')).some(b=>b.scrollWidth>b.clientWidth)`), false)
+      const alignment = await evaluate(`{
+        const tracks=selector=>[...document.querySelectorAll(selector)].map(b=>{const r=b.getBoundingClientRect();return {x:r.x,width:r.width};});
+        ({top:tracks('.accounts-tools button'),rows:tracks('.accounts-row-tools button')});
+      }`)
+      assert.ok(alignment.rows.every((/** @type {{x:number,width:number}} */ r, /** @type {number} */ i) => {
+        const top = alignment.top[i % 2]; return Math.abs(r.x - top.x) < 0.5 && Math.abs(r.width - top.width) < 0.5
+      }), `toolbar and account tracks at ${width}x${height}/${lang}: ${JSON.stringify(alignment)}`)
     }
   }
   console.log('ok concurrent/failed state rows retain compact layout across four languages; original registry data paths and files are unchanged')

@@ -11,6 +11,14 @@ only the profile list scrolls. All its words go through the same `tr`
 and language tables as the monitor. The chooser subscribes before reading its
 initial state and uses `revision` to discard late snapshots.
 
+Chooser Settings reuses the monitor's controls for application language and
+per-platform defaults for future profiles. Saving a default does not change
+an existing or running profile. Manage offers rename and confirmed removal
+from the account list while preserving local data; a live or
+cleanup-unconfirmed profile cannot be removed. Toolbar and row actions share
+the same grid tracks. The real Electron profile smoke checks their rendered
+alignment and the settings layout across supported languages and sizes.
+
 The page draws what the core's monitor snapshot says and nothing else. It
 reaches the application through `src/lib/host.ts` — commands by name, events by
 name — which the desktop shell answers (`desktop/`). It knows the game and the

@@ -104,7 +104,9 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: desktop
         # At scale 1.5 the display must fit the fixed 1280x720 CSS game surface.
-        run: xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke
+        run: |
+          xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke
+          xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:profiles
 
       - name: Restore bundled runtime cache
         uses: actions/cache@v4
