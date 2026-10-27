@@ -73,7 +73,7 @@ export async function startProfiles(root) {
   const files = path.resolve(app.commandLine.getSwitchValue('dock') || process.env.AKAGI_DOCK || (app.isPackaged ? path.join(process.resourcesPath, 'dock') : path.join(HERE, '..', '..', 'frontend', 'dist')))
   serveDock(files)
   const size = guideSize(store.list().length, screen.getPrimaryDisplay().workAreaSize)
-  window = new BrowserWindow({ ...size, useContentSize: true, resizable: false, maximizable: false, fullscreenable: false, alwaysOnTop: true, title: 'Washizu · 账号档案', backgroundColor: '#ece9e4', show: false,
+  window = new BrowserWindow({ ...size, useContentSize: true, resizable: false, maximizable: false, fullscreenable: false, title: 'Washizu · 账号档案', backgroundColor: '#ece9e4', show: false,
     webPreferences: { preload: path.join(HERE, 'profiles-preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false } })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', event => event.preventDefault())

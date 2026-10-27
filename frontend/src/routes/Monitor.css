@@ -197,7 +197,6 @@
 .mbtn--primary { height: 42px; width: 100%; font-size: 14px; font-weight: 600; color: #fff; background: var(--m-cta); border-color: transparent; }
 .mbtn--primary:hover:not(:disabled) { color: #fff; background: hsl(209 79% 43%); border-color: transparent; }
 
-.mtools { display: flex; flex: none; gap: 2px; }
 .mtool { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; color: var(--m-ink2); }
 .mtool:hover:not(:disabled) { color: var(--m-ink); background: hsl(35 20% 14% / 0.07); }
 .mtool[aria-pressed='true'] { color: var(--m-ink); background: var(--m-panel); box-shadow: var(--m-shadow); }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { LoaderCircle, Pin, PinOff, X } from 'lucide-react'
+import { LoaderCircle, X } from 'lucide-react'
 import { CandidateList, DecisionCard } from '@/components/monitor/Decision'
 import { GameStage } from '@/components/monitor/GameStage'
 import { HandStrip, ResultCard, ScoreStrip, SeatColumns } from '@/components/monitor/Table'
@@ -85,10 +85,9 @@ function Slot({ m }: { m: Model }) {
 /** 1280 × 240, under the game. The decision never leaves its place on the
  *  left; the tabs change what stands to the right of it. */
 type DockProps = {
-  m: Model; tab: Tab; setTab: (tab: Tab) => void; tools: React.ReactNode
+  m: Model; tab: Tab; setTab: (tab: Tab) => void
   options: MonitorConfig
   onLevel: ((level: AutoplayLevel) => void) | null
-  onPin: ((pinned: boolean) => void) | null
   onTrail: ((enabled: boolean) => void) | null
   onLean: ((enabled: boolean) => void) | null
   onConfirm: ((enabled: boolean) => void) | null
@@ -99,7 +98,7 @@ type DockProps = {
   onSpout: ((enabled: boolean) => void) | null
   onProfiles: (() => void) | null
 }
-function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail, onLean, onConfirm, onAutoWin, onStream, onCopyStream, onGameView, onSpout, onProfiles }: DockProps) {
+function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onConfirm, onAutoWin, onStream, onCopyStream, onGameView, onSpout, onProfiles }: DockProps) {
   const { s, view } = m
   const game = s?.game ?? null
   const link = linkOf(m.health)
@@ -123,7 +122,6 @@ function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail,
       <div className="md-controls">
         {/* The control is the setting, and says so by its colour: how far the model's actions may be carried out — not that one has been. */}
         <span className="md-level"><span aria-hidden>{tr('自动操作')}</span><AutoplayLevels level={levelOf(s, options)} onLevel={onLevel} levels={options.platform === 'Tenhou' ? ['off', 'play'] : undefined} /></span>
-        <div className="mtools">{tools}</div>
       </div>
       <nav className="md-tabs" role="tablist" aria-label={tr('监视内容')}>
         {/* The links have one light, on the settings' tab, where they are: everything behind it is run by this window. */}
@@ -149,7 +147,7 @@ function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail,
       {tab === 'game' && (s ? <GamePages key={s.context.game} snapshot={s} /> : <p className="mslot-empty md-wide">{tr('正在连接监视数据')}</p>)}
       {/* The record changes when the platform says where we stand after a game, or else when a game starts or ends. */}
       {tab === 'stats' && <Statistics game={`${s?.context.game ?? 0}:${s?.game_ended ?? true}`} account={s?.account ?? null} />}
-      {tab === 'settings' && <Settings group={group} onGroup={openGroup} snapshot={s} options={options} health={m.health} now={m.now} onPin={onPin} onLevel={onLevel} onTrail={onTrail} onLean={onLean}
+      {tab === 'settings' && <Settings group={group} onGroup={openGroup} snapshot={s} options={options} health={m.health} now={m.now} onLevel={onLevel} onTrail={onTrail} onLean={onLean}
         onConfirm={onConfirm} onAutoWin={onAutoWin}
         onStream={onStream} onCopyStream={onCopyStream} onGameView={onGameView} onSpout={onSpout} onProfiles={onProfiles} />}
     </div>
@@ -206,12 +204,6 @@ export function Monitor() {
     return () => observer.disconnect()
   }, [embedded, place])
 
-  const pin = async (pinned: boolean) => {
-    setBusy(true); setUiError(null)
-    try { setOptions(await invoke<MonitorConfig>('set_monitor_pinned', { pinned })) }
-    catch (e) { setUiError(String(e)) }
-    finally { setBusy(false) }
-  }
   /** A window option the shell saves and answers with all of them. */
   const choose = async (command: string, enabled: boolean) => {
     setBusy(true); setUiError(null)
@@ -280,11 +272,6 @@ export function Monitor() {
     : tr('建议已失效，候选不再显示')
   const m: Model = { s, view, rows, listState, noRows, faults, health: healthOf(s), elapsed: d ? Math.max(0, now - d.started_ms) : 0, now }
 
-  const tools = <>
-    <button className="mtool" aria-label={tr('置顶')} title={options.always_on_top ? tr('取消置顶') : tr('窗口置顶')} aria-pressed={options.always_on_top} disabled={!ready || busy}
-      onClick={() => void pin(!options.always_on_top)}>{options.always_on_top ? <Pin size={15} /> : <PinOff size={15} />}</button>
-  </>
-
   return <main className="mon" data-lang={lang} style={{ '--k': k } as CSSProperties}>
     <div className="mon-fit">
       <div className="mon-stage" ref={stage}>
@@ -309,8 +296,8 @@ export function Monitor() {
       </div>
 
       <div className="mon-canvas mon-canvas--dock">
-        <Dock key={lang} m={m} tab={tab} setTab={setTab} tools={tools} options={options}
-          onLevel={ready && !busy ? level => void setLevel(level) : null} onPin={ready && !busy ? pinned => void pin(pinned) : null}
+        <Dock key={lang} m={m} tab={tab} setTab={setTab} options={options}
+          onLevel={ready && !busy ? level => void setLevel(level) : null}
           onTrail={ready && !busy ? enabled => void choose('set_monitor_trail', enabled) : null}
           onLean={ready && !busy ? enabled => void choose('set_monitor_lean', enabled) : null}
           onConfirm={ready && !busy && options.platform !== 'Tenhou' ? enabled => void choose('set_monitor_confirm', enabled) : null}

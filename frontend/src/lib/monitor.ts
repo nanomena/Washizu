@@ -9,7 +9,7 @@ import type { AccountLevels } from '@/lib/ladder'
 export type MonitorConfig = {
   platform?: 'Majsoul' | 'Tenhou'
   profile_name?: string
-  always_on_top: boolean; pointer_trail?: boolean; pointer_lean?: boolean
+  pointer_trail?: boolean; pointer_lean?: boolean
   /** `auto_win`: switch the client's own auto-win on after a riichi or for a hand played dama (see the core's `autoplay::dama`). */
   quick_confirm?: boolean; auto_win?: boolean
   /** Play game after game: with autoplay on, the game's own screens after its end are pressed through to "play again". */
@@ -22,7 +22,7 @@ export type MonitorConfig = {
   spout_output?: boolean; spout_available?: boolean; spout_state?: 'off' | 'starting' | 'sending' | 'failed' | 'stopped'; spout_name?: string
 }
 export type GameView = 'window' | 'offscreen'
-export const MONITOR_DEFAULTS: MonitorConfig = { always_on_top: false, pointer_trail: false, pointer_lean: false, quick_confirm: false, auto_win: false, auto_continue: false }
+export const MONITOR_DEFAULTS: MonitorConfig = { pointer_trail: false, pointer_lean: false, quick_confirm: false, auto_win: false, auto_continue: false }
 
 /** How far autoplay goes: not at all (suggestions only), the game in play, or
  *  game after game. Two settings make it: autoplay itself, which the core

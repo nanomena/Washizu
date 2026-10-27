@@ -17,7 +17,7 @@ const say = (/** @type {unknown} */ message) => process.stdout.write(JSON.string
 
 /** What the page sees: no game on the table, one answered decision with tiles in it. */
 /** @type {Record<string, unknown>} */
-const monitor = { always_on_top: false }
+const monitor = {}
 let capture = /** @type {Record<string, string>} */ ({ state: 'stopped' })
 function snapshot() {
   const context = { game: 1, round: 1, event_seq: 10 }
@@ -45,7 +45,6 @@ const answers = {
   get_monitor: snapshot,
   get_hand_events: () => [],
   get_history: () => [],
-  set_monitor_pinned: ({ pinned }) => { monitor.always_on_top = pinned === true; return monitor },
   set_monitor_stream: ({ enabled, port, token }) => {
     if (enabled === true && !(Number.isInteger(port) && port > 0 && typeof token === 'string' && token.length >= 16)) throw new Error('invalid stream address')
     Object.assign(monitor, { stream_output: enabled === true, stream_port: port, stream_token: token })

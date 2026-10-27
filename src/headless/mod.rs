@@ -23,7 +23,6 @@
 //! | `get_monitor`          | —                        | `MonitorSnapshot` |
 //! | `get_hand_events`      | `{round}`                | `[MonitorEvent]`  |
 //! | `get_history`          | —                        | `[GameRecord]`    |
-//! | `set_monitor_pinned`   | `{pinned}`               | `MonitorConfig`   |
 //! | `set_monitor_trail`    | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_lean`     | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_confirm`  | `{enabled}`              | `MonitorConfig`   |
@@ -110,11 +109,6 @@ struct UserPointer {
     x: Option<f64>,
     #[serde(default)]
     y: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Pinned {
-    pinned: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,13 +356,6 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
                 .monitor
                 .hand_events(round)
                 .map_or_else(|| Err(format!("this game has no hand {round}")), reply)
-        }
-        "set_monitor_pinned" => {
-            let Pinned { pinned } = parse(params)?;
-            let config = state
-                .save_config(|c| c.monitor.always_on_top = pinned)
-                .await?;
-            reply(config.monitor)
         }
         "set_monitor_trail" => {
             let Enabled { enabled } = parse(params)?;
@@ -688,7 +675,6 @@ mod tests {
             brand: "Washizu".into(),
             platform: Platform::Majsoul,
             monitor: MonitorConfig {
-                always_on_top: true,
                 quick_confirm: true,
                 ..MonitorConfig::default()
             },
@@ -700,7 +686,7 @@ mod tests {
                 "brand": "Washizu",
                 "platform": "Majsoul",
                 "monitor": {
-                    "always_on_top": true, "pointer_trail": false, "pointer_lean": false,
+                    "pointer_trail": false, "pointer_lean": false,
                     "quick_confirm": true, "auto_win": false, "auto_continue": false,
                     "stream_output": false, "stream_port": 0, "stream_token": "",
                 },

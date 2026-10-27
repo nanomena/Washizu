@@ -134,7 +134,7 @@ let gameAt = null
 /**
  * The window's options as the core last saved them, the build's version, and
  * where the stream is served while it is.
- * @typedef {{ always_on_top: boolean, pointer_trail?: boolean, pointer_lean?: boolean,
+ * @typedef {{ pointer_trail?: boolean, pointer_lean?: boolean,
  *   quick_confirm?: boolean, auto_win?: boolean, auto_continue?: boolean,
  *   stream_output?: boolean, stream_port?: number, stream_token?: string, stream_url?: string, version?: string,
  *   game_view?: GameView, game_view_now?: GameView, spout_output?: boolean, spout_available?: boolean,
@@ -142,7 +142,7 @@ let gameAt = null
  * @typedef {'window' | 'offscreen'} GameView
  */
 /** @type {Options} */
-let options = { always_on_top: false }
+let options = {}
 /** How the game is to be shown, and whether to send it to a streaming program over Spout, as last chosen. */
 const viewChoice = readView()
 /** How the game is shown in this run: chosen at the start, kept to the end. */
@@ -236,7 +236,6 @@ function openWindow(ready) {
     // A maximized or full-screen window cannot keep the canvas's ratio.
     maximizable: false,
     fullscreenable: false,
-    alwaysOnTop: ready.monitor.always_on_top,
     backgroundColor: BACKGROUND,
     show: false,
   })
@@ -723,12 +722,6 @@ const commands = {
   async copy_stream_url() {
     if (!options.stream_url) throw new Error('The stream is not on.')
     clipboard.writeText(options.stream_url)
-  },
-  async set_monitor_pinned({ pinned }) {
-    const saved = /** @type {{ always_on_top: boolean }} */ (await running().call('set_monitor_pinned', { pinned: pinned === true }))
-    options = { ...options, ...saved }
-    window?.setAlwaysOnTop(options.always_on_top)
-    return options
   },
   async resize_monitor_game({ bounds }) {
     placeGame(bounds)

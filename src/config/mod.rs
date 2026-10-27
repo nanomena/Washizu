@@ -165,15 +165,15 @@ mod tests {
         let target = dir.join("config.toml");
         std::fs::write(
             &target,
-            "[monitor]\nalways_on_top = true\n\n[overlay]\nenabled = true\n",
+            "[monitor]\nquick_confirm = true\n\n[overlay]\nenabled = true\n",
         )
         .unwrap();
 
         let cfg = load_config(&target);
-        assert!(cfg.monitor.always_on_top);
+        assert!(cfg.monitor.quick_confirm);
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
-            "[monitor]\nalways_on_top = true\n\n[overlay]\nenabled = true\n",
+            "[monitor]\nquick_confirm = true\n\n[overlay]\nenabled = true\n",
             "loading leaves the file as it is"
         );
 

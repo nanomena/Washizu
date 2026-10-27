@@ -49,7 +49,7 @@ it.
   puts tokens and cookies into the session's files.
 - `autoplay` (`autoplay.rs`) — whether a bot's decisions are played, and how:
   click timings for Mahjong Soul and the delay model.
-- `monitor` (`monitor.rs`) — the window's options: `always_on_top`.
+- `monitor` (`monitor.rs`) — pointer display, autoplay between-hand options and stream output.
 
 ## Adding a section
 

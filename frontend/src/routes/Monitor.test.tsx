@@ -5,7 +5,7 @@ import { setLang } from '@/lib/i18n'
 
 const fixture = vi.hoisted(() => ({
   snapshot: null as MonitorSnapshot | null,
-  options: { always_on_top: false } as MonitorConfig,
+  options: {} as MonitorConfig,
   calls: [] as Array<[string, unknown]>,
   /** What the core answers when an earlier hand's events are asked for. */
   handEvents: [] as MonitorEvent[],
@@ -17,7 +17,6 @@ vi.mock('@/lib/host', () => ({
   listen: vi.fn(() => () => {}),
   invoke: vi.fn(async (cmd: string, args?: unknown) => {
     fixture.calls.push([cmd, args])
-    if (cmd === 'set_monitor_pinned') fixture.options = { ...fixture.options, always_on_top: (args as { pinned: boolean }).pinned }
     if (cmd === 'set_monitor_trail') fixture.options = { ...fixture.options, pointer_trail: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_lean') fixture.options = { ...fixture.options, pointer_lean: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_confirm') fixture.options = { ...fixture.options, quick_confirm: (args as { enabled: boolean }).enabled }
@@ -29,7 +28,7 @@ vi.mock('@/lib/host', () => ({
     }
     if (cmd === 'get_hand_events') return fixture.handEvents
     if (cmd === 'get_history') return fixture.history
-    return ['get_monitor_options', 'set_monitor_pinned', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_monitor_stream'].includes(cmd) ? fixture.options : undefined
+    return ['get_monitor_options', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_monitor_stream'].includes(cmd) ? fixture.options : undefined
   }),
 }))
 // No canvas under jsdom, so mahgen cannot draw. A tile is then an <img> whose
@@ -57,7 +56,7 @@ const decision = () => screen.getByRole('status').closest('section')!
 const candidates = () => screen.queryAllByRole('listitem').filter(li => li.className.includes('mcand'))
 
 describe('monitor user states', () => {
-  beforeEach(() => { fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = [] })
+  beforeEach(() => { fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = [] })
 
 
   it('shows the selected source on every tab and never switches sources in the UI', () => {
@@ -94,7 +93,7 @@ describe('monitor user states', () => {
   })
 
   it('offers Tenhou play without promising automatic rematching', async () => {
-    fixture.options = { always_on_top: false, platform: 'Tenhou', profile_name: '天凤主号' }
+    fixture.options = { platform: 'Tenhou', profile_name: '天凤主号' }
     fixture.snapshot!.autoplay_enabled = false
     render(<Monitor />)
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
@@ -270,7 +269,7 @@ describe('monitor user states', () => {
 
   it('does not open the game again when capture says its view is already there', async () => {
     render(<Monitor />)
-    await waitFor(() => expect((screen.getByRole('button', { name: '置顶' }) as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
     expect(fixture.calls.some(([cmd]) => cmd === 'open_monitor_game')).toBe(false)
   })
 
@@ -311,18 +310,6 @@ describe('monitor user states', () => {
     expect(shown.filter(alt => alt === '白')).toHaveLength(3)
   })
 
-  it('is one window with one control of its own: staying on top', async () => {
-    render(<Monitor />)
-    const pin = screen.getByRole('button', { name: '置顶' })
-    await waitFor(() => expect((pin as HTMLButtonElement).disabled).toBe(false))
-    expect(pin.getAttribute('aria-pressed')).toBe('false')
-    fireEvent.click(pin)
-    await waitFor(() => expect(pin.getAttribute('aria-pressed')).toBe('true'))
-    expect(fixture.calls).toContainEqual(['set_monitor_pinned', { pinned: true }])
-    // No second shape to fold into, and no other window to go to.
-    expect(screen.queryByRole('button', { name: '收起' })).toBeNull()
-    expect(screen.queryByRole('button', { name: '主界面' })).toBeNull()
-  })
 
   it('puts the game exactly where the stage is once it is open in this window', async () => {
     const stage = { x: 0, y: 0, width: 960, height: 540 }
@@ -339,7 +326,7 @@ describe('monitor user states', () => {
 describe('the game as a whole', () => {
   const draw = { kind: 'draw', hands: [], scores: [25000, 25000, 25000, 25000], deltas: [0, 0, 0, 0] }
   const win = { kind: 'hora', hands: [], scores: [33000, 17000, 25000, 25000], deltas: [8000, -8000, 0, 0] }
-  beforeEach(() => { fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = [] })
+  beforeEach(() => { fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = [] })
 
   it('shows the links as one light that is green when everything the window runs is up', () => {
     const { unmount } = render(<Monitor />)
@@ -413,7 +400,7 @@ describe('the record', () => {
     match_info: { platform: 'majsoul', mode_id: room }, ...(points == null ? {} : { our_rank_points: points }),
   })
   beforeEach(() => {
-    fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = []
+    fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = []
     fixture.history = [
       // A friends' table: no rank points to speak of, and a record from before yaku were kept.
       game(2, 0, 0, { round: 8, agari: 2, houjuu: 0, riichi: 1 }),
@@ -509,7 +496,7 @@ describe('the record', () => {
 
 describe('the settings', () => {
   beforeEach(() => {
-    fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = []; fixture.history = []
+    fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = []; fixture.history = []
     localStorage.removeItem('akagi.settings.group')
   })
   const group = (name: string) => fireEvent.click(screen.getByRole('button', { name }))
@@ -558,7 +545,7 @@ describe('the settings', () => {
     unmount()
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    expect(screen.getByRole('switch', { name: '窗口置顶' })).toBeTruthy()
+    expect(screen.getByRole('switch', { name: 'Spout 输出' })).toBeTruthy()
   })
 
   it('has the switches of the window with their words', async () => {
@@ -591,13 +578,7 @@ describe('the settings', () => {
       expect(fixture.calls).toContainEqual([command, { enabled: true }])
     }
 
-    // The same two switches the bar has: one setting, two places to change it.
     group('画面与窗口')
-    const pin = screen.getByRole('switch', { name: '窗口置顶' })
-    expect(pin.getAttribute('aria-checked')).toBe('false')
-    fireEvent.click(pin)
-    await waitFor(() => expect(screen.getByRole('switch', { name: '窗口置顶' }).getAttribute('aria-checked')).toBe('true'))
-    expect(fixture.calls).toContainEqual(['set_monitor_pinned', { pinned: true }])
 
     // The stream: off, its copy button is there but not shown; on, the address is the line under it.
     const copy = screen.getByRole('button', { name: '复制直播地址', hidden: true })
@@ -621,7 +602,7 @@ describe('the settings', () => {
 describe('another language', () => {
   const chinese = /[\u3400-\u9fff]/
   beforeEach(() => {
-    fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = []
+    fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = []
     fixture.history = [{ id: 'G', ended_at: '2026-01-01T00:00:00Z', platform: 'majsoul', num_players: 4, our_seat: 0, final_scores: [25000, 25000, 25000, 25000],
       our_rank: 1, our_rank_points: 80, stats: { round: 10, agari: 3, houjuu: 1, riichi: 2 }, yaku: { 2: 2, 12: 1, 99: 1 }, match_info: { platform: 'majsoul', mode_id: 9 } }]
     const draw = { kind: 'yao9', hands: [{ seat: 1, tiles: ['1m', '9m', 'E'], winning_tile: null, target: null, ura_markers: [] }], scores: [25000, 25000, 25000, 25000], deltas: [0, 0, 0, 0] }

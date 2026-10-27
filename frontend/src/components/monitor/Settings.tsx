@@ -11,7 +11,6 @@ type Props = {
   health: Health[]
   now: number
   /** `null` while the window's own options have not been read, or are being written. */
-  onPin: ((pinned: boolean) => void) | null
   onLevel: ((level: AutoplayLevel) => void) | null
   onTrail: ((enabled: boolean) => void) | null
   onLean: ((enabled: boolean) => void) | null
@@ -78,7 +77,7 @@ function AutoplayRows({ snapshot: s, options, onLevel, onConfirm, onAutoWin, onL
 
 /** How the game is shown and streamed; then the window itself. The page's renderer
  *  is chosen as it starts, so a change of view waits for the next start. */
-function ViewRows({ options, onStream, onCopyStream, onGameView, onSpout, onPin }: Props) {
+function ViewRows({ options, onStream, onCopyStream, onGameView, onSpout }: Props) {
   const lang = useLang()
   const url = options.stream_output ? options.stream_url ?? '' : ''
   const viewPending = (options.game_view ?? 'window') !== (options.game_view_now ?? 'window')
@@ -95,7 +94,6 @@ function ViewRows({ options, onStream, onCopyStream, onGameView, onSpout, onPin 
     <Row name={tr('离屏渲染')} about={viewPending ? tr('重启应用后生效') : tr('游戏在窗口外按 2560×1440 绘制')}
       control={<Switch name={tr('离屏渲染')} on={options.game_view === 'offscreen'} onChange={onGameView && (next => onGameView(next ? 'offscreen' : 'window'))} />} />
     <Row name={tr('Spout 输出')} about={spout} control={<Switch name={tr('Spout 输出')} on={!!options.spout_output} onChange={options.spout_available ? onSpout : null} />} />
-    <Row name={tr('窗口置顶')} about={tr('让这个窗口保持在其他窗口之上')} control={<Switch name={tr('窗口置顶')} on={options.always_on_top} onChange={onPin} />} />
     <Row name={tr('界面语言')} about={tr('只改变这个窗口里的文字')}
       control={/* Each language under its own name, whatever language is showing. */
         <select className="mselect" aria-label={tr('界面语言')} value={lang} onChange={e => setLang(e.target.value as Lang)}>

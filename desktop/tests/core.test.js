@@ -11,7 +11,7 @@ const start = (/** @type {string} */ mode) => new Core(process.execPath, [STAND_
 
 test('the core says it is ready, answers by id, and refuses by message', async () => {
   const core = start('ok')
-  assert.deepEqual(await core.ready, { brand: 'Stand-in', platform: 'Majsoul', monitor: { always_on_top: false }, version: '0.0.0' })
+  assert.deepEqual(await core.ready, { brand: 'Stand-in', platform: 'Majsoul', monitor: {}, version: '0.0.0' })
   // Asked together, answered each to its own.
   const [first, second] = await Promise.all([core.call('echo', { n: 1 }), core.call('echo', { n: 2 })])
   assert.deepEqual([first, second], [{ n: 1 }, { n: 2 }])

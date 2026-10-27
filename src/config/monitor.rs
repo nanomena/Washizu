@@ -1,14 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 /// The application's window. It is always open — it is the application — so
-/// what is left to choose is whether it stays above other windows, how
-/// autoplay's hand shows — its pointer drawn over the game, resting between
+/// its options describe how autoplay's hand shows — its pointer drawn over
+/// the game, resting between
 /// turns where the next discard is likely to be, and what it presses between
 /// decisions — and whether the game is offered to a streaming program.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MonitorConfig {
-    pub always_on_top: bool,
     /// Draw autoplay's pointer over the game: the path it takes and where it presses.
     pub pointer_trail: bool,
     /// While the others play, rest autoplay's pointer on the tiles the bot
