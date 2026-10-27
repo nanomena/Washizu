@@ -245,9 +245,9 @@ function gamePage() {
 
 /**
  * The game drawn offscreen, in a window that is never shown. The page's size
- * comes from that window, through the system's scaling of a window that has
- * a frame: without one, and with its corner on a whole number of pixels at any
- * scale, it is exactly the size asked for (checked again on every frame).
+ * comes from the window's content area. Set it explicitly after construction:
+ * at fractional display scales the initial native bounds may be rounded up.
+ * The fixed output size is checked again on every frame.
  */
 function createOffscreenGame() {
   const win = new BrowserWindow({
@@ -262,7 +262,8 @@ function createOffscreenGame() {
   guardGame(page)
   const meter = new FrameMeter(OFFSCREEN.fps, WATCH_MS)
   watchGame(page, meter)
-  const resize = () => win.setBounds({ x: 0, y: 0, width: OFFSCREEN.width, height: OFFSCREEN.height })
+  const resize = () => win.setContentSize(OFFSCREEN.width, OFFSCREEN.height)
+  resize()
   const fanout = relay = new Relay({ expected: { width: OFFSCREEN.width * OFFSCREEN.scale, height: OFFSCREEN.height * OFFSCREEN.scale }, onSize: resize, log: note })
   fanout.add(pageTaker({ sharedTexture, frame: () => dock?.webContents.mainFrame ?? null, log: note }))
   page.on('paint', event => {

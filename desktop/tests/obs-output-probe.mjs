@@ -59,6 +59,7 @@ class Window extends EventEmitter {
   getContentSize() { return [1000, 750] }
   getContentBounds() { return { x: 0, y: 0, width: 1000, height: 750 } }
   setBounds() {}
+  setContentSize(width, height) { this.contentSize = [width, height] }
   isMinimized() { return this.minimized }
   restore() { presentation.push('restore'); this.minimized = false }
   show() { presentation.push('show'); this.visible = true }
@@ -202,6 +203,10 @@ try {
   assert.equal(views.length, 1, 'only the dock uses a WebContentsView')
   assert.equal(game.options.width, 1280)
   assert.equal(game.options.height, 720)
+  assert.deepEqual(game.contentSize, [1280, 720], 'the game content is sized before its first load')
+  game.contentSize = [1282, 722]
+  screen.emit('display-metrics-changed')
+  assert.deepEqual(game.contentSize, [1280, 720], 'display changes restore the fixed content area')
   assert.equal(game.options.webPreferences.offscreen.deviceScaleFactor, 2)
   assert.equal(calls.at(-1).method, 'open_game')
   if (unavailable) {
