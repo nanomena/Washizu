@@ -280,8 +280,7 @@
     const data = native.lobby.read();
     if (!u32(data.lobby) || !Array.isArray(data.selected)) return { dto };
     const identity = base + ':lobby:' + data.lobby;
-    const offers = [];
-    const entries = [];
+    const byMode = new Map();
     for (const button of element.querySelectorAll('button[name="join"]')) {
       // Event/tournament buttons do not have a selected-rule slot. Never
       // reinterpret those buttons, move a tab, or choose a different rule.
@@ -294,9 +293,20 @@
       // uses that real button's id and stored rule, independent of the pane.
       const enabled = !current.closing && !blocked && visible(element) && data.loaded && !button.disabled;
       const offer = { identity: identity + ':join:' + nodeId(button) + ':' + mode, mode, enabled: !!enabled };
-      offers.push(offer);
-      entries.push({ offer, button });
+      // The official join handler reads selected[slot] and reserves that
+      // exact lobby/mode. Its main rows and shortcut panes may select the
+      // same mode; normalize those aliases before the FSM sees a choice.
+      // Prefer an enabled control, then the lowest native rule slot. Keep
+      // the actual button identity so replacements revoke pending effects.
+      const slot = Number(match[1]);
+      const previous = byMode.get(mode);
+      if (!previous || enabled && !previous.offer.enabled
+        || !!enabled === previous.offer.enabled && slot < previous.slot) {
+        byMode.set(mode, { offer, button, slot });
+      }
     }
+    const entries = [...byMode.values()].sort((a, b) => a.slot - b.slot);
+    const offers = entries.map(entry => entry.offer);
     dto.lobby = { identity, lobby: data.lobby, offers, reservationRequested: !!data.reservationRequested };
     return { dto, element, entries };
   }

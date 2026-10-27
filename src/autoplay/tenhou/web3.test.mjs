@@ -25,6 +25,7 @@ function fixture() {
   const canvas = new Element('CANVAS'), menuRoot = new Element(), handPanel = new Element();
   const state = { epoch: 1, uiEpoch: 1, live: 1, actor: 0, hand: [0, 4, 8, 12, 16, 17, 20, 24, 28, 32, 36, 40, 44, 48], drawn: 48,
     riichi: false, ready: true, mounted: true, pressed: false, modal: false, popup: { element: null }, controls: {}, offers: {},
+    selected: ['1', '9'], loaded: true, reservationRequested: false,
     ratio: 2, left: 20, top: 30, width: 80, height: 120, scrollX: 0, scrollY: 0, overlay: null, effects: [],
     clockFacts: { startedAt: 100, now: 250, fixedMs: 5000, bankMs: 7000, remainingMs: 11850 } };
   state.cards = state.hand.map((_, i) => Object.assign(new Card(), { slot: i, present: true, legal: true, blocked: false, x: i * 82, y: 800 }));
@@ -40,7 +41,8 @@ function fixture() {
       reveal: code => state.controls[code & 8192 ? 3670533 : code & 16384 ? 3671045 : -1] },
     geometry: { read: () => ({ ...state, canvas, menuRoot, handPanel }) },
     popup: { read: () => state.popup, ok: () => state.effects.push('popup') },
-    lobby: { read: () => ({ lobby: 0, selected: ['1', '9'], reservationRequested: false, loaded: true }), join: button => state.effects.push(button.id) },
+    lobby: { read: () => ({ lobby: 0, selected: state.selected, reservationRequested: state.reservationRequested, loaded: state.loaded }),
+      join: button => { state.effects.push(button.id); state.reservationRequested = true; state.uiEpoch++; } },
   };
   const context = vm.createContext({ native, crypto: { randomUUID: () => 'doc-' + ++documentNo }, innerWidth: 800, innerHeight: 600,
     pageXOffset: 0, pageYOffset: 0, getComputedStyle: node => node.style,
@@ -137,4 +139,46 @@ test('clock origin and actual granted bank survive repeated reads and bank consu
   assert.deepEqual(plain(f.api.readInput().clock), { elapsedMs: 6000, fixedMs: 5000, grantedBankMs: 7000, remainingBaseMs: 0, remainingBankMs: 6000 });
   assert.deepEqual(plain(f.api.readInput().clock), plain(f.api.readInput().clock));
   f.state.ready = false; assert.equal(f.api.readInput().clock, null);
+});
+
+function lobby(f, selected, slots) {
+  const element = new Element();
+  const buttons = slots.map(slot => { const button = new Element('BUTTON'); button.name = 'join'; button.id = 'join' + slot; element.append(button); return button; });
+  f.state.selected = selected;
+  f.state.popup = { element, tag: 'LOBBY', closing: false, queued: 0 };
+  return buttons;
+}
+test('live lobby shortcut aliases reserve one exact rule through a canonical real control', () => {
+  const f = fixture();
+  // Actual lobby 0 has three enabled aliases for mode 1, including shortcuts.
+  lobby(f, ['1', '0', '0', '1', '1', '9'], [4, 3, 0, 1, 2, 5]);
+  const first = f.api.readUi();
+  assert.deepEqual(plain(first.lobby.offers.map(offer => offer.mode)), [1, 0, 9]);
+  assert.equal(first.lobby.offers.filter(offer => offer.mode === 1).length, 1);
+  assert.equal(f.api.pressUi('join', first.lobby.offers[0].identity), 'sent');
+  assert.deepEqual(f.state.effects, ['join0']);
+  assert.equal(f.api.readUi().lobby.reservationRequested, true);
+  assert.equal(f.api.pressUi('join', first.lobby.offers[0].identity), 'changed');
+});
+test('a disabled or replaced lobby alias revokes its old permission without changing rules', () => {
+  const f = fixture(), buttons = lobby(f, ['1', '9', '33', '1'], [0, 1, 3]);
+  const first = f.api.readUi().lobby.offers.find(offer => offer.mode === 1);
+  buttons[0].disabled = true;
+  const next = f.api.readUi().lobby.offers.find(offer => offer.mode === 1);
+  assert.equal(next.enabled, true); assert.notEqual(next.identity, first.identity);
+  assert.equal(f.api.pressUi('join', first.identity), 'changed');
+  f.state.selected[3] = '33';
+  assert.equal(f.api.pressUi('join', next.identity), 'changed');
+  assert.deepEqual(f.state.effects, []);
+  const unavailable = f.api.readUi().lobby.offers.find(offer => offer.mode === 1);
+  assert.equal(unavailable.enabled, false);
+});
+
+test('CDP attach recognizes the read-only playing contract without forcing a reload', () => {
+  const capture = readFileSync(new URL('../../capture/cdp.rs', import.meta.url), 'utf8');
+  const expression = JSON.parse(capture.match(/let expr = ("[^\n]+window\.__akagiTenhou[^\n]+");/)[1]);
+  const api = fixture().api;
+  assert.equal(vm.runInNewContext(expression, { window: { __akagiTenhou: api }, location: { host: 'tenhou.net' } }), true);
+  assert.equal(vm.runInNewContext(expression, { window: { __akagiTenhou: { ...api, probeTarget: undefined } }, location: { host: 'tenhou.net' } }), false);
+  assert.equal(vm.runInNewContext(expression, { window: {}, location: { host: 'game.maj-soul.com' } }), true);
 });
