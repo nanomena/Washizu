@@ -239,6 +239,50 @@ fn final_returns_to_lobby_then_only_the_exact_real_table_can_be_reserved() {
 }
 
 #[test]
+fn real_rank_certificate_after_final_does_not_block_or_duplicate_the_rematch() {
+    let mut h = Harness::new(Some(target()));
+    h.final_sent();
+    let notice = popup("rank-nine", PopupTag::RankNotice, 0);
+    assert!(matches!(
+        h.press(&notice),
+        Control::Popup {
+            tag: PopupTag::RankNotice,
+            ..
+        }
+    ));
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::WaitingLobby));
+    h.observe_only(&notice, 8);
+    assert_eq!(h.sent.len(), 2);
+    assert!(matches!(
+        h.press(&lobby()),
+        Control::Reserve { mode: 169, .. }
+    ));
+    assert_eq!(h.sent.len(), 3);
+}
+
+#[test]
+fn rank_notice_requires_completed_match_target_and_continue_permission() {
+    for change in 0..5 {
+        let mut h = Harness::new(if change == 3 { None } else { Some(target()) });
+        if change >= 2 {
+            h.final_sent();
+        }
+        if change == 1 {
+            h.ui.table_started(None);
+        }
+        if change == 2 {
+            h.env.settings.auto_continue = false;
+        }
+        if change == 4 {
+            h.ui.web_game_started(None, Some(target()), h.now);
+        }
+        let before = h.sent.len();
+        h.observe_only(&popup("rank-notice", PopupTag::RankNotice, 0), 8);
+        assert_eq!(h.sent.len(), before, "change {change}");
+    }
+}
+
+#[test]
 fn absent_target_or_changed_ambiguous_and_disabled_offers_never_choose_another_mode() {
     for change in 0..5 {
         let mut h = Harness::new(if change == 0 { None } else { Some(target()) });

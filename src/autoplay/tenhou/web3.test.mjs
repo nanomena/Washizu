@@ -174,6 +174,20 @@ test('a disabled or replaced lobby alias revokes its old permission without chan
   assert.equal(unavailable.enabled, false);
 });
 
+test('rank notice is an observed UI control while login and unknown prompts stay unavailable', () => {
+  const f = fixture(), element = new Element(), button = new Element('BUTTON');
+  button.name = 'ok'; element.append(button);
+  f.state.popup = { element, tag: 'NINTEI', queued: 0, closing: false };
+  assert.equal(f.api.readUi().popup.enabled, true);
+  for (const tag of ['LOGIN', 'AUTOLOGIN', 'SPLASH', 'UNKNOWN']) {
+    f.state.popup.tag = tag;
+    const popup = f.api.readUi().popup;
+    assert.equal(popup.enabled, false);
+    assert.equal(f.api.pressUi('popup', popup.identity), 'changed');
+  }
+  assert.deepEqual(f.state.effects, []);
+});
+
 test('CDP attach recognizes the read-only playing contract without forcing a reload', () => {
   const capture = readFileSync(new URL('../../capture/cdp.rs', import.meta.url), 'utf8');
   const expression = JSON.parse(capture.match(/let expr = ("[^\n]+window\.__akagiTenhou[^\n]+");/)[1]);

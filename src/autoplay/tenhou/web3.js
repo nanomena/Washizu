@@ -7,7 +7,7 @@
   const documentId = globalThis.crypto.randomUUID();
   const nodes = new WeakMap();
   let nextNode = 0;
-  const allowedPopups = new Set(['TAIKYOKU', 'AGARI', 'RYUUKYOKU', 'OWARI']);
+  const allowedPopups = new Set(['TAIKYOKU', 'AGARI', 'RYUUKYOKU', 'OWARI', 'NINTEI']);
   const u32 = value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
   const tile = value => Number.isInteger(value) && value >= 0 && value < 136;
   const nodeId = node => {

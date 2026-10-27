@@ -32,6 +32,8 @@ pub enum PopupTag {
     Draw,
     #[serde(rename = "OWARI")]
     Final,
+    #[serde(rename = "NINTEI")]
+    RankNotice,
     #[serde(other)]
     Other,
 }
@@ -194,6 +196,14 @@ impl Run {
                 tag: PopupTag::Final,
                 ..
             } => env.settings.auto_continue && self.stage == Stage::FinalResult,
+            Control::Popup {
+                tag: PopupTag::RankNotice,
+                ..
+            } => {
+                env.settings.auto_continue
+                    && self.stage == Stage::WaitingLobby
+                    && self.target.is_some()
+            }
             Control::Reserve { lobby, mode, .. } => {
                 env.settings.auto_continue
                     && self.stage == Stage::WaitingLobby
@@ -241,6 +251,10 @@ impl Run {
                 {
                     Stage::FinalResult
                 }
+                // The real client can queue a rank certificate after OWARI.
+                // It belongs to the completed match's return-to-lobby path,
+                // never to login/startup or a live table.
+                PopupTag::RankNotice if self.stage == Stage::WaitingLobby => Stage::WaitingLobby,
                 _ => return None,
             };
             if self.stage != stage {
