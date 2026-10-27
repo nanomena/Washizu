@@ -29,7 +29,8 @@ describe('monitor stream identities', () => {
       primary: { state: 'ready', through: 10 }, standby: { state: 'ready', through: 10 },
     } })
     const phases: Array<[ForecastStatus, string]> = [
-      [{ owner: 7, state: 'disabled' }, '已关闭'],
+      [{ owner: 7, state: 'idle' }, '等待对局'],
+      [{ owner: 7, state: 'disabled' }, '未运行'],
       [{ owner: 7, state: 'unsupported', reason: 'protocol lacks forecast' }, '不支持'],
       [{ owner: 7, state: 'waiting' }, '等待中'],
       [{ owner: 7, state: 'running', context: d.context, through: 10, position: 6 }, '计算中'],
@@ -38,15 +39,18 @@ describe('monitor stream identities', () => {
     ]
     for (const [forecast, label] of phases) {
       const next = { ...s, forecast }
-      expect(forecastView(forecast).label).toBe(label)
-      if ('reason' in forecast) expect(forecastView(forecast).detail).toBe(forecast.reason)
+      expect(forecastView(forecast, true, true, true).label).toBe(label)
+      if ('reason' in forecast) expect(forecastView(forecast, true, true, true).detail).toBe(forecast.reason)
       expect(decisionView(next)).toEqual(decisionView(s))
       expect(decisionSound(next)).toBe(true)
       expect(healthOf(next)).toEqual(healthOf(s))
       expect(alertsOf(next, { ui: null, bridge: null })).toEqual([])
       expect(controlLabel(next.control!)).toBe('主模型 · 主模型就绪')
     }
-    expect(forecastView(null)).toEqual({ label: '读取中', detail: '正在读取预推理状态', tone: 'idle' })
+    expect(forecastView(null, true, true, true)).toEqual({ label: '读取中', detail: '正在读取预推理状态', tone: 'idle' })
+    expect(forecastView({ owner: 0, state: 'idle' }, false, true, true).label).toBe('已关闭')
+    expect(forecastView({ owner: 0, state: 'idle' }, true, false, true).label).toBe('等待自动操作')
+    expect(forecastView({ owner: 0, state: 'idle' }, true, true, false).label).toBe('等待 Bot')
   })
 
   it('keeps standby advice valid during a primary fault and still rejects a real tracker gap', () => {

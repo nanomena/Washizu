@@ -74,7 +74,8 @@ describe('monitor user states', () => {
       primary: { state: 'recovering', through: 9, reason: 'primary recovering' }, standby: { state: 'ready', through: 10 },
     }
     const phases: Array<[ForecastStatus, string]> = [
-      [{ owner: 8, state: 'disabled' }, '已关闭'],
+      [{ owner: 8, state: 'idle' }, '等待 Bot'],
+      [{ owner: 8, state: 'disabled' }, '未运行'],
       [{ owner: 8, state: 'unsupported', reason: 'worker protocol unsupported' }, '不支持'],
       [{ owner: 8, state: 'waiting' }, '等待中'],
       [{ owner: 8, state: 'running', context, through: 10, position: 4 }, '计算中'],
@@ -112,6 +113,21 @@ describe('monitor user states', () => {
     expect(screen.getByRole('group', { name: '预推理状态' }).textContent).toBe('预推理 · 读取中')
   })
 
+  it.each(['Majsoul', 'Tenhou'] as const)('shows enabled lobby forecasts as waiting and shares controls on %s', async platform => {
+    fixture.options = { platform, pointer_lean: true, pointer_trail: true }
+    fixture.snapshot = { ...state(), forecast: { owner: 0, state: 'idle' }, game_ended: true, bot: { state: 'idle' } }
+    render(<Monitor />)
+    await waitFor(() => expect(screen.getByRole('group', { name: '预推理状态' }).textContent).toBe('预推理 · 等待对局'))
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
+    expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByRole('switch', { name: '光标轨迹' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText(/等待对局 · 尚无预推理任务/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('switch', { name: '预推理' }))
+    await waitFor(() => expect(screen.getByRole('group', { name: '预推理状态' }).textContent).toBe('预推理 · 已关闭'))
+    expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: false }])
+  })
+
 
   it('shows the selected source on every tab and never switches sources in the UI', () => {
     fixture.snapshot!.control = {
@@ -147,7 +163,7 @@ describe('monitor user states', () => {
   })
 
   it('offers Tenhou play and rematch through the shared core settings and keeps both controls in sync', async () => {
-    fixture.options = { platform: 'Tenhou', profile_name: '天凤主号' }
+    fixture.options = { platform: 'Tenhou', profile_name: '天凤主号', pointer_lean: false, pointer_trail: false }
     fixture.snapshot!.autoplay_enabled = false
     const { rerender } = render(<Monitor />)
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
@@ -170,6 +186,12 @@ describe('monitor user states', () => {
     expect(confirm.disabled).toBe(false)
     fireEvent.click(confirm)
     await waitFor(() => expect(fixture.calls).toContainEqual(['set_monitor_confirm', { enabled: true }]))
+      fireEvent.click(screen.getByRole('switch', { name: '预推理' }))
+      await waitFor(() => expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: true }]))
+      fireEvent.click(screen.getByRole('switch', { name: '光标轨迹' }))
+      await waitFor(() => expect(fixture.calls).toContainEqual(['set_monitor_trail', { enabled: true }]))
+      expect(screen.getByText('暂未适配')).toBeTruthy()
+      expect(screen.queryByRole('switch', { name: '客户端自动和牌' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '应用' }))
     expect(screen.getByText('天凤主号')).toBeTruthy()
     expect(screen.getByText('天凤')).toBeTruthy()
@@ -637,7 +659,7 @@ describe('the settings', () => {
     expect(fixture.calls).toContainEqual(['set_monitor_lean', { enabled: true }])
 
     // What autoplay presses between decisions: each its own switch, saved by the core.
-    for (const [name, command] of [['快速确认', 'set_monitor_confirm'], ['自动和牌', 'set_monitor_auto_win']]) {
+    for (const [name, command] of [['快速确认', 'set_monitor_confirm'], ['客户端自动和牌', 'set_monitor_auto_win']]) {
       const row = screen.getByRole('switch', { name })
       expect(row.getAttribute('aria-checked')).toBe('false')
       fireEvent.click(row)

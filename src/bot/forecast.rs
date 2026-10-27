@@ -79,6 +79,8 @@ impl ForecastLean {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ForecastPhase {
+    /// No game owns a forecast worker. This is not the saved preference.
+    Idle,
     Disabled,
     Unsupported {
         reason: String,
@@ -111,7 +113,7 @@ fn statuses() -> &'static watch::Sender<ForecastStatus> {
     STATUS.get_or_init(|| {
         watch::channel(ForecastStatus {
             owner: 0,
-            phase: ForecastPhase::Disabled,
+            phase: ForecastPhase::Idle,
         })
         .0
     })
@@ -412,7 +414,7 @@ impl ForecastWorker {
         *state = OwnerState::Closed;
         self.input.jobs.send_replace(None);
         self.stop.send_replace(true);
-        set_status(self.input.owner, ForecastPhase::Disabled);
+        set_status(self.input.owner, ForecastPhase::Idle);
     }
     pub async fn close(mut self) {
         self.stop();

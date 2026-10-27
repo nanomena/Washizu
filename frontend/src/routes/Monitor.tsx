@@ -99,7 +99,7 @@ function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onCon
   const { s, view } = m
   const game = s?.game ?? null
   const link = linkOf(m.health)
-  const forecast = forecastView(s?.forecast ?? null)
+  const forecast = forecastView(s?.forecast ?? null, options.pointer_lean, s?.autoplay_enabled, s?.game_ended)
   // A tab shows what it holds while the pointer rests on it; a click keeps it.
   // Leaving the dock goes back to the tab kept. The pause keeps a pointer on
   // its way across the tabs from flicking through them.

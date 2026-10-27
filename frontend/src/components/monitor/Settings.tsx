@@ -42,15 +42,15 @@ function AutoplayRows({ snapshot: s, options, onLevel, onConfirm, onAutoWin, onL
   const sw = (name: string, on: boolean, onChange: ((on: boolean) => void) | null) => <Switch name={name} on={on} onChange={onChange} />
   const level = levelOf(s, options)
   const tenhou = options.platform === 'Tenhou'
-  const forecast = forecastView(s?.forecast ?? null)
+  const forecast = forecastView(s?.forecast ?? null, options.pointer_lean, s?.autoplay_enabled, s?.game_ended)
   return <>
     <Row name={tr('自动操作')} about={tenhou ? tr('天凤 Web：首次手动选房，连战沿用上一场实际大厅和规则。') : levelAbout(level ?? 'off')} control={<AutoplayLevels level={level} onLevel={onLevel} />} />
     <Row name={tr('快速确认')} about={tr('和了或流局时，等确认按钮出现再点掉结算')} control={sw(tr('快速确认'), !!options.quick_confirm, onConfirm)} />
-    {!tenhou && <>
-    <Row name={tr('自动和牌')} about={tr('立直或听牌、不到满贯时，某个时刻打开雀魂的自动和牌；没立直时各场第 4 局和西入后不开')} control={sw(tr('自动和牌'), !!options.auto_win, onAutoWin)} />
+    <Row name={tr('客户端自动和牌')}
+      about={tenhou ? tr('天凤尚未适配客户端自动和牌开关；模型选择的荣和、自摸仍由公共自动打牌流程执行。') : tr('立直或听牌、不到满贯时，某个时刻打开雀魂的自动和牌；没立直时各场第 4 局和西入后不开')}
+      control={tenhou ? <span>{tr('暂未适配')}</span> : sw(tr('客户端自动和牌'), !!options.auto_win, onAutoWin)} />
     <Row name={tr('预推理')} about={`${forecast.label} · ${forecast.detail} · ${tr('别家行动时，光标停在下一手可能要打的牌上')}`} control={sw(tr('预推理'), !!options.pointer_lean, onLean)} />
     <Row name={tr('光标轨迹')} about={tr('在游戏画面上画出自动操作的光标和点击')} control={sw(tr('光标轨迹'), !!options.pointer_trail, onTrail)} />
-    </>}
   </>
 }
 

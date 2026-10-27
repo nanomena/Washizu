@@ -875,6 +875,7 @@ mod tests {
             m.complete(id, &reply, 10);
             let before = serde_json::to_value(m.snapshot()).unwrap();
             for phase in [
+                ForecastPhase::Idle,
                 ForecastPhase::Disabled,
                 ForecastPhase::Unsupported {
                     reason: "no forecast protocol".into(),

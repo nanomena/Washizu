@@ -664,6 +664,7 @@ mod tests {
                 reason: "protocol lacks forecast".into(),
             },
             ForecastPhase::Disabled,
+            ForecastPhase::Idle,
         ] {
             let status = ForecastStatus { owner: 12, phase };
             statuses.send_replace(status.clone());
