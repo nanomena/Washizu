@@ -106,6 +106,7 @@ pub trait SiteAdapter: Send + Sync {
         page: &Page,
         context: &ActionContext<'_>,
         intent: &PressIntent,
+        point: Option<(f64, f64)>,
     ) -> anyhow::Result<SiteObservation>;
 }
 
