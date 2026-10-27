@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { FolderOpen, LoaderCircle, Pin, PinOff, X } from 'lucide-react'
+import { LoaderCircle, Pin, PinOff, X } from 'lucide-react'
 import { CandidateList, DecisionCard } from '@/components/monitor/Decision'
 import { GameStage } from '@/components/monitor/GameStage'
 import { HandStrip, ResultCard, ScoreStrip, SeatColumns } from '@/components/monitor/Table'
@@ -97,8 +97,9 @@ type DockProps = {
   onCopyStream: (() => Promise<void>) | null
   onGameView: ((view: GameView) => void) | null
   onSpout: ((enabled: boolean) => void) | null
+  onProfiles: (() => void) | null
 }
-function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail, onLean, onConfirm, onAutoWin, onStream, onCopyStream, onGameView, onSpout }: DockProps) {
+function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail, onLean, onConfirm, onAutoWin, onStream, onCopyStream, onGameView, onSpout, onProfiles }: DockProps) {
   const { s, view } = m
   const game = s?.game ?? null
   const link = linkOf(m.health)
@@ -150,7 +151,7 @@ function Dock({ m, tab: chosen, setTab, tools, options, onLevel, onPin, onTrail,
       {tab === 'stats' && <Statistics game={`${s?.context.game ?? 0}:${s?.game_ended ?? true}`} account={s?.account ?? null} />}
       {tab === 'settings' && <Settings group={group} onGroup={openGroup} snapshot={s} options={options} health={m.health} now={m.now} onPin={onPin} onLevel={onLevel} onTrail={onTrail} onLean={onLean}
         onConfirm={onConfirm} onAutoWin={onAutoWin}
-        onStream={onStream} onCopyStream={onCopyStream} onGameView={onGameView} onSpout={onSpout} />}
+        onStream={onStream} onCopyStream={onCopyStream} onGameView={onGameView} onSpout={onSpout} onProfiles={onProfiles} />}
     </div>
   </aside>
 }
@@ -280,8 +281,6 @@ export function Monitor() {
   const m: Model = { s, view, rows, listState, noRows, faults, health: healthOf(s), elapsed: d ? Math.max(0, now - d.started_ms) : 0, now }
 
   const tools = <>
-    <button className="mtool" aria-label={tr('返回账号档案')} title={tr('返回账号档案')} disabled={!ready || busy}
-      onClick={() => void invoke('return_to_profiles').catch(error => setUiError(String(error)))}><FolderOpen size={15} /></button>
     <button className="mtool" aria-label={tr('置顶')} title={options.always_on_top ? tr('取消置顶') : tr('窗口置顶')} aria-pressed={options.always_on_top} disabled={!ready || busy}
       onClick={() => void pin(!options.always_on_top)}>{options.always_on_top ? <Pin size={15} /> : <PinOff size={15} />}</button>
   </>
@@ -319,6 +318,7 @@ export function Monitor() {
           onStream={ready && !busy ? enabled => void choose('set_monitor_stream', enabled) : null}
           onCopyStream={ready ? copyStream : null}
           onGameView={ready && !busy ? view => void chooseGameView(view) : null}
+          onProfiles={ready && !busy ? () => void invoke('return_to_profiles').catch(error => setUiError(String(error))) : null}
           onSpout={ready && !busy ? enabled => void choose('set_monitor_spout', enabled) : null} />
         {local.length > 0 && <div className="mtoast" role="alert">
           <div><strong>{local[0].title}</strong><p>{local[0].message}</p></div>

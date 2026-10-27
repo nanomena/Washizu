@@ -1,5 +1,10 @@
 /** English. Keys are the page's own Simplified Chinese text. */
 export const en: Record<string, string> = {
+  '显示账号选择器': 'Show account chooser',
+  '关于': 'About',
+  '许可证': 'License',
+  '基于 Shinkuan 的 Akagi v3': 'Based on Shinkuan’s Akagi v3',
+  '版权与第三方声明见随附的 LICENSE.txt 和 NOTICE。': 'Copyright and third-party notices are in the included LICENSE.txt and NOTICE.',
   '天凤四人普通速度段位场：显示建议或自动打牌；对局由你开始。': 'Tenhou normal-speed four-player ranked tables: show suggestions or play automatically. Start each game yourself.',
   '本地备用': 'Local standby',
   '主模型': 'Primary model',
@@ -24,7 +29,6 @@ export const en: Record<string, string> = {
   '档案名称': 'Profile name',
   '取消': 'Cancel',
   '保存': 'Save',
-  '返回账号档案': 'Back to accounts',
   '账号档案': 'Account profile',
   '等待游戏画面': 'Waiting for the game view',
   '天凤': 'Tenhou',

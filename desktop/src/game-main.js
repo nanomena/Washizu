@@ -854,15 +854,7 @@ async function prepare() {
 
 /** Once Electron is ready: start the core, and open the window when the core is ready too. */
 async function start() {
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    ...(process.platform === 'darwin' ? [/** @type {Electron.MenuItemConstructorOptions} */ ({ role: 'appMenu' })] : []),
-    { label: '账号档案', submenu: [
-      { label: `当前：${PROFILE.name}`, enabled: false },
-      { label: '显示账号选择器…', accelerator: 'CmdOrCtrl+Shift+P', click: () => void returnToProfiles().catch(error => note(String(error))) },
-      { type: 'separator' }, { role: 'quit', label: '关闭当前档案' },
-    ] },
-    { label: '关于', submenu: [{ label: '关于 Washizu', click: () => void dialog.showMessageBox({ type: 'info', title: '关于 Washizu', message: 'Washizu', detail: '基于 Shinkuan 的 Akagi v3。\nApache-2.0 许可证；版权与第三方声明见随附的 LICENSE.txt 和 NOTICE。' }) }] },
-  ]))
+  Menu.setApplicationMenu(null)
   serveDock(DOCK_FILES)
   // Before the game's page opens: its service worker is let run from its first start (see `workers.js`).
   void keepWorkersRunning(cdpPort, note)

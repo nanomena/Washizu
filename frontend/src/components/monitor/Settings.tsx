@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Check, Copy } from 'lucide-react'
+import { Check, Copy, FolderOpen } from 'lucide-react'
 import { AutoplayLevels } from '@/components/monitor/AutoplayLevel'
 import { factsOf, levelAbout, levelOf, linkOf, serverLine, type AutoplayLevel, type GameView, type Health, type MonitorConfig, type MonitorSnapshot } from '@/lib/monitor'
 import { LANGS, localized, setLang, tr, useLang, type Lang } from '@/lib/i18n'
@@ -22,6 +22,7 @@ type Props = {
   onAutoWin: ((enabled: boolean) => void) | null
   onGameView: ((view: GameView) => void) | null
   onSpout: ((enabled: boolean) => void) | null
+  onProfiles: (() => void) | null
 }
 
 const Switch = ({ name, on, onChange }: { name: string; on: boolean; onChange: ((on: boolean) => void) | null }) =>
@@ -54,7 +55,7 @@ function CopyButton({ url, onCopy }: { url: string; onCopy: (() => Promise<void>
   </button>
 }
 
-const Line = ({ name, value, note }: { name: string; value: string; note?: string }) =>
+const Line = ({ name, value, note }: { name: string; value: ReactNode; note?: string }) =>
   <div className="mfact" title={note}><dt>{name}</dt><dd>{value}</dd></div>
 
 /** What autoplay does: how far it goes, the results it confirms, the client's auto-win
@@ -150,14 +151,18 @@ function ModelLines({ snapshot: s, now }: Props) {
   </>
 }
 
-function AppLines({ snapshot: s, options }: Props) {
+function AppLines({ snapshot: s, options, onProfiles }: Props) {
   return <>
     <Line name={tr('版本')} value={options.version ?? '—'} />
     <Line name={tr('应用')} value="Washizu" />
     <Line name={tr('平台')} value={options.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')} />
-    {options.profile_name && <Line name={tr('账号档案')} value={options.profile_name} />}
+    <Line name={tr('账号档案')} value={<button className="mbtn mset-account" aria-label={tr('显示账号选择器')} title={tr('显示账号选择器')} disabled={!onProfiles} onClick={() => onProfiles?.()}>
+      <FolderOpen size={12} /><span>{options.profile_name ?? tr('打开')}</span>
+    </button>} />
     <Line name={tr('游戏视图')} value={s?.capture.state === 'running' ? s.capture.descriptor : s?.capture.state === 'error' ? tr('异常') : tr('未打开')} />
     <Line name={tr('游戏绘制')} value={options.game_view_now === 'offscreen' ? tr('离屏 2560×1440') : tr('窗口内')} />
+    <Line name={tr('关于')} value={tr('基于 Shinkuan 的 Akagi v3')} note={tr('基于 Shinkuan 的 Akagi v3')} />
+    <Line name={tr('许可证')} value="Apache-2.0" note={tr('版权与第三方声明见随附的 LICENSE.txt 和 NOTICE。')} />
   </>
 }
 

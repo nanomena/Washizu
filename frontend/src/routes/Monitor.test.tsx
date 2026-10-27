@@ -83,8 +83,13 @@ describe('monitor user states', () => {
 
   it('returns to account selection through the shell without navigating the game', async () => {
     render(<Monitor />)
-    await waitFor(() => expect((screen.getByRole('button', { name: '返回账号档案' }) as HTMLButtonElement).disabled).toBe(false))
-    fireEvent.click(screen.getByRole('button', { name: '返回账号档案' }))
+    expect(screen.queryByRole('button', { name: '显示账号选择器' })).toBeNull()
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '应用' }))
+    await waitFor(() => expect((screen.getByRole('button', { name: '显示账号选择器' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(screen.getByText('基于 Shinkuan 的 Akagi v3')).toBeTruthy()
+    expect(screen.getByText('Apache-2.0')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '显示账号选择器' }))
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'return_to_profiles')).toBe(true))
   })
 

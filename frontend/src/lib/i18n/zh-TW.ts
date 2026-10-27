@@ -1,5 +1,10 @@
 /** 繁體中文. Keys are the page's own Simplified Chinese text. */
 export const zhTW: Record<string, string> = {
+  '显示账号选择器': '顯示帳號選擇器',
+  '关于': '關於',
+  '许可证': '授權條款',
+  '基于 Shinkuan 的 Akagi v3': '基於 Shinkuan 的 Akagi v3',
+  '版权与第三方声明见随附的 LICENSE.txt 和 NOTICE。': '版權與第三方聲明見隨附的 LICENSE.txt 和 NOTICE。',
   '天凤四人普通速度段位场：显示建议或自动打牌；对局由你开始。': '天鳳四人一般速度段位場：顯示建議或自動打牌；對局由你開始。',
   '本地备用': '本機備用',
   '主模型': '主模型',
@@ -24,7 +29,6 @@ export const zhTW: Record<string, string> = {
   '档案名称': '檔案名稱',
   '取消': '取消',
   '保存': '儲存',
-  '返回账号档案': '返回帳號檔案',
   '账号档案': '帳號檔案',
   '等待游戏画面': '等待遊戲畫面',
   '天凤': '天鳳',
