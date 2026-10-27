@@ -586,13 +586,12 @@
 
 /* 1280 × 720: where the game goes. Until it is there, a front page:
  * a title, a white card, one blue button. */
-.mon-stage-start, .mon-stage-idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.mon-stage-start { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .mon-stage-start { gap: 0; }
 .mon-stage-start h2 { width: 440px; font: 500 30px/1.2 var(--m-display); }
 .mon-stage-start > p { width: 440px; margin: 6px 0 18px; font-size: 14px; color: var(--m-ink2); }
 .mon-start-card { display: flex; flex-direction: column; gap: 14px; width: 440px; padding: 20px; border-radius: 8px; }
 .mon-start-card p { font-size: 13px; line-height: 1.5; color: var(--m-ink2); }
-.mon-stage-idle { gap: 14px; color: var(--m-ink2); font-size: 14px; }
 /* The game drawn offscreen: its frames fill the stage, which is its exact ratio. */
 .mon-game { position: absolute; inset: 0; background: #000; touch-action: none; user-select: none; }
 .mon-game-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
@@ -709,19 +708,12 @@
 .mset-row > div { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: baseline; column-gap: 12px; min-width: 0; }
 .mset-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .mset-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--m-dim); }
-.mset-row small[data-value] { color: var(--m-ink2); font-variant-numeric: tabular-nums; user-select: text; }
 .mset-row :is(.mswitch, .mselect, .mlevel) { justify-self: end; }
 .mset-row .mswitch { height: 21px; }
 .mset-row .mselect { height: 20px; }
 .mset-row .mlevel { padding: 1px; }
 .mset-row .mlevel button { height: 18px; line-height: 18px; }
-.mset-row .mset-copy { width: 22px; height: 21px; }
-/* The stream's row has a cell for its copy button, kept while there is nothing to copy. */
-.mset-row--extra { grid-template-columns: minmax(0, 1fr) 22px auto; }
-.mset-row--extra > div { grid-column: 1; }
-.mset-row--extra .mset-copy { grid-column: 2; }
-.mset-row--extra .mswitch { grid-column: 3; }
-.mset-copy[data-empty] { visibility: hidden; }
+.mset-help { margin: 0; align-self: center; color: var(--m-dim); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The links, a line each: the light, the name, the state, and what it is doing or the error it gave (whole on hover). */
 .mset-links { display: grid; grid-auto-rows: var(--line); align-content: start; min-height: 0; }
 .mset-link { display: grid; grid-template-columns: 7px 96px 88px minmax(0, 1fr); align-items: center; column-gap: 10px; min-width: 0; min-height: 0; }

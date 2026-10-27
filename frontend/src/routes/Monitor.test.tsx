@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { MonitorConfig, MonitorEvent, MonitorSnapshot } from '@/lib/monitor'
 import { setLang } from '@/lib/i18n'
 
@@ -11,10 +11,17 @@ const fixture = vi.hoisted(() => ({
   handEvents: [] as MonitorEvent[],
   /** The games on record. */
   history: [] as unknown[],
+  optionsListener: null as ((options: MonitorConfig) => void) | null,
+  obsFailure: '',
+  inputs: [] as unknown[],
 }))
 vi.mock('@/hooks/useMonitor', () => ({ useMonitor: () => ({ snapshot: fixture.snapshot, error: null }) }))
 vi.mock('@/lib/host', () => ({
-  listen: vi.fn(() => () => {}),
+  listen: vi.fn((name: string, callback: (options: MonitorConfig) => void) => {
+    if (name === 'monitor-options') fixture.optionsListener = callback
+    return () => { if (name === 'monitor-options') fixture.optionsListener = null }
+  }),
+  gameInput: vi.fn((input: unknown) => fixture.inputs.push(input)),
   invoke: vi.fn(async (cmd: string, args?: unknown) => {
     fixture.calls.push([cmd, args])
     if (cmd === 'set_monitor_trail') fixture.options = { ...fixture.options, pointer_trail: (args as { enabled: boolean }).enabled }
@@ -22,13 +29,14 @@ vi.mock('@/lib/host', () => ({
     if (cmd === 'set_monitor_confirm') fixture.options = { ...fixture.options, quick_confirm: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_auto_win') fixture.options = { ...fixture.options, auto_win: (args as { enabled: boolean }).enabled }
     if (cmd === 'set_monitor_continue') fixture.options = { ...fixture.options, auto_continue: (args as { enabled: boolean }).enabled }
-    if (cmd === 'set_monitor_stream') {
+    if (cmd === 'set_obs_output') {
+      if (fixture.obsFailure) throw new Error(fixture.obsFailure)
       const enabled = (args as { enabled: boolean }).enabled
-      fixture.options = { ...fixture.options, stream_output: enabled, stream_url: enabled ? 'http://127.0.0.1:50123/0123456789abcdef01234567/' : undefined }
+      fixture.options = { ...fixture.options, obs_output: enabled, obs_state: enabled ? 'starting' : 'off' }
     }
     if (cmd === 'get_hand_events') return fixture.handEvents
     if (cmd === 'get_history') return fixture.history
-    return ['get_monitor_options', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_monitor_stream'].includes(cmd) ? fixture.options : undefined
+    return ['get_monitor_options', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_obs_output'].includes(cmd) ? fixture.options : undefined
   }),
 }))
 // No canvas under jsdom, so mahgen cannot draw. A tile is then an <img> whose
@@ -92,17 +100,30 @@ describe('monitor user states', () => {
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'return_to_profiles')).toBe(true))
   })
 
-  it('offers Tenhou play without promising automatic rematching', async () => {
+  it('offers Tenhou play and rematch through the shared core settings and keeps both controls in sync', async () => {
     fixture.options = { platform: 'Tenhou', profile_name: '天凤主号' }
     fixture.snapshot!.autoplay_enabled = false
-    render(<Monitor />)
+    const { rerender } = render(<Monitor />)
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
     fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
-    expect(screen.getByText('天凤四人普通速度段位场：显示建议或自动打牌；对局由你开始。')).toBeTruthy()
-    expect(screen.queryByRole('radio', { name: '连战' })).toBeNull()
+    expect(screen.getByText('天凤 Web：首次手动选房，连战沿用上一场实际大厅和规则。')).toBeTruthy()
+    expect(screen.getAllByRole('radio', { name: '连战' })).toHaveLength(2)
     fireEvent.click(screen.getAllByRole('radio', { name: '打牌' })[0])
     await waitFor(() => expect(fixture.calls.some(([cmd, params]) => cmd === 'set_monitor_autoplay' && (params as {enabled?: boolean}).enabled === true)).toBe(true))
+    fixture.snapshot = { ...fixture.snapshot!, autoplay_enabled: true }
+    rerender(<Monitor />)
+    const settingsLevels = screen.getAllByRole('radiogroup', { name: '自动操作' }).at(-1)!
+    fireEvent.click(within(settingsLevels).getByRole('radio', { name: '连战' }))
+    await waitFor(() => expect(fixture.calls.slice(-2)).toEqual([['set_monitor_continue', { enabled: true }], ['set_monitor_autoplay', { enabled: true }]]))
+    await waitFor(() => expect(screen.getAllByRole('radio', { name: '连战' }).every(button => button.getAttribute('aria-checked') === 'true')).toBe(true))
+    fireEvent.click(within(settingsLevels).getByRole('radio', { name: '打牌' }))
+    await waitFor(() => expect(fixture.calls.slice(-2)).toEqual([['set_monitor_continue', { enabled: false }], ['set_monitor_autoplay', { enabled: true }]]))
+    await waitFor(() => expect(screen.getAllByRole('radio', { name: '打牌' }).every(button => button.getAttribute('aria-checked') === 'true')).toBe(true))
+    const confirm = screen.getByRole('switch', { name: '快速确认' }) as HTMLButtonElement
+    expect(confirm.disabled).toBe(false)
+    fireEvent.click(confirm)
+    await waitFor(() => expect(fixture.calls).toContainEqual(['set_monitor_confirm', { enabled: true }]))
     fireEvent.click(screen.getByRole('button', { name: '应用' }))
     expect(screen.getByText('天凤主号')).toBeTruthy()
     expect(screen.getByText('天凤')).toBeTruthy()
@@ -537,18 +558,18 @@ describe('the settings', () => {
   it('opens the group last looked at again', () => {
     const { unmount } = render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    group('画面与窗口')
+    group('画面与输出')
     expect(localStorage.getItem('akagi.settings.group')).toBe('view')
     fireEvent.click(screen.getByRole('tab', { name: '决策' }))
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    expect(screen.getByRole('button', { name: '画面与窗口' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: '画面与输出' }).getAttribute('aria-pressed')).toBe('true')
     unmount()
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    expect(screen.getByRole('switch', { name: 'Spout 输出' })).toBeTruthy()
+    expect(screen.getByRole('switch', { name: 'OBS 输出' })).toBeTruthy()
   })
 
-  it('has the switches of the window with their words', async () => {
+  it('writes autoplay and pointer settings through the shell', async () => {
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
     // Autoplay's level waits for the first snapshot: it is the core's to say. The bar has the same control.
@@ -578,24 +599,95 @@ describe('the settings', () => {
       expect(fixture.calls).toContainEqual([command, { enabled: true }])
     }
 
-    group('画面与窗口')
+  })
+})
 
-    // The stream: off, its copy button is there but not shown; on, the address is the line under it.
-    const copy = screen.getByRole('button', { name: '复制直播地址', hidden: true })
-    expect(copy.hasAttribute('data-empty')).toBe(true)
-    expect((copy as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(screen.getByRole('switch', { name: '直播输出' }))
-    await waitFor(() => expect(screen.getByRole('switch', { name: '直播输出' }).getAttribute('aria-checked')).toBe('true'))
-    expect(fixture.calls).toContainEqual(['set_monitor_stream', { enabled: true }])
-    expect(screen.getByText('http://127.0.0.1:50123/0123456789abcdef01234567/')).toBeTruthy()
-    const shown = screen.getByRole('button', { name: '复制直播地址' })
-    expect(shown.hasAttribute('data-empty')).toBe(false)
-    fireEvent.click(shown)
-    await waitFor(() => expect(fixture.calls).toContainEqual(['copy_stream_url', undefined]))
-    await waitFor(() => expect(shown.getAttribute('title')).toBe('已复制'))
-    fireEvent.click(screen.getByRole('switch', { name: '直播输出' }))
-    await waitFor(() => expect(screen.getByRole('switch', { name: '直播输出' }).getAttribute('aria-checked')).toBe('false'))
-    expect(screen.queryByText(/127\.0\.0\.1/)).toBeNull()
+describe('OBS output', () => {
+  beforeEach(() => {
+    setLang('zh-CN')
+    fixture.snapshot = state(); fixture.calls = []; fixture.inputs = []; fixture.handEvents = []; fixture.obsFailure = ''
+    fixture.options = { obs_available: true, obs_output: false, obs_state: 'off' }
+  })
+  afterEach(() => { fixture.obsFailure = '' })
+
+  function openOutput() {
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '画面与输出' }))
+    return screen.getByRole('switch', { name: 'OBS 输出' }) as HTMLButtonElement
+  }
+
+  it('uses one OBS protocol and keeps the same playable game picture when output turns on or off', async () => {
+    const { container } = render(<Monitor />)
+    const video = container.querySelector('video')!
+    expect(video).toBeTruthy()
+    fireEvent.playing(video)
+    expect(screen.queryByText('等待游戏画面')).toBeNull()
+    const output = openOutput()
+    await waitFor(() => expect(output.disabled).toBe(false))
+    expect(screen.getAllByRole('switch')).toHaveLength(1)
+    expect(output.getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText(/选择「Washizu」/)).toBeTruthy()
+    for (const removed of ['离屏渲染', 'Spout 输出', '浏览器源输出']) expect(screen.queryByRole('switch', { name: removed })).toBeNull()
+    expect(screen.queryByRole('button', { name: '复制直播地址', hidden: true })).toBeNull()
+
+    fireEvent.click(output)
+    await waitFor(() => expect(output.getAttribute('aria-checked')).toBe('true'))
+    expect(fixture.calls).toContainEqual(['set_obs_output', { enabled: true }])
+    expect(screen.getByText(/正在启动 OBS 输出/)).toBeTruthy()
+    act(() => fixture.optionsListener!({ ...fixture.options, obs_state: 'sending', obs_name: 'Washizu' }))
+    expect(screen.getByText(/正在向 OBS 发送画面/)).toBeTruthy()
+    expect(container.querySelector('video')).toBe(video)
+
+    fireEvent.click(output)
+    await waitFor(() => expect(output.getAttribute('aria-checked')).toBe('false'))
+    expect(fixture.calls).toContainEqual(['set_obs_output', { enabled: false }])
+    expect(screen.getByText(/输出已关闭/)).toBeTruthy()
+    expect(container.querySelector('video')).toBe(video)
+    expect(screen.queryByText('等待游戏画面')).toBeNull()
+    fireEvent.input(screen.getByRole('textbox', { name: '向游戏输入' }), { target: { value: 'a' } })
+    expect(fixture.inputs).toContainEqual({ type: 'text', text: 'a' })
+    expect(fixture.calls.filter(([cmd]) => /set_monitor_(stream|spout|game_view)|copy_stream_url/.test(cmd))).toEqual([])
+  })
+
+  it.each([
+    ['off', '输出已关闭'], ['starting', '正在启动 OBS 输出'], ['sending', '正在向 OBS 发送画面'], ['failed', 'OBS 输出失败'], ['stopped', 'OBS 输出已停止'],
+  ] as const)('shows the actual %s state without inventing a retry', async (obs_state, text) => {
+    fixture.options = { ...fixture.options, obs_output: obs_state !== 'off', obs_state }
+    render(<Monitor />); openOutput()
+    await waitFor(() => expect(screen.getByText(new RegExp(text))).toBeTruthy())
+    expect(screen.queryByText(/正在重试/)).toBeNull()
+  })
+
+  it('disables unavailable output and keeps the game picture', async () => {
+    fixture.options.obs_available = false
+    const { container } = render(<Monitor />)
+    const output = openOutput()
+    await waitFor(() => expect(screen.getByText(/只在 Windows 上可用/)).toBeTruthy())
+    expect(output.disabled).toBe(true)
+    fireEvent.click(output)
+    expect(fixture.calls.some(([cmd]) => cmd === 'set_obs_output')).toBe(false)
+    expect(container.querySelector('video')).toBeTruthy()
+  })
+
+  it('waits for known capability and sender state instead of assuming output is supported', async () => {
+    fixture.options = {}
+    render(<Monitor />)
+    const output = openOutput()
+    await waitFor(() => expect(screen.getByText(/正在读取 OBS 输出状态/)).toBeTruthy())
+    expect(output.disabled).toBe(true)
+  })
+
+  it('reports a rejected output change while preserving the saved setting and game picture', async () => {
+    fixture.obsFailure = 'Sender startup was rejected'
+    const { container } = render(<Monitor />)
+    const video = container.querySelector('video')
+    const output = openOutput()
+    await waitFor(() => expect(output.disabled).toBe(false))
+    fireEvent.click(output)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Sender startup was rejected'))
+    expect(output.getAttribute('aria-checked')).toBe('false')
+    expect(output.disabled).toBe(false)
+    expect(container.querySelector('video')).toBe(video)
   })
 })
 
@@ -637,7 +729,7 @@ describe('another language', () => {
       expect(left, `on the ${name} tab`).toEqual([])
     }
     // Every group of the settings, the links among them.
-    for (const name of ['Display & window', 'Link', 'Model & service', 'App']) {
+    for (const name of ['Display & output', 'Link', 'Model & service', 'App']) {
       fireEvent.click(screen.getByRole('button', { name }))
       expect(shown().split('\n').filter(line => chinese.test(line)), `in ${name}`).toEqual([])
     }
@@ -654,7 +746,7 @@ describe('another language', () => {
   it('is chosen on the settings tab, changes every word at once, and is remembered', async () => {
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '设置' }))
-    fireEvent.click(screen.getByRole('button', { name: '画面与窗口' }))
+    fireEvent.click(screen.getByRole('button', { name: '画面与输出' }))
     fireEvent.change(screen.getByRole('combobox', { name: '界面语言' }), { target: { value: 'ja' } })
     // The tab stays where it was; its name and everything on it are in the new language.
     expect(screen.getByRole('tab', { name: '設定' }).getAttribute('aria-selected')).toBe('true')

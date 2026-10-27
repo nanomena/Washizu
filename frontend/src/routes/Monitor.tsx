@@ -15,7 +15,7 @@ import { pickShow } from '@/lib/botShow'
 import { rememberGroup, savedGroup, type Group } from '@/lib/settingsGroup'
 import {
   MONITOR_DEFAULTS, alertsOf, candidatesOf, decisionSound, decisionView, healthOf, levelOf, linkOf, roundLabel, seatWind, tableOf,
-  type Alert, type AutoplayLevel, type Candidate, type DecisionView, type GameView, type Health, type MonitorConfig, type MonitorSnapshot,
+  type Alert, type AutoplayLevel, type Candidate, type DecisionView, type Health, type MonitorConfig, type MonitorSnapshot,
 } from '@/lib/monitor'
 import { invoke, listen } from '@/lib/host'
 import './Monitor.css'
@@ -92,13 +92,10 @@ type DockProps = {
   onLean: ((enabled: boolean) => void) | null
   onConfirm: ((enabled: boolean) => void) | null
   onAutoWin: ((enabled: boolean) => void) | null
-  onStream: ((enabled: boolean) => void) | null
-  onCopyStream: (() => Promise<void>) | null
-  onGameView: ((view: GameView) => void) | null
-  onSpout: ((enabled: boolean) => void) | null
+  onObsOutput: ((enabled: boolean) => void) | null
   onProfiles: (() => void) | null
 }
-function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onConfirm, onAutoWin, onStream, onCopyStream, onGameView, onSpout, onProfiles }: DockProps) {
+function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onConfirm, onAutoWin, onObsOutput, onProfiles }: DockProps) {
   const { s, view } = m
   const game = s?.game ?? null
   const link = linkOf(m.health)
@@ -121,7 +118,7 @@ function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onCon
       <Round s={s} />
       <div className="md-controls">
         {/* The control is the setting, and says so by its colour: how far the model's actions may be carried out — not that one has been. */}
-        <span className="md-level"><span aria-hidden>{tr('自动操作')}</span><AutoplayLevels level={levelOf(s, options)} onLevel={onLevel} levels={options.platform === 'Tenhou' ? ['off', 'play'] : undefined} /></span>
+        <span className="md-level"><span aria-hidden>{tr('自动操作')}</span><AutoplayLevels level={levelOf(s, options)} onLevel={onLevel} /></span>
       </div>
       <nav className="md-tabs" role="tablist" aria-label={tr('监视内容')}>
         {/* The links have one light, on the settings' tab, where they are: everything behind it is run by this window. */}
@@ -149,7 +146,7 @@ function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onCon
       {tab === 'stats' && <Statistics game={`${s?.context.game ?? 0}:${s?.game_ended ?? true}`} account={s?.account ?? null} />}
       {tab === 'settings' && <Settings group={group} onGroup={openGroup} snapshot={s} options={options} health={m.health} now={m.now} onLevel={onLevel} onTrail={onTrail} onLean={onLean}
         onConfirm={onConfirm} onAutoWin={onAutoWin}
-        onStream={onStream} onCopyStream={onCopyStream} onGameView={onGameView} onSpout={onSpout} onProfiles={onProfiles} />}
+        onObsOutput={onObsOutput} onProfiles={onProfiles} />}
     </div>
   </aside>
 }
@@ -175,18 +172,15 @@ export function Monitor() {
     )
     return () => { cancelled = true }
   }, [])
-  // Options the shell changes by itself: the Spout sender starting or stopping, the game view given up.
+  // The shell reports the OBS sender's current state through the same contract.
   useEffect(() => listen<MonitorConfig>('monitor-options', setOptions), [])
 
   const k = useCanvasScale()
-  // Drawn offscreen, the game is a picture on the stage rather than a view over it.
-  const offscreen = options.game_view_now === 'offscreen'
   // The game view outlives a reload of this page, and capture says so: it only
   // ever runs from a view the shell has made.
   const embedded = opened || (s != null && s.capture.state !== 'stopped')
 
-  // The game is a native child view, not DOM: it goes exactly where the stage
-  // element is, and has to be told every time that moves or goes away.
+  // Keep the shell's input/pointer geometry aligned with the offscreen stage.
   const place = useCallback(() => {
     const r = stage.current?.getBoundingClientRect()
     const bounds = r && r.width >= STAGE_MIN && r.height >= STAGE_MIN
@@ -210,16 +204,6 @@ export function Monitor() {
     try { setOptions(await invoke<MonitorConfig>(command, { enabled })) }
     catch (e) { setUiError(String(e)) }
     finally { setBusy(false) }
-  }
-  const chooseGameView = async (view: GameView) => {
-    setBusy(true); setUiError(null)
-    try { setOptions(await invoke<MonitorConfig>('set_monitor_game_view', { view })) }
-    catch (e) { setUiError(String(e)) }
-    finally { setBusy(false) }
-  }
-  const copyStream = async () => {
-    try { await invoke('copy_stream_url') }
-    catch (e) { setUiError(String(e)); throw e }
   }
   const openGame = useCallback(async () => {
     const r = stage.current?.getBoundingClientRect()
@@ -276,12 +260,7 @@ export function Monitor() {
     <div className="mon-fit">
       <div className="mon-stage" ref={stage}>
         <div className="mon-canvas mon-canvas--stage">
-          {embedded && offscreen ? <GameStage />
-          : embedded ? <div className="mon-stage-idle">
-            <LoaderCircle size={22} className="mspin" />
-            <p>{options.platform === 'Tenhou' ? tr('天凤视图在这里显示') : tr('雀魂视图在这里显示')}</p>
-            <button className="mbtn" onClick={place}>{tr('重新对齐游戏视图')}</button>
-          </div>
+          {embedded ? <GameStage />
             : <div className="mon-stage-start">
               <h2>Washizu · {options.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')}</h2>
               <p>{options.platform === 'Tenhou' ? tr('登录这个档案的天凤账号，登录资料和记录单独保存。') : tr('上面登录雀魂并对局，下面核对模型建议和雀魂的实际动作。')}</p>
@@ -300,13 +279,10 @@ export function Monitor() {
           onLevel={ready && !busy ? level => void setLevel(level) : null}
           onTrail={ready && !busy ? enabled => void choose('set_monitor_trail', enabled) : null}
           onLean={ready && !busy ? enabled => void choose('set_monitor_lean', enabled) : null}
-          onConfirm={ready && !busy && options.platform !== 'Tenhou' ? enabled => void choose('set_monitor_confirm', enabled) : null}
+          onConfirm={ready && !busy ? enabled => void choose('set_monitor_confirm', enabled) : null}
           onAutoWin={ready && !busy && options.platform !== 'Tenhou' ? enabled => void choose('set_monitor_auto_win', enabled) : null}
-          onStream={ready && !busy ? enabled => void choose('set_monitor_stream', enabled) : null}
-          onCopyStream={ready ? copyStream : null}
-          onGameView={ready && !busy ? view => void chooseGameView(view) : null}
           onProfiles={ready && !busy ? () => void invoke('return_to_profiles').catch(error => setUiError(String(error))) : null}
-          onSpout={ready && !busy ? enabled => void choose('set_monitor_spout', enabled) : null} />
+          onObsOutput={ready && !busy ? enabled => void choose('set_obs_output', enabled) : null} />
         {local.length > 0 && <div className="mtoast" role="alert">
           <div><strong>{local[0].title}</strong><p>{local[0].message}</p></div>
           {uiError && <button aria-label={tr('知道了')} onClick={() => setUiError(null)}><X size={13} /></button>}

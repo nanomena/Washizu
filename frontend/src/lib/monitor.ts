@@ -4,8 +4,7 @@ import type { BotResponse, BotStatus, CaptureStatus, GameStateSnapshot, MahgenVi
 import { localized, tr } from '@/lib/i18n'
 import type { AccountLevels } from '@/lib/ladder'
 
-/** The window's own options, and which build it is (`version` comes from the shell).
- *  `stream_url` is the address the shell serves the game at, while it does. */
+/** The shell's saved options and reported OBS sender state. */
 export type MonitorConfig = {
   platform?: 'Majsoul' | 'Tenhou'
   profile_name?: string
@@ -14,14 +13,10 @@ export type MonitorConfig = {
   quick_confirm?: boolean; auto_win?: boolean
   /** Play game after game: with autoplay on, the game's own screens after its end are pressed through to "play again". */
   auto_continue?: boolean
-  stream_output?: boolean; stream_port?: number; stream_token?: string; stream_url?: string
   version?: string
-  /** How the game is shown from the next start, and how it is shown now: in the window, or drawn offscreen. */
-  game_view?: GameView; game_view_now?: GameView
-  /** Whether the game's frames go to a streaming program over Spout (Windows, offscreen only), and how that is going. */
-  spout_output?: boolean; spout_available?: boolean; spout_state?: 'off' | 'starting' | 'sending' | 'failed' | 'stopped'; spout_name?: string
+  /** OBS output is independent of the always-offscreen game shown in this app. */
+  obs_output?: boolean; obs_available?: boolean; obs_state?: 'off' | 'starting' | 'sending' | 'failed' | 'stopped'; obs_name?: string
 }
-export type GameView = 'window' | 'offscreen'
 export const MONITOR_DEFAULTS: MonitorConfig = { pointer_trail: false, pointer_lean: false, quick_confirm: false, auto_win: false, auto_continue: false }
 
 /** How far autoplay goes: not at all (suggestions only), the game in play, or
@@ -31,7 +26,7 @@ export type AutoplayLevel = 'off' | 'play' | 'continue'
 export const AUTOPLAY_LEVELS: readonly AutoplayLevel[] = ['off', 'play', 'continue']
 export function levelOf(s: MonitorSnapshot | null, options: MonitorConfig): AutoplayLevel | null {
   if (!s) return null
-  return !s.autoplay_enabled ? 'off' : options.platform !== 'Tenhou' && options.auto_continue ? 'continue' : 'play'
+  return !s.autoplay_enabled ? 'off' : options.auto_continue ? 'continue' : 'play'
 }
 /** What a level does, in a line. */
 export function levelAbout(level: AutoplayLevel): string {

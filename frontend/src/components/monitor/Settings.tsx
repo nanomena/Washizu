@@ -1,7 +1,7 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { Check, Copy, FolderOpen } from 'lucide-react'
+import { type ReactNode } from 'react'
+import { FolderOpen } from 'lucide-react'
 import { AutoplayLevels } from '@/components/monitor/AutoplayLevel'
-import { factsOf, levelAbout, levelOf, linkOf, serverLine, type AutoplayLevel, type GameView, type Health, type MonitorConfig, type MonitorSnapshot } from '@/lib/monitor'
+import { factsOf, levelAbout, levelOf, linkOf, serverLine, type AutoplayLevel, type Health, type MonitorConfig, type MonitorSnapshot } from '@/lib/monitor'
 import { LANGS, localized, setLang, tr, useLang, type Lang } from '@/lib/i18n'
 import { GROUPS, type Group } from '@/lib/settingsGroup'
 
@@ -14,13 +14,9 @@ type Props = {
   onLevel: ((level: AutoplayLevel) => void) | null
   onTrail: ((enabled: boolean) => void) | null
   onLean: ((enabled: boolean) => void) | null
-  onStream: ((enabled: boolean) => void) | null
-  /** Put the stream's address on the clipboard. */
-  onCopyStream: (() => Promise<void>) | null
+  onObsOutput: ((enabled: boolean) => void) | null
   onConfirm: ((enabled: boolean) => void) | null
   onAutoWin: ((enabled: boolean) => void) | null
-  onGameView: ((view: GameView) => void) | null
-  onSpout: ((enabled: boolean) => void) | null
   onProfiles: (() => void) | null
 }
 
@@ -29,29 +25,12 @@ const Switch = ({ name, on, onChange }: { name: string; on: boolean; onChange: (
     <i aria-hidden /><b data-other={on ? tr('关') : tr('开')}>{on ? tr('开') : tr('关')}</b>
   </button>
 
-/** A setting: its name, the line under it (what it does, how it stands, or a value
- *  such as an address; whole on hover), and its control. */
-function Row({ name, about, value, control, extra }: { name: string; about: string; value?: boolean; control: ReactNode; extra?: ReactNode }) {
-  return <div className={extra ? 'mset-row mset-row--extra' : 'mset-row'}>
-    <div><strong>{name}</strong><small data-value={value || undefined} title={about}>{about}</small></div>
-    {extra}
+/** A setting's name, current status or description (whole on hover), and control. */
+function Row({ name, about, control }: { name: string; about: string; control: ReactNode }) {
+  return <div className="mset-row">
+    <div><strong>{name}</strong><small title={about}>{about}</small></div>
     {control}
   </div>
-}
-
-/** The stream's address to the clipboard, in a place that is there whether or not there is one. */
-function CopyButton({ url, onCopy }: { url: string; onCopy: (() => Promise<void>) | null }) {
-  const [copied, setCopied] = useState(false)
-  useEffect(() => {
-    if (!copied) return
-    const done = window.setTimeout(() => setCopied(false), 1500)
-    return () => window.clearTimeout(done)
-  }, [copied])
-  const copy = tr('复制直播地址')
-  return <button className="mtool mset-copy" aria-label={copy} title={copied ? tr('已复制') : copy} data-empty={!url || undefined} disabled={!url || !onCopy}
-    onClick={() => void onCopy?.().then(() => setCopied(true), () => {})}>
-    {copied ? <Check size={14} /> : <Copy size={14} />}
-  </button>
 }
 
 const Line = ({ name, value, note }: { name: string; value: ReactNode; note?: string }) =>
@@ -62,38 +41,32 @@ const Line = ({ name, value, note }: { name: string; value: ReactNode; note?: st
 function AutoplayRows({ snapshot: s, options, onLevel, onConfirm, onAutoWin, onLean, onTrail }: Props) {
   const sw = (name: string, on: boolean, onChange: ((on: boolean) => void) | null) => <Switch name={name} on={on} onChange={onChange} />
   const level = levelOf(s, options)
-  if (options.platform === 'Tenhou') return <>
-    <Row name={tr('自动操作')} about={tr('天凤四人普通速度段位场：显示建议或自动打牌；对局由你开始。')}
-      control={<AutoplayLevels level={level} onLevel={onLevel} levels={['off', 'play']} />} />
-  </>
+  const tenhou = options.platform === 'Tenhou'
   return <>
-    <Row name={tr('自动操作')} about={levelAbout(level ?? 'off')} control={<AutoplayLevels level={level} onLevel={onLevel} />} />
+    <Row name={tr('自动操作')} about={tenhou ? tr('天凤 Web：首次手动选房，连战沿用上一场实际大厅和规则。') : levelAbout(level ?? 'off')} control={<AutoplayLevels level={level} onLevel={onLevel} />} />
     <Row name={tr('快速确认')} about={tr('和了或流局时，等确认按钮出现再点掉结算')} control={sw(tr('快速确认'), !!options.quick_confirm, onConfirm)} />
+    {!tenhou && <>
     <Row name={tr('自动和牌')} about={tr('立直或听牌、不到满贯时，某个时刻打开雀魂的自动和牌；没立直时各场第 4 局和西入后不开')} control={sw(tr('自动和牌'), !!options.auto_win, onAutoWin)} />
     <Row name={tr('预推理')} about={tr('别家行动时，光标停在下一手可能要打的牌上')} control={sw(tr('预推理'), !!options.pointer_lean, onLean)} />
     <Row name={tr('光标轨迹')} about={tr('在游戏画面上画出自动操作的光标和点击')} control={sw(tr('光标轨迹'), !!options.pointer_trail, onTrail)} />
+    </>}
   </>
 }
 
-/** How the game is shown and streamed; then the window itself. The page's renderer
- *  is chosen as it starts, so a change of view waits for the next start. */
-function ViewRows({ options, onStream, onCopyStream, onGameView, onSpout }: Props) {
+const OBS_STATE: Record<NonNullable<MonitorConfig['obs_state']>, string> = localized({
+  off: '输出已关闭', starting: '正在启动 OBS 输出', sending: '正在向 OBS 发送画面', failed: 'OBS 输出失败', stopped: 'OBS 输出已停止',
+})
+
+/** One OBS control; rendering and the local game picture do not depend on it. */
+function ViewRows({ options, onObsOutput }: Props) {
   const lang = useLang()
-  const url = options.stream_output ? options.stream_url ?? '' : ''
-  const viewPending = (options.game_view ?? 'window') !== (options.game_view_now ?? 'window')
-  const spout = !options.spout_available ? tr('只在 Windows 上可用')
-    : options.game_view_now !== 'offscreen' ? tr('先打开离屏渲染，重启后可用')
-    : !options.spout_output ? tr('把 2560×1440 的游戏画面交给 OBS 的 Spout2 源')
-    : options.spout_state === 'sending' ? tr('OBS 里选择 Spout 发送者「{0}」', options.spout_name ?? 'Akagi')
-    : options.spout_state === 'failed' ? tr('发送程序没有运行，正在重试')
-    : tr('正在启动发送程序')
+  const status = options.obs_state ? OBS_STATE[options.obs_state] : tr('正在读取 OBS 输出状态')
+  const about = options.obs_available === false ? `${status} · ${tr('只在 Windows 上可用')}` : status
+  const setup = tr('Windows：在 OBS 添加 Spout2 源，选择「{0}」', options.obs_name ?? 'Washizu')
   return <>
-    {/* Once the stream is on, its line is the address to give the streaming program. */}
-    <Row name={tr('直播输出')} about={url || tr('只把游戏画面交给 OBS')} value={!!url} extra={<CopyButton url={url} onCopy={onCopyStream} />}
-      control={<Switch name={tr('直播输出')} on={!!options.stream_output} onChange={onStream} />} />
-    <Row name={tr('离屏渲染')} about={viewPending ? tr('重启应用后生效') : tr('游戏在窗口外按 2560×1440 绘制')}
-      control={<Switch name={tr('离屏渲染')} on={options.game_view === 'offscreen'} onChange={onGameView && (next => onGameView(next ? 'offscreen' : 'window'))} />} />
-    <Row name={tr('Spout 输出')} about={spout} control={<Switch name={tr('Spout 输出')} on={!!options.spout_output} onChange={options.spout_available ? onSpout : null} />} />
+    <Row name={tr('OBS 输出')} about={about}
+      control={<Switch name={tr('OBS 输出')} on={!!options.obs_output} onChange={options.obs_available === true ? onObsOutput : null} />} />
+    <p className="mset-help" title={setup}>{setup}</p>
     <Row name={tr('界面语言')} about={tr('只改变这个窗口里的文字')}
       control={/* Each language under its own name, whatever language is showing. */
         <select className="mselect" aria-label={tr('界面语言')} value={lang} onChange={e => setLang(e.target.value as Lang)}>
@@ -158,7 +131,6 @@ function AppLines({ snapshot: s, options, onProfiles }: Props) {
       <FolderOpen size={12} /><span>{options.profile_name ?? tr('打开')}</span>
     </button>} />
     <Line name={tr('游戏视图')} value={s?.capture.state === 'running' ? s.capture.descriptor : s?.capture.state === 'error' ? tr('异常') : tr('未打开')} />
-    <Line name={tr('游戏绘制')} value={options.game_view_now === 'offscreen' ? tr('离屏 2560×1440') : tr('窗口内')} />
     <Line name={tr('关于')} value={tr('基于 Shinkuan 的 Akagi v3')} note={tr('基于 Shinkuan 的 Akagi v3')} />
     <Line name={tr('许可证')} value="Apache-2.0" note={tr('版权与第三方声明见随附的 LICENSE.txt 和 NOTICE。')} />
   </>
@@ -169,7 +141,7 @@ function AppLines({ snapshot: s, options, onProfiles }: Props) {
  *  sight and the rest a scroll away, each with the line about it. The links are a group of their own, and the
  *  tab carries their one light. */
 export function Settings({ group, onGroup, ...props }: Props & { group: Group; onGroup: (group: Group) => void }) {
-  const names: Record<Group, string> = { autoplay: tr('自动操作'), view: tr('画面与窗口'), link: tr('连接'), model: tr('模型与服务'), app: tr('应用') }
+  const names: Record<Group, string> = { autoplay: tr('自动操作'), view: tr('画面与输出'), link: tr('连接'), model: tr('模型与服务'), app: tr('应用') }
   return <div className="md-page msets">
     <nav className="mstat mset-groups" aria-label={tr('设置')}>
       {GROUPS.map(key => <button key={key} aria-pressed={key === group} onClick={() => onGroup(key)}>
