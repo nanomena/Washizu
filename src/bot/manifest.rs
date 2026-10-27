@@ -52,6 +52,9 @@ pub struct Manifest {
     pub service: Option<ServiceSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forecast: Option<ForecastSpec>,
+    /// Site-independent turn pacing, relative to this bot's directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pacing: Option<PacingSpec>,
     pub settings: BTreeMap<String, FieldSpec>,
 }
 
@@ -63,6 +66,7 @@ impl Default for Manifest {
             source: None,
             service: None,
             forecast: None,
+            pacing: None,
             settings: BTreeMap::new(),
         }
     }
@@ -125,6 +129,12 @@ pub struct ServiceSpec {
 /// Lightweight optional relay in the bot's own environment. It owns no model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForecastSpec {
+    pub entry: String,
+}
+
+/// Optional Lua policy shared by every website running this bot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PacingSpec {
     pub entry: String,
 }
 

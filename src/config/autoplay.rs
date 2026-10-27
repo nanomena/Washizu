@@ -6,9 +6,8 @@ pub struct AutoplayConfig {
     /// Master switch. When `false`, no `AutoplayManager` is spawned and bot
     /// responses are not converted into UI clicks.
     pub enabled: bool,
-    /// Per-platform autoplay knobs. Only the matching platform's section is
-    /// consulted at runtime; the others sit dormant.
-    pub majsoul: MajsoulAutoplayConfig,
+    /// Shared input and retry settings for all website adapters.
+    pub input: InputConfig,
     /// Pre-click delay model (platform-agnostic). See `autoplay::delay`.
     pub delay: DelayModelConfig,
 }
@@ -21,10 +20,8 @@ pub enum DelayMode {
     /// pre_click_delay_max_ms)` plus the dealer-opening pad. Ignores the
     /// Lua script and the calibrated distributions.
     Legacy,
-    /// The scriptable model: `delay.lua` next to the config file (auto-
-    /// generated with the calibrated human-like default on first use,
-    /// hot-reloaded on save). If the script fails, the built-in
-    /// calibrated model runs instead.
+    /// The selected bot's declared policy or an explicit profile override,
+    /// hot-reloaded on save. Policy failures remain observable.
     #[default]
     Lua,
 }
@@ -58,6 +55,10 @@ pub enum DelayDistribution {
 pub struct DelayModelConfig {
     /// Which policy is active: `legacy` (old fixed model) or `lua`.
     pub mode: DelayMode,
+    /// Explicit profile script override. Relative paths are rooted at the
+    /// profile directory; absent means use the active bot's declared policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_override: Option<std::path::PathBuf>,
     /// Minimum total thinking time per decision, ms. This is a
     /// functional floor, not a style knob: Mahjong Soul needs time to
     /// render tiles after the triggering frame, and a click issued
@@ -134,6 +135,7 @@ impl Default for DelayModelConfig {
     fn default() -> Self {
         Self {
             mode: DelayMode::Lua,
+            policy_override: None,
             // Matches the historical uniform lower bound — the value the
             // old model implicitly relied on for UI readiness.
             min_delay_ms: 1000,
@@ -159,7 +161,7 @@ impl Default for DelayModelConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct MajsoulAutoplayConfig {
+pub struct InputConfig {
     /// Lower bound of the random pre-click delay (ms). The reference
     /// Akagi autoplay used `random.uniform(1.0, 3.0)` seconds; the same
     /// distribution is replicated here as `[1000, 3000]` ms by default.
@@ -214,7 +216,7 @@ pub struct MajsoulAutoplayConfig {
     pub dealer_first_discard_extra_delay_ms: u32,
 }
 
-impl Default for MajsoulAutoplayConfig {
+impl Default for InputConfig {
     fn default() -> Self {
         Self {
             pre_click_delay_min_ms: 1000,

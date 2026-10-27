@@ -7,7 +7,7 @@ mod monitor;
 mod platform;
 
 pub use autoplay::{
-    AutoplayConfig, DelayDistribution, DelayMode, DelayModelConfig, MajsoulAutoplayConfig,
+    AutoplayConfig, DelayDistribution, DelayMode, DelayModelConfig, InputConfig,
 };
 pub use bot::{BotConfig, NativeApiConfig};
 pub use capture::{CaptureConfig, HttpCaptureConfig};
@@ -61,7 +61,8 @@ pub fn load_config(path: &Path) -> AppConfig {
     eprintln!("Loading config from: {}", path.display());
 
     let mut cfg = match std::fs::read_to_string(path) {
-        Ok(content) => match toml::from_str::<AppConfig>(&content) {
+        Ok(content) => match migrate_input_config(&content).and_then(|body|
+            toml::from_str::<AppConfig>(&body).map_err(|e| e.to_string())) {
             Ok(config) => config,
             Err(e) => {
                 eprintln!("Failed to parse config: {e}, using defaults");
@@ -88,10 +89,11 @@ pub fn load_config(path: &Path) -> AppConfig {
 
 fn migrate_retired_controls(path: &Path, cfg: &AppConfig) -> Result<(), String> {
     let original = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut document = original
+    let migrated = migrate_input_config(&original)?;
+    let mut document = migrated
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| e.to_string())?;
-    let mut changed = false;
+    let mut changed = migrated != original;
     if let Some(monitor) = document
         .get_mut("monitor")
         .and_then(toml_edit::Item::as_table_mut)
@@ -121,6 +123,22 @@ fn migrate_retired_controls(path: &Path, cfg: &AppConfig) -> Result<(), String> 
         std::fs::write(path, document.to_string()).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Move the old shared settings once; runtime code never reads a site-named
+/// alias. Preserve comments, unknown fields and all explicit user values.
+fn migrate_input_config(body: &str) -> Result<String, String> {
+    let mut document = body.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string())?;
+    if let Some(autoplay) = document.get_mut("autoplay").and_then(toml_edit::Item::as_table_mut) {
+        if autoplay.contains_key("majsoul") {
+            if autoplay.contains_key("input") {
+                return Err("config has both autoplay.majsoul and autoplay.input; refusing ambiguous input settings".into());
+            }
+            let input = autoplay.remove("majsoul").expect("checked key");
+            autoplay.insert("input", input);
+        }
+    }
+    Ok(document.to_string())
 }
 
 #[cfg(test)]
