@@ -63,6 +63,8 @@ pub struct InputWatch {
     /// How many hands' results the client has confirmed (`confirmNewRound`):
     /// one more means the result is gone from the screen.
     confirmed: AtomicU64,
+    /// Successful lobby matching responses, including requests made by the user.
+    matching: AtomicU64,
 }
 
 /// A snapshot of the counts, taken before a click.
@@ -74,6 +76,14 @@ pub struct InputTicket {
 }
 
 impl InputWatch {
+    pub fn note_matching(&self) {
+        self.matching.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn matching(&self) -> u64 {
+        self.matching.load(Ordering::Relaxed)
+    }
+
     /// The bridge saw the client send an input command.
     pub fn note_sent(&self, kind: InputKind) {
         self.sent.fetch_add(1, Ordering::Relaxed);

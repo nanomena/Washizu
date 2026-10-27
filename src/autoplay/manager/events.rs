@@ -33,7 +33,8 @@ impl AutoplayManager {
                 // The game ends as its last result shows: that result is
                 // still pressed through, up to the game's own screens, and
                 // those are looked for after it.
-                self.acts.game_over(Instant::now());
+                self.acts
+                    .game_over(Instant::now(), self.ctx.input_watch.matching());
                 self.new_game();
             }
             MjaiEvent::Hora { .. } | MjaiEvent::Ryukyoku { .. } => {

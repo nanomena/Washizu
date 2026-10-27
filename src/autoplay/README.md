@@ -37,6 +37,11 @@ bot answers is the most obvious tell there is.
 | `cdp_input.rs` | chromiumoxide wrappers: hover → press → hold → release click sequence (optionally with a mid-press cursor jiggle for retries), canvas rect query, and the Tenhou route's DOM helpers — action-button selectors, the readiness probe, and the call into the injected discard handler. |
 | `verify.rs` | Majsoul only. `InputWatch` — counts the client's own uplink input commands (`inputOperation` / `inputChiPengGang`, bumped by the Majsoul bridge). The manager takes a ticket before pressing; if the count never moves, the click was swallowed and the plan is pressed again (bounded by `click_retries`, gated on the decision window still being live). Repeated dead decisions trigger a page reload (`reload_after_failures`), which reconnects into the hand via the bridge's `GameRestore` path. |
 
+Game-end continuation has its own observed controls and matching-response
+stop signal. Unknown frames never acquire a rematch click target. See
+[ENDING.md](ENDING.md) for the state transitions, historical image evidence,
+click guards and deterministic regression coverage.
+
 ## What arrives on the `BotResponseBus`
 
 Every response the manager plans against is one the riichi engine asked

@@ -367,6 +367,19 @@ impl MajsoulBridge {
                 }
                 Vec::new()
             }
+            (MessageType::Response, ".lq.Lobby.startUnifiedMatch")
+            | (MessageType::Response, ".lq.Lobby.matchGame") => {
+                if !msg
+                    .payload
+                    .get("error")
+                    .is_some_and(|error| !error.is_null())
+                {
+                    if let Some(watch) = &self.input_watch {
+                        watch.note_matching();
+                    }
+                }
+                Vec::new()
+            }
             (MessageType::Notify, METHOD_ACTION_PROTOTYPE) => self.handle_action_prototype(msg),
             (MessageType::Response, METHOD_SYNC_GAME)
             | (MessageType::Response, METHOD_ENTER_GAME) => self.handle_game_restore(&msg.payload),
@@ -2189,6 +2202,24 @@ mod tests {
         let events = bridge.dispatch(&req(METHOD_CONFIRM_NEW_ROUND, json!({})));
         assert!(events.is_empty());
         assert_eq!(watch.confirmed(), 1);
+    }
+
+    #[test]
+    fn only_successful_matching_responses_end_the_click_sequence() {
+        let watch: crate::autoplay::verify::SharedInputWatch = Default::default();
+        let mut bridge = MajsoulBridge::new(None, None).with_input_watch(Some(watch.clone()));
+        for method in [".lq.Lobby.startUnifiedMatch", ".lq.Lobby.matchGame"] {
+            let before = watch.matching();
+            bridge.dispatch(&req(method, json!({})));
+            assert_eq!(watch.matching(), before, "a request can still fail");
+            let mut response = req(method, json!({"error": {"code": 1001}}));
+            response.msg_type = MessageType::Response;
+            bridge.dispatch(&response);
+            assert_eq!(watch.matching(), before);
+            response.payload = json!({});
+            assert!(bridge.dispatch(&response).is_empty());
+            assert_eq!(watch.matching(), before + 1);
+        }
     }
 
     #[test]

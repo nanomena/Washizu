@@ -26,6 +26,7 @@ use tracing::{debug, info, warn};
 impl AutoplayManager {
     /// The act due now, if it still is and is wanted.
     pub(super) async fn table_act(&mut self) {
+        self.acts.matching_seen(self.ctx.input_watch.matching());
         let confirmed = self.ctx.input_watch.confirmed();
         let Some(act) = self.acts.next(Instant::now(), confirmed, &mut rand::rng()) else {
             return;
@@ -36,7 +37,7 @@ impl AutoplayManager {
             let wanted = match act {
                 Act::Look | Act::Burst(_) => on && cfg.monitor.quick_confirm,
                 Act::AutoWinOn | Act::TenpaiLook | Act::TenpaiWinOn => on && cfg.monitor.auto_win,
-                Act::EndLook | Act::EndPress(_) | Act::EndTap => on && cfg.monitor.auto_continue,
+                Act::EndLook | Act::EndPress(_) => on && cfg.monitor.auto_continue,
             };
             let majsoul = &cfg.autoplay.majsoul;
             (wanted, majsoul.hover_delay_ms, majsoul.click_hold_ms)
@@ -104,7 +105,6 @@ impl AutoplayManager {
                 self.acts.tenpai_win_read(lit);
             }
             Act::EndPress(sight) => self.press_end(sight, hover_ms, hold_ms).await,
-            Act::EndTap => self.tap_end(hover_ms, hold_ms).await,
             Act::Look | Act::EndLook | Act::TenpaiLook => {}
         }
     }
@@ -114,7 +114,7 @@ impl AutoplayManager {
     /// last result, or neither yet ([`pixels::result_sight`]); of the game's
     /// end, which of its own screens ([`pixels::end_sight`]).
     async fn look_at(&mut self, what: &str, read: fn(&Image, f64, CanvasRect) -> Sight) -> Sight {
-        let Some(rect) = self.canvas.resolve(&self.ctx).await else {
+        let Some(rect) = self.canvas.remeasure(&self.ctx).await else {
             return Sight::Unread;
         };
         let page_guard = self.ctx.page.read().await;
@@ -139,31 +139,52 @@ impl AutoplayManager {
     /// confirm, "play again" beside it, or the confirm of the question
     /// "play again" asks.
     async fn press_end(&mut self, sight: Sight, hover_ms: u32, hold_ms: u32) {
-        let (target, what) = match sight {
-            Sight::Rematch => (coords::REMATCH, "play again"),
-            Sight::RematchAsk => (
-                coords::REMATCH_ASK_CONFIRM,
-                "the confirm of play again's question",
-            ),
-            _ => (coords::GAME_CONFIRM, "the game's confirm"),
+        let Some(target) = sight.end_target() else {
+            self.acts.end_press_failed(Instant::now());
+            return;
         };
-        if let Some(rect) = self.canvas.resolve(&self.ctx).await {
+        let mut pressed = false;
+        if let Some(rect) = self.canvas.remeasure(&self.ctx).await {
             let at = aim::again(target, reach_of(target), &mut rand::rng());
             let touch = Touch {
                 hover_ms,
                 hold_ms,
                 jiggle: false,
             };
-            if self
-                .hand
-                .press("game's end", rect.pixel(at.0, at.1), rect, touch)
-                .await
-            {
-                info!("autoplay: pressed {what}");
-            }
+            let watch = self.ctx.input_watch.clone();
+            let matching = self.acts.matching_ticket();
+            let cfg = self.cfg.clone();
+            pressed = self.hand.press_when(
+                "game's end", rect.pixel(at.0, at.1), rect, touch,
+                move |page| async move {
+                    let measured = crate::autoplay::cdp_input::evaluate_canvas_rect(&page).await.ok();
+                    let observed = match pixels::shot(&page).await {
+                        Ok((image, scale)) => measured.map(|r| pixels::end_sight(&image, scale, r)),
+                        Err(_) => None,
+                    };
+                    // Resizing during the screenshot invalidates both its
+                    // scale and the point reached before it was taken.
+                    let after_shot = crate::autoplay::cdp_input::evaluate_canvas_rect(&page).await.ok();
+                    let cfg = cfg.read().await;
+                    let allowed = !user_active() && cfg.autoplay.enabled && cfg.monitor.auto_continue
+                        && cfg.platform.kind == Platform::Majsoul && Some(watch.matching()) == matching
+                        && measured == after_shot
+                        && end_click_allowed(sight, observed, rect, after_shot);
+                    if !allowed {
+                        info!("autoplay: withheld ending press {sight:?}; current {observed:?}, canvas before {measured:?}, after {after_shot:?}, planned {rect:?}");
+                    }
+                    allowed
+                },
+            ).await;
         }
-        self.acts
-            .end_pressed(sight, Instant::now(), &mut rand::rng());
+        if pressed {
+            info!("autoplay: pressed recognized ending control {sight:?}; waiting for transition");
+            self.acts
+                .end_pressed(sight, Instant::now(), &mut rand::rng());
+        } else {
+            self.canvas.forget(&self.ctx).await;
+            self.acts.end_press_failed(Instant::now());
+        }
     }
 
     /// One burst of `presses` at the result's confirm button: the first
@@ -313,28 +334,6 @@ impl AutoplayManager {
         }
     }
 
-    /// One tap where "play again" comes, through what shows between the
-    /// game's confirms and it: the rewards of a filled chest go at a press
-    /// anywhere, and "play again" itself may be there by now.
-    async fn tap_end(&mut self, hover_ms: u32, hold_ms: u32) {
-        if let Some(rect) = self.canvas.resolve(&self.ctx).await {
-            let at = aim::again(coords::REMATCH, reach_of(coords::REMATCH), &mut rand::rng());
-            let touch = Touch {
-                hover_ms,
-                hold_ms,
-                jiggle: false,
-            };
-            if self
-                .hand
-                .press("game's end", rect.pixel(at.0, at.1), rect, touch)
-                .await
-            {
-                info!("autoplay: tapped where play again comes");
-            }
-        }
-        self.acts.end_tapped(Instant::now(), &mut rand::rng());
-    }
-
     /// What the toggle whose glyph is at `at` (a normalised point) shows.
     async fn read_toggle(&self, rect: CanvasRect, at: (f64, f64)) -> Glyph {
         let half = coords::TOGGLE_HALF;
@@ -350,5 +349,73 @@ impl AutoplayManager {
                 warn!("autoplay: reading a toggle failed: {e:#}");
                 Glyph::Absent
             })
+    }
+}
+
+/// A click cannot inherit an old frame's identity or viewport geometry.
+fn end_click_allowed(
+    expected: Sight,
+    observed: Option<Sight>,
+    planned: CanvasRect,
+    measured: Option<CanvasRect>,
+) -> bool {
+    expected.end_target().is_some() && observed == Some(expected) && measured == Some(planned)
+}
+
+#[cfg(test)]
+mod ending_tests {
+    use super::*;
+
+    #[test]
+    fn click_plan_requires_the_same_recognized_control_and_current_geometry() {
+        let rect = CanvasRect {
+            x: 14.0,
+            y: 34.0,
+            width: 1280.0,
+            height: 720.0,
+        };
+        for expected in [
+            Sight::Continue,
+            Sight::Reward,
+            Sight::Rematch,
+            Sight::RematchAsk,
+        ] {
+            assert!(end_click_allowed(
+                expected,
+                Some(expected),
+                rect,
+                Some(rect)
+            ));
+            for absent in [None, Some(Sight::Nothing), Some(Sight::Unread)] {
+                assert!(!end_click_allowed(expected, absent, rect, Some(rect)));
+            }
+            for other in [
+                Sight::Continue,
+                Sight::Reward,
+                Sight::Rematch,
+                Sight::RematchAsk,
+            ] {
+                assert_eq!(
+                    end_click_allowed(expected, Some(other), rect, Some(rect)),
+                    expected == other
+                );
+            }
+            assert!(!end_click_allowed(expected, Some(expected), rect, None));
+            assert!(!end_click_allowed(
+                expected,
+                Some(expected),
+                rect,
+                Some(CanvasRect {
+                    width: 960.0,
+                    height: 540.0,
+                    ..rect
+                })
+            ));
+        }
+        for unknown in [Sight::Nothing, Sight::Unread, Sight::Button] {
+            assert!(!end_click_allowed(unknown, Some(unknown), rect, Some(rect)));
+        }
+        assert_eq!(Sight::Reward.end_target(), Sight::Continue.end_target());
+        assert_ne!(Sight::Reward.end_target(), Sight::Rematch.end_target());
     }
 }

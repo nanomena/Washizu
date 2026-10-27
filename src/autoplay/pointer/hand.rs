@@ -597,6 +597,24 @@ impl Hand {
     /// and holds the button about `touch.hold_ms` (`cdp_input`). False when
     /// the pointer could not be moved there or the press failed.
     pub async fn press(&mut self, why: &str, to: Point, rect: CanvasRect, touch: Touch) -> bool {
+        self.press_when(why, to, rect, touch, |_| async { true })
+            .await
+    }
+
+    /// As `press`, with a final page check after the pointer has arrived
+    /// and hovered. Only a dispatched press returns true.
+    pub async fn press_when<F, Fut>(
+        &mut self,
+        why: &str,
+        to: Point,
+        rect: CanvasRect,
+        touch: Touch,
+        check: F,
+    ) -> bool
+    where
+        F: FnOnce(chromiumoxide::page::Page) -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         if !self.reach(why, to, rect).await {
             return false;
         }
@@ -605,22 +623,25 @@ impl Hand {
             warn!("autoplay: no page handle — cannot press ({why})");
             return false;
         };
-        if let Err(e) = crate::autoplay::cdp_input::dispatch_click_shaped(
+        let pressed = crate::autoplay::cdp_input::dispatch_click_guarded(
             page,
             to.0,
             to.1,
             touch.hover_ms,
             touch.hold_ms,
             touch.jiggle,
+            check,
         )
-        .await
-        {
-            warn!("autoplay: a press ({why}) failed: {e:#}");
-            return false;
-        }
+        .await;
         drop(page_guard);
         self.at = Some(to);
-        true
+        match pressed {
+            Ok(pressed) => pressed,
+            Err(e) => {
+                warn!("autoplay: a press ({why}) failed: {e:#}");
+                false
+            }
+        }
     }
 
     /// Take the pointer to `to` for a press, along an arc ([`super::leave`])

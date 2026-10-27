@@ -39,9 +39,12 @@ pub enum Glyph {
 pub enum Sight {
     /// A hand's result's confirm button, bottom right: blue with gold words.
     Button,
-    /// The yellow confirm of the game's own screens after its last result,
-    /// in the same place: its standings, its rank, then the room's rewards.
-    Standings,
+    /// A recognized yellow continue/confirm, after the last hand's result.
+    Continue,
+    /// The filled-chest reward overlay: its title and two full-width gold
+    /// rules, measured on both historical user captures. A dismissal is
+    /// allowed only after a continue in the current ending sequence.
+    Reward,
     /// "Play again", left of the yellow confirm on the last of the game's
     /// own screens.
     Rematch,
@@ -57,6 +60,9 @@ pub enum Sight {
 /// What a hand's result shows in `image`, a screenshot of the whole view at
 /// `scale` device pixels a CSS pixel, the game's canvas at `rect`.
 pub fn result_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
+    if !valid_view(image, scale, rect) {
+        return Sight::Unread;
+    }
     let (left, top, right, bottom) = coords::CONFIRM_FACE;
     let (x0, y0) = rect.pixel(left, top);
     let (x1, y1) = rect.pixel(right, bottom);
@@ -64,7 +70,7 @@ pub fn result_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
     if is_confirm(&face) {
         Sight::Button
     } else if is_game_confirm(&face) {
-        Sight::Standings
+        Sight::Continue
     } else {
         Sight::Nothing
     }
@@ -75,12 +81,15 @@ pub fn result_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
 /// again" where it shows (the last of them), else the yellow confirm of each,
 /// else a hand's blue confirm (the last result still up), else nothing yet.
 pub fn end_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
+    if !valid_view(image, scale, rect) {
+        return Sight::Unread;
+    }
     let face = |(left, top, right, bottom): (f64, f64, f64, f64)| {
         let (x0, y0) = rect.pixel(left, top);
         let (x1, y1) = rect.pixel(right, bottom);
         image.crop(x0 * scale, y0 * scale, (x1 - x0) * scale, (y1 - y0) * scale)
     };
-    let confirm = face(coords::CONFIRM_FACE);
+    let confirm = face(coords::GAME_CONFIRM_FACE);
     if is_game_confirm(&face(coords::REMATCH_ASK_CONFIRM_FACE))
         && is_blue_face(&face(coords::REMATCH_ASK_CANCEL_FACE))
     {
@@ -88,11 +97,76 @@ pub fn end_sight(image: &Image, scale: f64, rect: CanvasRect) -> Sight {
     } else if is_confirm(&face(coords::REMATCH_FACE)) && is_game_confirm(&confirm) {
         Sight::Rematch
     } else if is_game_confirm(&confirm) {
-        Sight::Standings
-    } else if is_confirm(&confirm) {
+        Sight::Continue
+    } else if is_reward(image, scale, rect) {
+        Sight::Reward
+    } else if is_confirm(&face(coords::CONFIRM_FACE)) {
         Sight::Button
     } else {
         Sight::Nothing
+    }
+}
+
+/// A clipped, stale or non-finite canvas is not a view of a missing button.
+fn valid_view(image: &Image, scale: f64, rect: CanvasRect) -> bool {
+    [scale, rect.x, rect.y, rect.width, rect.height]
+        .iter()
+        .all(|n| n.is_finite())
+        && scale > 0.0
+        && rect.width > 0.0
+        && rect.height > 0.0
+        && rect.x >= 0.0
+        && rect.y >= 0.0
+        && (rect.x + rect.width) * scale <= image.width as f64 + 1.0
+        && (rect.y + rect.height) * scale <= image.height as f64 + 1.0
+}
+
+/// No OCR or timing inference: the reward's fixed overlay has two long
+/// gold rules and a dense gold title between them. Ordinary standings,
+/// rank, chest progress, table and transition frames do not have all three.
+fn is_reward(image: &Image, scale: f64, rect: CanvasRect) -> bool {
+    let rule = |y: f64| {
+        let (_, cy) = rect.pixel(0.0, y);
+        let tolerance = (rect.height * scale / 9.0 * 0.10).ceil() as i32;
+        (-tolerance..=tolerance).any(|dy| {
+            let row = (cy * scale).round() as i32 + dy;
+            if row < 0 || row >= image.height as i32 {
+                return false;
+            }
+            (10..=90)
+                .filter(|x| {
+                    let (px, _) = rect.pixel(f64::from(*x) / 100.0 * 16.0, 0.0);
+                    let [r, g, b] =
+                        image.pixels[row as usize * image.width + (px * scale) as usize];
+                    let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
+                    // Downscaling a one-pixel rule blends it with the dark
+                    // veil. Both real reward captures retain this chroma.
+                    r >= 90 && g >= 80 && r - b >= 10 && g - b >= 8 && r >= g - 5
+                })
+                .count()
+                >= 60
+        })
+    };
+    let (x0, y0) = rect.pixel(6.7, 1.6);
+    let (x1, y1) = rect.pixel(10.0, 2.55);
+    let title = image.crop(x0 * scale, y0 * scale, (x1 - x0) * scale, (y1 - y0) * scale);
+    share(&title, |r, g, b| {
+        r >= 170 && g >= 130 && r - b >= 45 && g - b >= 25
+    }) >= 0.15
+        && rule(2.75)
+        && rule(6.12)
+}
+
+impl Sight {
+    /// Explicit click plan. Unknown observations never acquire coordinates;
+    /// reward dismissal uses the continue corner, away from rematch.
+    pub fn end_target(self) -> Option<(f64, f64)> {
+        match self {
+            Self::Continue | Self::Reward => Some(coords::GAME_CONFIRM),
+            Self::Rematch => Some(coords::REMATCH),
+            Self::RematchAsk => Some(coords::REMATCH_ASK_CONFIRM),
+            _ => None,
+        }
     }
 }
 
@@ -327,6 +401,110 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn historical(bytes: &[u8]) -> Image {
+        decode_png(bytes).expect("RGB historical ROI fixture")
+    }
+
+    /// Real pixels (anonymous ROIs), rather than painted button colours:
+    /// yellow continue, real rematch, modal question and both chest rewards.
+    #[test]
+    fn historical_ending_frames_at_resized_and_offset_canvases() {
+        let cases: &[(&[u8], Sight)] = &[
+            (
+                include_bytes!("fixtures/ending/continue.png"),
+                Sight::Continue,
+            ),
+            (include_bytes!("fixtures/ending/rank.png"), Sight::Continue),
+            (
+                include_bytes!("fixtures/ending/rematch.png"),
+                Sight::Rematch,
+            ),
+            (include_bytes!("fixtures/ending/ask.png"), Sight::RematchAsk),
+            (
+                include_bytes!("fixtures/ending/reward-1.png"),
+                Sight::Reward,
+            ),
+            (
+                include_bytes!("fixtures/ending/reward-2.png"),
+                Sight::Reward,
+            ),
+            (
+                include_bytes!("fixtures/ending/hand-result.png"),
+                Sight::Button,
+            ),
+            (include_bytes!("fixtures/ending/table.png"), Sight::Nothing),
+        ];
+        for (bytes, expected) in cases {
+            let original = historical(bytes);
+            for (width, scale) in [(640, 1.0), (960, 1.0), (1280, 1.5), (1920, 2.0)] {
+                let height = width * 9 / 16;
+                let (ox, oy) = (24, 36);
+                let mut image = Image {
+                    width: width + ox * 2,
+                    height: height + oy * 2,
+                    pixels: vec![[0; 3]; (width + ox * 2) * (height + oy * 2)],
+                };
+                for y in 0..height {
+                    for x in 0..width {
+                        image.pixels[(y + oy) * image.width + x + ox] =
+                            original.pixels[y * original.height / height * original.width
+                                + x * original.width / width];
+                    }
+                }
+                let rect = CanvasRect {
+                    x: ox as f64 / scale,
+                    y: oy as f64 / scale,
+                    width: width as f64 / scale,
+                    height: height as f64 / scale,
+                };
+                assert_eq!(
+                    end_sight(&image, scale, rect),
+                    *expected,
+                    "{expected:?}, {width}px @ {scale}"
+                );
+                assert_eq!(
+                    end_sight(
+                        &image,
+                        scale,
+                        CanvasRect {
+                            width: rect.width * 2.0,
+                            ..rect
+                        }
+                    ),
+                    Sight::Unread
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_faded_disabled_or_partial_control_is_not_a_rematch() {
+        let mut rematch = historical(include_bytes!("fixtures/ending/rematch.png"));
+        let rect = CanvasRect {
+            x: 0.0,
+            y: 0.0,
+            width: 960.0,
+            height: 540.0,
+        };
+        for pixel in &mut rematch.pixels {
+            for channel in pixel {
+                *channel /= 2;
+            }
+        }
+        assert_eq!(end_sight(&rematch, 1.0, rect), Sight::Nothing);
+        assert_eq!(end_sight(&rematch, f64::NAN, rect), Sight::Unread);
+        assert_eq!(
+            end_sight(&rematch, 1.0, CanvasRect { width: 0.0, ..rect }),
+            Sight::Unread
+        );
+        let mut reward = historical(include_bytes!("fixtures/ending/reward-2.png"));
+        // The bright title alone is not enough to call it the reward overlay.
+        for y in 350..380 {
+            reward.pixels[y * reward.width..(y + 1) * reward.width].fill([0; 3]);
+        }
+        assert_eq!(end_sight(&reward, 1.0, rect), Sight::Nothing);
+    }
     use std::io::Write;
 
     /// A PNG of `pixels` (RGB, one row each of `width`), filtered with `filter`.
@@ -543,7 +721,7 @@ mod tests {
                 };
             }
         }
-        assert_eq!(result_sight(&standings, 2.0, rect), Sight::Standings);
+        assert_eq!(result_sight(&standings, 2.0, rect), Sight::Continue);
     }
 
     /// The game's own screens are read by their buttons: "play again" only
@@ -581,7 +759,7 @@ mod tests {
         assert_eq!(end_sight(&table, 2.0, rect), Sight::Nothing);
         let mut standings = table.clone();
         paint(&mut standings, coords::CONFIRM_FACE, yellow, red);
-        assert_eq!(end_sight(&standings, 2.0, rect), Sight::Standings);
+        assert_eq!(end_sight(&standings, 2.0, rect), Sight::Continue);
         let mut last = standings.clone();
         paint(&mut last, coords::REMATCH_FACE, blue, gold);
         assert_eq!(end_sight(&last, 2.0, rect), Sight::Rematch);
@@ -614,6 +792,6 @@ mod tests {
             "a yellow box alone is not the question"
         );
         // A hand's result never reads as "play again".
-        assert_eq!(result_sight(&last, 2.0, rect), Sight::Standings);
+        assert_eq!(result_sight(&last, 2.0, rect), Sight::Continue);
     }
 }

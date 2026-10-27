@@ -176,6 +176,34 @@ pub async fn dispatch_click_shaped(
     click_hold_ms: u32,
     jiggle: bool,
 ) -> Result<()> {
+    dispatch_click_guarded(
+        page,
+        x,
+        y,
+        hover_delay_ms,
+        click_hold_ms,
+        jiggle,
+        |_| async { true },
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Check the current page after travel, user wait and hover, immediately
+/// before mouse-down. A rejected check sends no button events.
+pub async fn dispatch_click_guarded<F, Fut>(
+    page: &Page,
+    x: f64,
+    y: f64,
+    hover_delay_ms: u32,
+    click_hold_ms: u32,
+    jiggle: bool,
+    check: F,
+) -> Result<bool>
+where
+    F: FnOnce(Page) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     let pt = Point::new(x, y);
     // About the configured times, each press its own: mostly near them, now and then longer.
     let (hover_delay_ms, click_hold_ms) = {
@@ -190,6 +218,10 @@ pub async fn dispatch_click_shaped(
     move_to(page, x, y).await?;
     if hover_delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(hover_delay_ms as u64)).await;
+    }
+
+    if !check(page.clone()).await {
+        return Ok(false);
     }
 
     let press = DispatchMouseEventParams::builder()
@@ -237,7 +269,7 @@ pub async fn dispatch_click_shaped(
     page.execute(release).await.context("CDP mouseReleased")?;
     mark(x, y, false);
 
-    Ok(())
+    Ok(true)
 }
 
 /// Move the pointer from `from` to `to` (CSS pixels) over `duration_ms`,
