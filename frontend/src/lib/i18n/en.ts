@@ -1,5 +1,11 @@
 /** English. Keys are the page's own Simplified Chinese text. */
 export const en: Record<string, string> = {
+  '本地备用': 'Local standby',
+  '主模型': 'Primary model',
+  '暂无有效来源': 'No validated source',
+  '主模型就绪': 'Primary ready',
+  '主模型恢复中': 'Primary recovering',
+  '主模型不可用': 'Primary unavailable',
   '请求': 'Request',
   '建议': 'Suggestion',
   '确认': 'Confirm',

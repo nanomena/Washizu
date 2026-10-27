@@ -70,6 +70,9 @@ impl Default for Manifest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManifestBot {
+    /// Only a positioned transport can prove the replayed prefix needed
+    /// for automatic standby arbitration. Plain mjai remains its own API.
+    pub protocol: BotProtocol,
     /// Subdir name under `mjai_bot/`. Should match the directory name.
     pub name: String,
     /// Human-readable label rendered in the UI bot picker.
@@ -89,6 +92,7 @@ pub struct ManifestBot {
 impl Default for ManifestBot {
     fn default() -> Self {
         Self {
+            protocol: BotProtocol::Mjai,
             name: String::new(),
             display: None,
             description: None,
@@ -96,6 +100,14 @@ impl Default for ManifestBot {
             supported_modes: vec!["4p".to_string()],
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotProtocol {
+    #[default]
+    Mjai,
+    PositionedMjai,
 }
 
 /// The `[service]` table: a script Akagi keeps running while the bot is the
@@ -414,6 +426,16 @@ mod tests {
         let body = toml::to_string_pretty(&m).unwrap();
         let back: Manifest = toml::from_str(&body).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn positioned_mjai_requires_an_explicit_transport_contract() {
+        let plain: Manifest = toml::from_str("[bot]\nname = 'demo'\n").unwrap();
+        assert_eq!(plain.bot.protocol, BotProtocol::Mjai);
+        let positioned: Manifest =
+            toml::from_str("[bot]\nname = 'miai'\nprotocol = 'positioned_mjai'\n").unwrap();
+        assert_eq!(positioned.bot.protocol, BotProtocol::PositionedMjai);
+        assert!(toml::from_str::<Manifest>("[bot]\nprotocol = 'unknown'\n").is_err());
     }
 
     #[test]

@@ -78,7 +78,8 @@ pub struct BotManager {
     /// Player count of the in-progress game (from `start_game.num_players`).
     /// Used to construct the built-in native bot for the right mode.
     game_num_players: u8,
-    runner: Option<Box<dyn BotRunner>>,
+    runner: Option<ManagedBot>,
+    recovery_clock: Option<Arc<crate::autoplay::AutoplayContext>>,
     /// Events seen since the last `react()` call.
     pending: Vec<MjaiEvent>,
     /// Bot's seat in the current game; set on `start_game`.
@@ -108,6 +109,14 @@ pub struct BotManager {
     /// and an in-flight game-start sync can't run `uv sync` against the same
     /// venv simultaneously.
     syncs_in_flight: Arc<Mutex<HashSet<String>>>,
+}
+
+enum ManagedBot {
+    Direct(Box<dyn BotRunner>),
+    Coordinated {
+        game_id: Option<u64>,
+        handle: super::recovery::RecoveryHandle,
+    },
 }
 
 /// What a subprocess bot is told of the game it is started for, in
@@ -152,6 +161,7 @@ impl BotManager {
             active_name: String::new(),
             game_num_players: 4,
             runner: None,
+            recovery_clock: None,
             pending: Vec::new(),
             actor_id: None,
             game: None,
@@ -170,6 +180,11 @@ impl BotManager {
 
     pub fn with_monitor(mut self, monitor: Option<crate::monitor::MonitorHandle>) -> Self {
         self.monitor = monitor;
+        self
+    }
+
+    pub fn with_recovery_clock(mut self, clock: Arc<crate::autoplay::AutoplayContext>) -> Self {
+        self.recovery_clock = Some(clock);
         self
     }
 
@@ -235,6 +250,33 @@ impl BotManager {
             can_act,
             context,
         } = tracked;
+        if let MjaiEvent::StartGame {
+            id: Some(seat),
+            num_players,
+            game_meta,
+            ..
+        } = &event
+        {
+            if let Some(ManagedBot::Coordinated {
+                game_id: Some(current),
+                handle,
+            }) = &self.runner
+            {
+                if game_meta.as_ref().and_then(|m| m.game_id) == Some(*current)
+                    && self.actor_id == Some(*seat)
+                    && self.game_num_players == *num_players
+                {
+                    // Same provider game: reconcile its restored real prefix;
+                    // retain the original model/standby and all earlier hands.
+                    handle.feed(TrackedEvent {
+                        event,
+                        can_act,
+                        context,
+                    })?;
+                    return Ok(());
+                }
+            }
+        }
         // Kyoku/game boundaries clear the one-shot reach-echo drop: a lost
         // declaration never produces the echo it was waiting for, so the flag
         // must not survive into the next hand and eat a real reach there.
@@ -280,13 +322,33 @@ impl BotManager {
                 return Ok(());
             }
             self.active_name = chosen;
-            self.spawn_runner().await?;
+            self.spawn_runner(game_meta.as_ref().and_then(|m| m.game_id))
+                .await?;
             self.pending.clear();
         }
 
         // No runner means we don't even have a seat yet (no start_game with
         // `id` seen). Drop the event silently — we have no one to feed.
         if self.runner.is_none() {
+            return Ok(());
+        }
+
+        if let Some(ManagedBot::Coordinated { handle, .. }) = &self.runner {
+            // The coordinator receives each real tracked event exactly once,
+            // including confirmed standby moves. It never sees the direct
+            // runner's speculative reach follow-up or echo-dedup branch.
+            let ended = matches!(event, MjaiEvent::EndGame { .. });
+            handle.feed(TrackedEvent {
+                event,
+                can_act,
+                context,
+            })?;
+            if ended {
+                self.actor_id = None;
+                self.emit_status(BotStatus::Stopped {
+                    bot: self.active_name.clone(),
+                });
+            }
             return Ok(());
         }
 
@@ -323,10 +385,9 @@ impl BotManager {
         let autoplay_enabled = self.config.read().await.autoplay.enabled;
         let our_seat = self.actor_id;
 
-        let runner = self
-            .runner
-            .as_mut()
-            .expect("runner is Some — checked above");
+        let Some(ManagedBot::Direct(runner)) = self.runner.as_mut() else {
+            unreachable!("coordinator returned above");
+        };
         let batch = std::mem::take(&mut self.pending);
         let started = Instant::now();
         let decision_id = self
@@ -484,7 +545,7 @@ impl BotManager {
     /// bus, where a `none` would read as a pass — and nothing records or
     /// shows it.
     async fn peek(&mut self) -> Result<()> {
-        let Some(runner) = self.runner.as_mut() else {
+        let Some(ManagedBot::Direct(runner)) = self.runner.as_mut() else {
             return Ok(());
         };
         let batch = std::mem::take(&mut self.pending);
@@ -513,7 +574,7 @@ impl BotManager {
     /// during the slow first-run path before the subprocess actually
     /// starts. Each branch publishes status + notification before
     /// returning so the UI never sees a stuck `Loading` state.
-    async fn spawn_runner(&mut self) -> Result<()> {
+    async fn spawn_runner(&mut self, game_id: Option<u64>) -> Result<()> {
         let bot_name = self.active_name.clone();
         let actor_id = self
             .actor_id
@@ -546,7 +607,7 @@ impl BotManager {
                         bot: bot_name.clone(),
                         actor_id,
                     });
-                    self.runner = Some(runner);
+                    self.runner = Some(ManagedBot::Direct(runner));
                     return Ok(());
                 }
                 Err(e) => {
@@ -569,7 +630,7 @@ impl BotManager {
                 bail!(msg);
             }
         };
-        let entry = match registry.find(&bot_name) {
+        let mut entry = match registry.find(&bot_name) {
             Some(e) => e.clone(),
             None => {
                 let msg = format!(
@@ -578,6 +639,16 @@ impl BotManager {
                     registry.root().display()
                 );
                 self.fail_load(&bot_name, &msg, "Bot not found");
+                bail!(msg);
+            }
+        };
+        // Registry keeps malformed bots visible for settings repair, but a
+        // bad declared transport must never silently become plain MJAI.
+        entry.manifest = match manifest::Manifest::load(&entry.dir) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                let msg = format!("invalid bot manifest: {error:#}");
+                self.fail_load(&bot_name, &msg, "Bot misconfigured");
                 bail!(msg);
             }
         };
@@ -769,7 +840,30 @@ impl BotManager {
         // Reuse the loading id so the sticky toast is replaced, not
         // duplicated. Frontend treats same-id as a swap.
         self.emit_notify(Notification::success(format!("{bot_name} ready")).id(load_id));
-        self.runner = Some(Box::new(bot));
+        let protocol = entry
+            .manifest
+            .as_ref()
+            .map(|m| m.bot.protocol)
+            .unwrap_or_default();
+        self.runner = Some(match (protocol, &self.recovery_clock, &self.monitor) {
+            (manifest::BotProtocol::PositionedMjai, Some(clock), Some(monitor)) => {
+                ManagedBot::Coordinated {
+                    game_id,
+                    handle: super::recovery::RecoveryHandle::spawn(
+                        Box::new(bot),
+                        actor_id,
+                        self.game_num_players,
+                        bot_name,
+                        self.config.clone(),
+                        clock.clone(),
+                        monitor.clone(),
+                        self.out_tx.clone(),
+                        self.inspector.clone(),
+                    ),
+                }
+            }
+            _ => ManagedBot::Direct(Box::new(bot)),
+        });
         Ok(())
     }
 
@@ -998,7 +1092,7 @@ mod tests {
         // mirror that invariant here for status emissions to be realistic.
         mgr.actor_id = Some(2);
         mgr.active_name = "mock".into();
-        mgr.runner = Some(Box::new(mock));
+        mgr.runner = Some(ManagedBot::Direct(Box::new(mock)));
         (mgr, calls, resp_rx, status_rx, notify_rx)
     }
 
@@ -1474,7 +1568,9 @@ mod tests {
         );
         mgr.actor_id = Some(2);
         mgr.active_name = "mock".into();
-        mgr.runner = Some(Box::new(MockBotRunner::failing("kaboom")));
+        mgr.runner = Some(ManagedBot::Direct(Box::new(MockBotRunner::failing(
+            "kaboom",
+        ))));
 
         // Trigger a decision point — react() returns error.
         let err = mgr.handle(dahai(0)).await.unwrap_err();
@@ -1615,6 +1711,30 @@ mod tests {
         let n = notify_rx.try_recv().unwrap();
         assert_eq!(n.level, crate::schema::NotifyLevel::Error);
         assert!(n.title.contains("Bot not found"));
+    }
+
+    #[tokio::test]
+    async fn malformed_transport_manifest_cannot_silently_start_a_direct_runner() {
+        let root = tempfile::tempdir().unwrap();
+        let bot = root.path().join("broken");
+        std::fs::create_dir(&bot).unwrap();
+        std::fs::write(bot.join("bot.py"), "").unwrap();
+        std::fs::write(bot.join("pyproject.toml"), "").unwrap();
+        std::fs::write(bot.join("manifest.toml"), "[bot]\nprotocol = 'unknown'\n").unwrap();
+        let mut mgr = BotManager::new(
+            Some(dummy_runtime()),
+            root.path().into(),
+            cfg_with("broken"),
+            bot_response_bus(),
+            bot_status_bus(),
+            notify_bus(),
+            dummy_inspector(),
+            fresh_syncs(),
+        );
+        let start = serde_json::from_str(r#"{"type":"start_game","id":0,"names":[]}"#).unwrap();
+        let error = mgr.handle(start).await.unwrap_err();
+        assert!(format!("{error:#}").contains("invalid bot manifest"));
+        assert!(mgr.runner.is_none());
     }
 
     /// Regression (issue #157): switching the active bot after the manager
@@ -1905,7 +2025,7 @@ mod tests {
         );
         mgr.actor_id = Some(2);
         let (mock, _calls) = MockBotRunner::new(vec![]);
-        mgr.runner = Some(Box::new(mock));
+        mgr.runner = Some(ManagedBot::Direct(Box::new(mock)));
 
         let handle = tokio::spawn(async move { mgr.run(rx).await });
         drop(events); // last sender → channel closes

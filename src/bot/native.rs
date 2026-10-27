@@ -661,7 +661,7 @@ fn null_is_ranked_pass(
 
 /// Build the reply pair (mjai action + HUD card) from the local model's
 /// decision — the fallback when the API path is unavailable.
-fn local_reply(local: &Decision, seat: u8) -> (MjaiEvent, Option<Value>) {
+pub(super) fn local_reply(local: &Decision, seat: u8) -> (MjaiEvent, Option<Value>) {
     let meta = build_show_meta(&local.candidates);
     (bot_action_to_mjai(local.action.clone(), seat), meta)
 }
@@ -947,7 +947,7 @@ fn build_show_meta(candidates: &[(BotAction, f32)]) -> Option<serde_json::Value>
 fn label_pais_bot_action(a: &BotAction) -> (&'static str, Vec<String>) {
     match a {
         BotAction::Dahai { pai, .. } => ("Discard", vec![pai.clone()]),
-        BotAction::Reach { pai } => (
+        BotAction::Reach { pai, .. } => (
             "Riichi",
             if pai.is_empty() {
                 vec![]
@@ -970,17 +970,17 @@ fn label_pais_bot_action(a: &BotAction) -> (&'static str, Vec<String>) {
 }
 
 /// Map a schema-agnostic [`BotAction`] to Akagi's `MjaiEvent` reply.
-fn bot_action_to_mjai(a: BotAction, actor: u8) -> MjaiEvent {
+pub(super) fn bot_action_to_mjai(a: BotAction, actor: u8) -> MjaiEvent {
     match a {
         BotAction::Dahai { pai, tsumogiri } => MjaiEvent::Dahai {
             actor,
             pai,
             tsumogiri,
         },
-        BotAction::Reach { pai } => MjaiEvent::Reach {
+        BotAction::Reach { pai, tsumogiri } => MjaiEvent::Reach {
             actor,
             pai: Some(pai),
-            tsumogiri: None,
+            tsumogiri,
         },
         BotAction::Pon {
             target,
@@ -1986,7 +1986,13 @@ mod tests {
                 },
                 0.6f32,
             ),
-            (BotAction::Reach { pai: "2p".into() }, 0.3f32),
+            (
+                BotAction::Reach {
+                    pai: "2p".into(),
+                    tsumogiri: Some(false),
+                },
+                0.3f32,
+            ),
             (
                 BotAction::Dahai {
                     pai: "9s".into(),

@@ -40,7 +40,7 @@ import { Monitor } from './Monitor'
 function state(): MonitorSnapshot {
   const context = { game: 1, round: 1, event_seq: 10 }
   return {
-    revision: 1, context, names: [], red_fives: true,
+    control: null, revision: 1, context, names: [], red_fives: true,
     game: null, view: null, round_ended: false, game_ended: false,
     capture: { state: 'running', descriptor: 'test' },
     bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null, sync_fault: null,
@@ -58,6 +58,27 @@ const candidates = () => screen.queryAllByRole('listitem').filter(li => li.class
 
 describe('monitor user states', () => {
   beforeEach(() => { fixture.snapshot = state(); fixture.options = { always_on_top: false }; fixture.calls = []; fixture.handEvents = [] })
+
+  it('shows the selected source on every tab and never switches sources in the UI', () => {
+    fixture.snapshot!.control = {
+      context: fixture.snapshot!.context, window: { platform: 'majsoul', opened_ns: '100' }, source: 'native_standby',
+      primary: { state: 'recovering', through: 9, reason: 'primary pipe closed' }, standby: { state: 'ready', through: 10 },
+    }
+    fixture.snapshot!.service = 'error'
+    fixture.snapshot!.service_error = 'primary pipe closed'
+    const { rerender } = render(<Monitor />)
+    for (const name of ['决策', '本局', '对局', '统计', '设置']) {
+      fireEvent.click(screen.getByRole('tab', { name }))
+      expect(screen.getByText('本地备用 · 主模型恢复中')).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.getByRole('status').textContent).toBe('待确认')
+    }
+    // Health may catch up after selection; only the core can select a new source.
+    fixture.snapshot = { ...fixture.snapshot!, control: { ...fixture.snapshot!.control!, primary: { state: 'ready', through: 10 } } }
+    rerender(<Monitor />)
+    expect(screen.getByText('本地备用 · 主模型就绪')).toBeTruthy()
+    expect(fixture.calls.some(([cmd]) => /source|fallback|recovery/.test(cmd))).toBe(false)
+  })
 
   it('keeps an unresolved sync fault visible on every tab until recovery is confirmed', () => {
     fixture.snapshot!.sync_fault = 'The viewer cannot play action 30.'

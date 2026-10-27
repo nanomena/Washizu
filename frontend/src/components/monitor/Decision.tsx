@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react'
 import { AlertTriangle, Check, Hourglass, Info, LoaderCircle, Minus, X } from 'lucide-react'
 import { Faces } from '@/components/monitor/Tiles'
-import { decisionMark, type ActionView, type Candidate, type DecisionView, type MonitorDecision, type StepState, type Tone } from '@/lib/monitor'
+import { controlLabel, decisionMark, type DecisionControl, type ActionView, type Candidate, type DecisionView, type MonitorDecision, type StepState, type Tone } from '@/lib/monitor'
 import { localized, tr } from '@/lib/i18n'
 
 const BADGE_ICON: Record<Tone, typeof Check> = { ok: Check, done: Check, wait: Hourglass, busy: LoaderCircle, bad: AlertTriangle, idle: Minus }
@@ -32,6 +32,7 @@ function Badge({ view }: { view: DecisionView }) {
 }
 
 type CardProps = {
+  control: DecisionControl | null
   view: DecisionView
   decision: MonitorDecision | null
   /** Milliseconds the current request has been running; only read while thinking. */
@@ -43,7 +44,7 @@ type CardProps = {
 /** The one thing the window exists for: what the model said, and whether
  *  Mahjong Soul then actually did it. Every state fills the same four rows —
  *  heading, action, progress, note — so nothing around the card ever moves. */
-export function DecisionCard({ view, decision: d, elapsed, past }: CardProps) {
+export function DecisionCard({ view, decision: d, elapsed, past, control }: CardProps) {
   const thinking = view.phase === 'thinking'
   const versus = view.phase === 'mismatch' && view.action && view.actual
   return <section className="mdec" data-tone={view.tone} data-phase={view.phase} data-past={past || undefined} aria-live="polite">
@@ -77,6 +78,8 @@ export function DecisionCard({ view, decision: d, elapsed, past }: CardProps) {
     </ol>
 
     <p className="mdec-msg" data-bad={view.phase === 'failed' || undefined}>
+      {control && <span className="mdec-source" data-source={control.source}
+        title={control.primary.state === 'ready' ? controlLabel(control) : control.primary.reason}>{controlLabel(control)}</span>}
       <span title={view.message}>{d && (view.action || thinking || view.phase === 'failed') ? view.message : ''}</span>
       {d?.reaction_ms != null && <span className="mdec-ms" title={tr('完整的 Bot 往返耗时，立直时包含后续请求')}>{tr('往返')} {d.reaction_ms} ms</span>}
     </p>

@@ -81,6 +81,7 @@ pub struct SubprocessBot {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stdout_line: Vec<u8>,
     bot_dir: PathBuf,
     bot_name: String,
     runtime: PythonRuntime,
@@ -89,6 +90,51 @@ pub struct SubprocessBot {
     /// Forwards bot-emitted stderr notifications to the frontend. Cloned
     /// into each stderr pump, including the one spawned on `reset()`.
     notify_tx: NotifyBus,
+    command: CommandSpec,
+}
+
+/// Preserve the exact configured command across a transport restart,
+/// including AKAGI_GAME and resolved bot settings. No dependency install
+/// runs inside recovery and no application configuration is rewritten.
+#[derive(Clone)]
+struct CommandSpec {
+    program: std::ffi::OsString,
+    args: Vec<std::ffi::OsString>,
+    env: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+    cwd: Option<PathBuf>,
+}
+
+impl CommandSpec {
+    fn capture(command: &Command) -> Self {
+        let command = command.as_std();
+        Self {
+            program: command.get_program().to_owned(),
+            args: command.get_args().map(Into::into).collect(),
+            env: command
+                .get_envs()
+                .map(|(k, v)| (k.to_owned(), v.map(Into::into)))
+                .collect(),
+            cwd: command.get_current_dir().map(Into::into),
+        }
+    }
+    fn build(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        for (key, value) in &self.env {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
+        command
+    }
 }
 
 impl SubprocessBot {
@@ -129,6 +175,8 @@ impl SubprocessBot {
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
+        let command = CommandSpec::capture(&cmd);
+
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn bot {bot_name}"))?;
@@ -147,12 +195,14 @@ impl SubprocessBot {
             child,
             stdin,
             stdout,
+            stdout_line: Vec::new(),
             bot_dir: bot_dir.to_owned(),
             bot_name,
             runtime,
             actor_id,
             react_timeout: std::time::Duration::from_millis(DEFAULT_REACT_TIMEOUT_MS),
             notify_tx,
+            command,
         })
     }
 
@@ -181,20 +231,31 @@ impl BotRunner for SubprocessBot {
         self.stdin.write_all(b"\n").await.context("write newline")?;
         self.stdin.flush().await.context("flush bot stdin")?;
 
-        let mut buf = String::new();
-        let read = tokio::time::timeout(self.react_timeout, self.stdout.read_line(&mut buf)).await;
+        self.stdout_line.clear();
+        // read_until is cancellation-safe. A transport watchdog retires this
+        // process before another request can reuse a partial or late answer.
+        // Decision deadlines cancel only the coordinator's wait, not this I/O.
+        let read = tokio::time::timeout(
+            self.react_timeout,
+            self.stdout.read_until(b'\n', &mut self.stdout_line),
+        )
+        .await;
         let n = match read {
             Ok(r) => r.context("read bot stdout")?,
-            Err(_) => bail!(
-                "bot {} react() timed out after {:?}",
-                self.bot_name,
-                self.react_timeout
-            ),
+            Err(_) => {
+                let _ = self.child.kill().await;
+                bail!(
+                    "bot {} react() timed out after {:?}",
+                    self.bot_name,
+                    self.react_timeout
+                );
+            }
         };
         if n == 0 {
             bail!("bot {} stdout EOF (process exited)", self.bot_name);
         }
 
+        let buf = std::str::from_utf8(&self.stdout_line).context("bot reply is not UTF-8")?;
         let resp: BotResponse = serde_json::from_str(buf.trim())
             .with_context(|| format!("bot {} reply malformed: {}", self.bot_name, buf.trim()))?;
         Ok(resp)
@@ -215,8 +276,9 @@ impl BotRunner for SubprocessBot {
             let _ = self.child.wait().await;
         }
 
-        let new = SubprocessBot::spawn(
-            &self.runtime,
+        let new = SubprocessBot::spawn_with_command(
+            self.command.build(),
+            self.runtime.clone(),
             &self.bot_dir,
             self.actor_id,
             self.notify_tx.clone(),
@@ -226,14 +288,13 @@ impl BotRunner for SubprocessBot {
             child,
             stdin,
             stdout,
-            react_timeout,
             ..
         } = new;
 
         self.child = child;
         self.stdin = stdin;
         self.stdout = stdout;
-        self.react_timeout = react_timeout;
+        self.stdout_line.clear();
         Ok(())
     }
 }
@@ -343,6 +404,60 @@ for line in sys.stdin:
         assert!(matches!(resp.action, MjaiEvent::None));
 
         let _ = bot.react(&[MjaiEvent::end_game()]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_reply_watchdog_retires_the_pipe_and_restart_preserves_command_settings() {
+        let py = system_python().expect("subprocess qualification requires Python");
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("bot.py"), r#"import json, os, sys, time
+for line in sys.stdin:
+    events = json.loads(line)
+    if events[0]['type'] == 'end_game':
+        break
+    if events[0]['type'] == 'none':
+        sys.stdout.write('{"type":')
+        sys.stdout.flush()
+        time.sleep(2)
+    else:
+        print(json.dumps({'type':'none','meta':{'game':os.environ['AKAGI_GAME'], 'settings':os.environ['AKAGI_BOT_CONFIG']}}), flush=True)
+"#).unwrap();
+        let mut cmd = Command::new(&py);
+        cmd.current_dir(tmp.path())
+            .arg("bot.py")
+            .env("AKAGI_GAME", "fixed-private-game-metadata")
+            .env("AKAGI_BOT_CONFIG", "same-resolved-settings-path");
+        let mut bot = SubprocessBot::spawn_with_command(
+            cmd,
+            dummy_runtime(&py),
+            tmp.path(),
+            0,
+            crate::event_bus::notify_bus(),
+        )
+        .await
+        .unwrap();
+        bot.set_react_timeout(std::time::Duration::from_millis(150));
+        assert!(bot
+            .react(&[MjaiEvent::None])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("timed out"));
+        assert!(
+            bot.child.try_wait().unwrap().is_some(),
+            "partial response process was reaped"
+        );
+        bot.reset().await.unwrap();
+        assert_eq!(bot.react_timeout, std::time::Duration::from_millis(150));
+        let reply = bot.react(&[MjaiEvent::EndKyoku]).await.unwrap();
+        assert_eq!(
+            reply.meta.as_ref().unwrap()["game"],
+            "fixed-private-game-metadata"
+        );
+        assert_eq!(
+            reply.meta.as_ref().unwrap()["settings"],
+            "same-resolved-settings-path"
+        );
     }
 
     #[test]
