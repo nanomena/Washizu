@@ -8,7 +8,10 @@ clients, each with its own game view, dock and local DevTools port.
 Opening Washizu shows saved accounts. Create a Mahjong Soul or Tenhou profile,
 or rename and open one already saved. Multiple different profiles can run
 simultaneously. Opening a starting or active profile again focuses its existing
-client. Settings → App holds the account chooser button and the application's
+client. The first **Open** shows and focuses the account as soon as its dock
+loads; no second **Show** click is needed. First opening, repeated Open and
+second-instance requests use the same restore/show/focus path.
+Settings → App holds the account chooser button and the application's
 About/license details. The game window has no application menu bar. Showing
 the chooser during a game does not stop that client. Closing the chooser while
 clients run minimizes it; Quit is prevented until those clients have closed.

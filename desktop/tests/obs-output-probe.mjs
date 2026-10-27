@@ -23,6 +23,7 @@ fs.writeFileSync(path.join(home, 'view.json'), legacy)
 const timers = new Map()
 let timerId = 0
 const windows = [], views = [], senders = [], errors = [], calls = []
+const presentation = [], messages = []
 const handlers = new Map()
 let start
 const screen = Object.assign(new EventEmitter(), {
@@ -46,10 +47,16 @@ class Page extends EventEmitter {
 class Window extends EventEmitter {
   constructor(options) { super(); this.options = options; windows.push(this) }
   contentView = { addChildView() {}, removeChildView() {} }
+  minimized = false
+  visible = false
+  focused = false
   getContentSize() { return [1000, 750] }
   getContentBounds() { return { x: 0, y: 0, width: 1000, height: 750 } }
   setBounds() {}
-  show() {}
+  isMinimized() { return this.minimized }
+  restore() { presentation.push('restore'); this.minimized = false }
+  show() { presentation.push('show'); this.visible = true }
+  focus() { assert.equal(this.visible, true); presentation.push('focus'); this.focused = true }
 }
 class Browser extends Window {
   webContents = new Page()
@@ -92,11 +99,16 @@ const namespaces = {
     PLATFORMS: { Majsoul: { name: 'Mahjong Soul' } }, homePlatform: () => 'Majsoul' },
   './view-preferences.js': preferences,
 }
+const accountProcess = Object.assign(new EventEmitter(), {
+  platform: 'win32', env: {}, argv: [], pid: 1234, connected: true, versions: {},
+  send(message, callback) { messages.push(message); presentation.push(message.type); callback?.(null) },
+})
 const context = vm.createContext({ console, URL, Buffer,
-  process: { platform: 'win32', env: {}, argv: [], pid: 1234, connected: false, on() {}, versions: {} },
+  process: accountProcess,
   setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id },
   clearTimeout: id => timers.delete(id), setInterval: () => ++timerId, clearInterval() {},
 })
+async function probe() {
 try {
   const filename = fileURLToPath(new URL('../src/game-main.js', import.meta.url))
   const module = new vm.SourceTextModule(fs.readFileSync(filename, 'utf8'), {
@@ -109,7 +121,33 @@ try {
     }, { context })
   })
   await module.evaluate()
+  accountProcess.emit('message', { type: 'focus' })
+  assert.deepEqual(presentation, [], 'a focus request before window creation adds no retry or state')
   await start()
+  const account = windows[0]
+  assert.equal(account.visible, false)
+  assert.deepEqual(messages, [])
+  views[0].webContents.emit('did-finish-load')
+  assert.deepEqual(presentation, ['show', 'focus', 'profile-ready'], 'the first Open presents and focuses before acknowledging readiness')
+  assert.equal(account.visible, true)
+  assert.equal(account.focused, true)
+  views[0].webContents.emit('did-finish-load')
+  assert.equal(messages.length, 1, 'a page reload never repeats the initial window presentation')
+  presentation.length = 0
+  account.visible = account.focused = false
+  account.minimized = true
+  accountProcess.emit('message', { type: 'focus' })
+  assert.deepEqual(presentation, ['restore', 'show', 'focus'])
+  assert.equal(account.minimized, false)
+  presentation.length = 0
+  account.visible = account.focused = false
+  app.emit('second-instance')
+  assert.deepEqual(presentation, ['show', 'focus'], 'a hidden account is shown as well as focused')
+  assert.equal(windows.length, 1, 'focus never creates a second account window')
+  if (process.env.WINDOW_PRESENTATION_ONLY === '1') {
+    console.log('First Open, IPC focus and second-instance presentation lifecycle: passed')
+    return
+  }
   const invoke = (command, args = {}) => handlers.get('akagi:invoke')({ sender: views[0].webContents }, command, args)
   const options = async () => (await invoke('get_monitor_options')).value
   assert.equal((await options()).obs_name, 'Washizu')
@@ -166,3 +204,5 @@ try {
   if (!path.resolve(home).startsWith(temporaryRoot)) throw new Error('Unexpected test directory')
   fs.rmSync(home, { recursive: true, force: true })
 }
+}
+await probe()

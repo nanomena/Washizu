@@ -163,6 +163,14 @@ function tellOptions() {
   dock?.webContents.send('akagi:event', 'monitor-options', options)
 }
 
+/** Present this account for both its first opening and later focus requests. */
+function showWindow() {
+  if (!window) return
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+}
+
 /** @param {import('./core.js').Ready} ready */
 function openWindow(ready) {
   if (ready.platform !== PROFILE.platform) throw new Error('core 返回的平台与账号档案不一致。')
@@ -205,7 +213,7 @@ function openWindow(ready) {
   page.on('will-navigate', (event, url) => { if (!url.startsWith(DOCK)) event.preventDefault() })
   page.on('render-process-gone', () => page.reload())
   page.once('did-finish-load', () => {
-    frame.show()
+    showWindow()
     if (process.connected) process.send?.({ type: 'profile-ready' }, error => { if (error) note(`account chooser notification failed: ${error.message}`) })
   })
   page.on('did-fail-load', (_event, _code, description, _url, isMainFrame) => {
@@ -604,10 +612,7 @@ async function prepare() {
   app.commandLine.appendSwitch('max-active-webgl-contexts', String(WEBGL_CONTEXTS))
   registerDockScheme()
 
-  app.on('second-instance', () => {
-    if (window?.isMinimized()) window.restore()
-    window?.focus()
-  })
+  app.on('second-instance', showWindow)
   app.on('window-all-closed', () => app.quit())
   app.on('before-quit', event => {
     if (!core || profileReleased) { quitting = true; return }
@@ -628,8 +633,7 @@ async function prepare() {
   })
   process.on('message', message => {
     if (message && typeof message === 'object' && 'type' in message && message.type === 'focus') {
-      if (window?.isMinimized()) window.restore()
-      window?.show(); window?.focus()
+      showWindow()
     }
   })
   // Losing the chooser must not terminate every otherwise-independent game.
