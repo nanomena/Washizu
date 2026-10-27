@@ -396,7 +396,7 @@ impl TurnController {
             };
             run.deadline = clock.started_at
                 + Duration::from_millis(
-                    u64::from(clock.fixed_ms) + u64::from(clock.remaining_bank_ms.unwrap_or(0)),
+                    u64::from(clock.fixed_ms) + u64::from(clock.bank_at_start_ms.unwrap_or(0)),
                 );
             if now >= run.deadline {
                 run.finish(Outcome::Cancelled(CancelReason::Expired));

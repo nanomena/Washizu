@@ -298,10 +298,23 @@ async fn a_received_forecast_loses_pointer_permission_on_context_change() {
     };
     assert!(hand.set_layout(PointerLayout {
         viewport: rect,
-        tiles: vec![TileTarget { tile: "6s".into(), drawn: false,
-            bounds: crate::autoplay::context::CanvasRect { x: 500.0, y: 800.0, width: 60.0, height: 80.0 } }],
+        tiles: vec![TileTarget {
+            tile: "6s".into(),
+            drawn: false,
+            bounds: crate::autoplay::context::CanvasRect {
+                x: 500.0,
+                y: 800.0,
+                width: 60.0,
+                height: 80.0
+            }
+        }],
         next_draw: None,
-        rest: crate::autoplay::context::CanvasRect { x: 750.0, y: 700.0, width: 40.0, height: 20.0 },
+        rest: crate::autoplay::context::CanvasRect {
+            x: 750.0,
+            y: 700.0,
+            width: 40.0,
+            height: 20.0
+        },
     }));
     hand.look_at(Spot::Hand("6s".into()));
     assert!(

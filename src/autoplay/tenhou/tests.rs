@@ -167,10 +167,10 @@ fn native_clock_is_stable_and_bank_is_the_actual_grant_at_that_window_start() {
     };
     let facts = adapter.clock("protocol:native-7", &raw, now).unwrap();
     assert_eq!(facts.started_at, now - Duration::from_millis(4000));
-    assert_eq!(facts.remaining_bank_ms, Some(6000));
+    assert_eq!(facts.bank_at_start_ms, Some(6000));
     assert_eq!(
         facts.started_at
-            + Duration::from_millis(u64::from(facts.fixed_ms + facts.remaining_bank_ms.unwrap())),
+            + Duration::from_millis(u64::from(facts.fixed_ms + facts.bank_at_start_ms.unwrap())),
         now + Duration::from_millis(5000)
     );
     assert_eq!(

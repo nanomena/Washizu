@@ -346,7 +346,7 @@ impl SiteAdapter for MajsoulAutoplay {
             clock: budget.map(|b| TurnClockFacts {
                 started_at: b.opened_at,
                 fixed_ms: b.fixed_ms,
-                remaining_bank_ms: Some(b.add_ms),
+                bank_at_start_ms: Some(b.add_ms),
             }),
             continuation: None,
         };

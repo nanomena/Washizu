@@ -59,8 +59,10 @@ pub struct TurnPlan {
 pub struct TurnClockFacts {
     pub started_at: Instant,
     pub fixed_ms: u32,
-    /// Unknown is kept unknown, never replaced with the initial bank cap.
-    pub remaining_bank_ms: Option<u32>,
+    /// Actual bank granted at this window's started_at. This is neither the
+    /// per-round capacity nor the balance after elapsed time has consumed it.
+    /// Unknown stays unknown, so the policy cannot invent extra time.
+    pub bank_at_start_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

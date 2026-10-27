@@ -45,7 +45,7 @@ impl TenhouAutoplay {
         let facts = TurnClockFacts {
             started_at: raw.started_at(observed_at)?,
             fixed_ms: raw.fixed_ms,
-            remaining_bank_ms: Some(raw.granted_bank_ms),
+            bank_at_start_ms: Some(raw.granted_bank_ms),
         };
         *clock = Some((key.to_owned(), facts));
         Some(facts)

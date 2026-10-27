@@ -90,7 +90,7 @@ impl Harness {
             clock: Some(TurnClockFacts {
                 started_at: now,
                 fixed_ms: 20_000,
-                remaining_bank_ms: None,
+                bank_at_start_ms: None,
             }),
             continuation: None,
         };

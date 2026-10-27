@@ -136,7 +136,7 @@ impl<'a> PacingPolicy<'a> {
             budget: ctx.clock.as_ref().map(|clock| BudgetSnapshot {
                 fixed_ms: clock.fixed_ms,
                 // An initial bank capacity is not its observed current balance.
-                add_ms: clock.remaining_bank_ms.unwrap_or(0),
+                add_ms: clock.bank_at_start_ms.unwrap_or(0),
                 elapsed_ms,
             }),
             click_overhead_ms: ctx.click_overhead_ms,
@@ -154,7 +154,9 @@ impl<'a> PacingPolicy<'a> {
         // Historical rendering pads are already included in the sampled total.
         // An observed ready target must not pay them again before input starts.
         // Style gives way to the actual clock; only observed readiness is hard.
-        let total_target_ms = decision.total_target_ms.min(super::budget_cap(&input, decision.allow_bank));
+        let total_target_ms = decision
+            .total_target_ms
+            .min(super::budget_cap(&input, decision.allow_bank));
         let start_ms = total_target_ms
             .saturating_sub(ctx.click_overhead_ms)
             .max(readiness_ms)
@@ -165,7 +167,7 @@ impl<'a> PacingPolicy<'a> {
         let available_ms = ctx.clock.as_ref().map_or(u32::MAX, |clock| {
             clock
                 .fixed_ms
-                .saturating_add(clock.remaining_bank_ms.unwrap_or(0))
+                .saturating_add(clock.bank_at_start_ms.unwrap_or(0))
         });
         if ctx.clock.is_some() && completion_ms > available_ms {
             return Err(PacingError::Deadline {
@@ -265,7 +267,7 @@ mod tests {
             clock: Some(TurnClockFacts {
                 started_at: origin,
                 fixed_ms: 5000,
-                remaining_bank_ms: None,
+                bank_at_start_ms: None,
             }),
             now: origin,
             earliest_press_at: None,
@@ -349,7 +351,7 @@ mod tests {
         let mut ctx = context(&action, &snapshot, Instant::now());
         let plan = policy.decide(&ctx, &mut rng()).unwrap();
         assert_eq!((plan.total_target_ms, plan.wait_ms), (4500, 4200));
-        ctx.clock.as_mut().unwrap().remaining_bank_ms = Some(6000);
+        ctx.clock.as_mut().unwrap().bank_at_start_ms = Some(6000);
         let plan = policy.decide(&ctx, &mut rng()).unwrap();
         assert_eq!((plan.total_target_ms, plan.wait_ms), (7500, 7200));
     }
