@@ -7,8 +7,9 @@
 //!
 //! Faithful Rust port of the observation half of the original Akagi Python
 //! Tenhou bridge. AkagiV3 uses the bridge in
-//! observation mode. Gameplay comes from `Direction::Down`; the one observed
-//! client boundary is `NEXTREADY`, which completes a pending AGARI group.
+//! observation mode. Gameplay comes from `Direction::Down`; actual uplink
+//! D/N/REACH commands acknowledge input through the shared observer without
+//! creating game events. NEXTREADY completes a pending AGARI group.
 //!
 //! Tenhou tile encoding lives in [`tile`]; meld bitfield decoding lives in
 //! [`meld`]; per-flow state in [`state`].
