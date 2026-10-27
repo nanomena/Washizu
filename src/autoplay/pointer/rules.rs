@@ -1,7 +1,7 @@
 //! What the pointer may do: where it may not go now, and when it may set off.
 //!
 //! Every move the pointer makes passes these checks at the one place moves
-//! are sent ([`super::Hand`]), whoever planned the move: the way to a press,
+//! are sent ([`super::PointerController`]), whoever planned the move: the way to a press,
 //! a plan's next press, a press made again, a press between decisions, the
 //! rest after a press, the lift after a tsumogiri, the looks between turns.
 //! A rule added here holds for all of them, and no rule is checked anywhere
@@ -18,6 +18,7 @@
 //! press cuts the unhurried moves short.
 
 use super::Point;
+use crate::autoplay::context::CanvasRect;
 use crate::autoplay::humanize;
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,7 @@ pub struct Sight {
     /// Where the next draw lands, in CSS pixels, and the canvas's 16:9 unit
     /// there in pixels, while that tile is not on screen. `None` once it is,
     /// and before the hand at rest has been seen.
-    pub draw_slot: Option<(Point, f64)>,
+    pub draw_slot: Option<CanvasRect>,
 }
 
 /// Why a move may not be made now.
@@ -38,12 +39,6 @@ pub enum Refusal {
     /// it.
     DrawNotThere,
 }
-
-/// How far, in 16:9 units, a point may be from where the next draw lands
-/// and still be on it: across, a tile's half width (0.4) and a little
-/// more; up and down, as far as the pointer is still on a tile.
-const SLOT_HALF_X: f64 = 0.55;
-const SLOT_HALF_Y: f64 = 0.75;
 
 /// What a move is for, as far as the rules go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,12 +59,8 @@ pub fn refusal(to: Point, bound: Bound, sight: &Sight) -> Option<Refusal> {
     if bound == Bound::Press {
         return None;
     }
-    let (slot, unit) = sight.draw_slot?;
-    if unit <= 0.0 {
-        return None;
-    }
-    let (across, along) = ((to.0 - slot.0).abs() / unit, (to.1 - slot.1).abs() / unit);
-    (across <= SLOT_HALF_X && along <= SLOT_HALF_Y).then_some(Refusal::DrawNotThere)
+    let slot = sight.draw_slot?;
+    slot.contains(to.0, to.1).then_some(Refusal::DrawNotThere)
 }
 
 /// How long a move from `from` to `to` waits before it sets off, when it
@@ -118,7 +109,12 @@ mod tests {
     fn where_the_draw_lands_is_refused_until_it_is_there() {
         let slot = (1000.0, 670.0);
         let waiting = Sight {
-            draw_slot: Some((slot, UNIT)),
+            draw_slot: Some(CanvasRect {
+                x: 956.0,
+                y: 610.0,
+                width: 88.0,
+                height: 120.0,
+            }),
         };
         let errand = Bound::Errand;
         for to in [slot, (1030.0, 690.0), (970.0, 640.0)] {

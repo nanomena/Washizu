@@ -19,10 +19,10 @@
 //! fresh point of the same target ([`again`]).
 
 use super::Point;
+use crate::autoplay::context::CanvasRect;
 use crate::autoplay::humanize::{
     self, AIM_ACROSS as ACROSS, AIM_ALONG as ALONG, AIM_ANYWAY as ANYWAY,
 };
-use crate::autoplay::platform::{PlanResult, Step};
 use rand::Rng;
 
 /// The part of a target a press may land on: half its width and half its
@@ -36,28 +36,17 @@ pub struct Reach {
     pub from_top: bool,
 }
 
-/// Scatter every press of `plan` within its target, coming from `from` (the
-/// pointer, as a normalised point) to the first, and from each to the next.
-/// The middles aimed at are kept in [`PlanResult::aims`], for a press made again.
-pub fn scatter<R: Rng + ?Sized>(
-    plan: &mut PlanResult,
-    from: Option<Point>,
-    reach: impl Fn(Point) -> Reach,
-    rng: &mut R,
-) {
-    let mut came_from = from;
-    plan.aims.clear();
-    for step in &mut plan.steps {
-        let Step::Click { x_norm, y_norm } = step else {
-            continue;
-        };
-        let middle = (*x_norm, *y_norm);
-        let way = came_from.map(|p| (middle.0 - p.0, middle.1 - p.1));
-        let (x, y) = land(middle, way, reach(middle), humanize::session_lean(), rng);
-        (*x_norm, *y_norm) = (x, y);
-        plan.aims.push(middle);
-        came_from = Some(middle);
-    }
+/// Aim within one measured target; the common executor supplies each target
+/// only after its current website identity and readiness have been observed.
+pub fn target<R: Rng + ?Sized>(bounds: CanvasRect, from: Option<Point>, rng: &mut R) -> Point {
+    let middle = super::layout::center(bounds);
+    let way = from.map(|p| (middle.0 - p.0, middle.1 - p.1));
+    let reach = Reach {
+        half_x: bounds.width * 0.4,
+        half_y: bounds.height * 0.4,
+        from_top: false,
+    };
+    land(middle, way, reach, humanize::session_lean(), rng)
 }
 
 /// A fresh point in the target whose middle is `middle`, for a press made again.
@@ -212,52 +201,29 @@ mod tests {
         assert!((mean - (middle.1 - 1.13 / 4.0)).abs() < 0.03, "{mean}");
     }
 
-    /// Scattering a plan moves each press within its own target and keeps
-    /// the middles for a press made again.
     #[test]
-    fn a_plan_is_scattered_press_by_press_and_its_middles_kept() {
+    fn measured_targets_keep_every_press_inside_on_both_geometry_scales() {
         let mut rng = StdRng::seed_from_u64(4);
-        let mut plan = PlanResult {
-            steps: vec![
-                Step::Sleep { duration_ms: 500 },
-                Step::Click {
-                    x_norm: 10.875,
-                    y_norm: 7.0,
-                },
-                Step::Sleep { duration_ms: 90 },
-                Step::Click {
-                    x_norm: 6.0,
-                    y_norm: 8.3625,
-                },
-            ],
-            ..PlanResult::default()
-        };
-        let reach = |p: Point| {
-            if p.1 > 8.0 {
-                TILE
-            } else {
-                Reach {
-                    half_x: 0.5,
-                    half_y: 0.2,
-                    from_top: false,
+        for bounds in [
+            CanvasRect {
+                x: 100.0,
+                y: 200.0,
+                width: 18.0,
+                height: 27.0,
+            },
+            CanvasRect {
+                x: 600.0,
+                y: 500.0,
+                width: 90.0,
+                height: 120.0,
+            },
+        ] {
+            for from in [None, Some((0.0, 0.0)), Some((1000.0, 700.0))] {
+                for _ in 0..300 {
+                    let point = target(bounds, from, &mut rng);
+                    assert!(bounds.contains(point.0, point.1));
                 }
             }
-        };
-        scatter(&mut plan, Some((14.0, 5.0)), reach, &mut rng);
-        assert_eq!(plan.aims, [(10.875, 7.0), (6.0, 8.3625)]);
-        let pressed: Vec<Point> = plan
-            .steps
-            .iter()
-            .filter_map(|s| match s {
-                Step::Click { x_norm, y_norm } => Some((*x_norm, *y_norm)),
-                _ => None,
-            })
-            .collect();
-        assert!(inside(pressed[0], (10.875, 7.0), reach((10.875, 7.0))));
-        assert!(inside(pressed[1], (6.0, 8.3625), TILE));
-        assert!(
-            matches!(plan.steps[0], Step::Sleep { duration_ms: 500 }),
-            "the rest of the plan as it was"
-        );
+        }
     }
 }

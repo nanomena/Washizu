@@ -41,12 +41,14 @@ pub mod aim;
 pub mod approach;
 pub mod hand;
 pub mod lean;
+pub mod layout;
 pub mod queue;
 pub mod rules;
 pub mod spots;
 
 pub use approach::{approach, changed_mind, runner_up, wait_to_see, Approach, LOOK_MS, LOOK_REACH};
-pub use hand::{Hand, Touch};
+pub use hand::{ApproachInput, PointerController, Touch};
+pub use layout::{PointerLayout, TileTarget};
 
 use rand::Rng;
 
@@ -77,7 +79,7 @@ pub fn travel_ms(distance: f64, unit: f64) -> u32 {
 }
 
 /// About how long the pointer takes from one press of a plan to the next
-/// ([`Hand::reach`]): a button's way down to the hand, some four units.
+/// ([`PointerController::reach`]): a button's way down to the hand, some four units.
 pub fn next_press_ms() -> u32 {
     travel_ms(4.0, 1.0)
 }
