@@ -553,16 +553,18 @@
 /* One grid for the bar and the panels over it: twelve columns, 93 wide and 12
  * apart, 16 in from either edge. Every panel runs from one column's edge to
  * another's, so every edge stands over an edge of the bar. The bar is in three
- * parts — the round on 1 to 4, what the window may do on 5 to 7, the tabs on 8
- * to 12 — under the decision tab's three panels. */
+ * parts — the round on 1 to 4, forecast and autoplay on 5 to 8, the tabs on 9
+ * to 12. The panels above keep their own column spans. */
 .md-bar { grid-row: 2; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: center; column-gap: 12px; min-width: 0; padding: 0 16px; }
 .md-bar > .mround { grid-column: 1 / 5; }
 /* The middle part ends with what the window may do: autoplay, and the tools. */
-.md-controls { grid-column: 5 / 8; display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.md-controls { grid-column: 5 / 9; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
+.md-forecast { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 11px; color: var(--m-ink2); }
+.md-forecast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The round's dora indicators: five fit, the most a hand turns over. */
 .mround .mdora { --th: 20px; height: 20px; }
 /* The segmented control: a grey well, the chosen segment a white pill. */
-.md-tabs { grid-column: 8 / 13; display: flex; justify-self: stretch; gap: 2px; padding: 3px; border-radius: 8px; background: var(--m-well); }
+.md-tabs { grid-column: 9 / 13; display: flex; justify-self: stretch; gap: 2px; padding: 3px; border-radius: 8px; background: var(--m-well); }
 .md-tabs button { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 1 1 auto; white-space: nowrap; height: 22px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--m-ink2); }
 /* The links' one light sits after their tab's name, always there: it changes colour, not the tab's width. */
 .md-tab-dot { margin-left: 6px; }

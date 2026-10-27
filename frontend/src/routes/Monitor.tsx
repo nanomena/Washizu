@@ -14,7 +14,7 @@ import { useCanvasScale } from '@/hooks/useCanvasScale'
 import { pickShow } from '@/lib/botShow'
 import { rememberGroup, savedGroup, type Group } from '@/lib/settingsGroup'
 import {
-  MONITOR_DEFAULTS, alertsOf, candidatesOf, decisionSound, decisionView, healthOf, levelOf, linkOf, roundLabel, seatWind, tableOf,
+  MONITOR_DEFAULTS, alertsOf, candidatesOf, decisionSound, decisionView, forecastView, healthOf, levelOf, linkOf, roundLabel, seatWind, tableOf,
   type Alert, type AutoplayLevel, type Candidate, type DecisionView, type Health, type MonitorConfig, type MonitorSnapshot,
 } from '@/lib/monitor'
 import { invoke, listen } from '@/lib/host'
@@ -99,6 +99,7 @@ function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onCon
   const { s, view } = m
   const game = s?.game ?? null
   const link = linkOf(m.health)
+  const forecast = forecastView(s?.forecast ?? null)
   // A tab shows what it holds while the pointer rests on it; a click keeps it.
   // Leaving the dock goes back to the tab kept. The pause keeps a pointer on
   // its way across the tabs from flicking through them.
@@ -117,6 +118,10 @@ function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onCon
     <header className="md-bar">
       <Round s={s} />
       <div className="md-controls">
+        <div className="md-forecast" role="group" aria-label={tr('预推理状态')} data-state={s?.forecast.state ?? 'loading'} title={forecast.detail}>
+          <i className="mdot" data-tone={forecast.tone} aria-hidden />
+          <span aria-live="polite">{tr('预推理')} · {forecast.label}</span>
+        </div>
         {/* The control is the setting, and says so by its colour: how far the model's actions may be carried out — not that one has been. */}
         <span className="md-level"><span aria-hidden>{tr('自动操作')}</span><AutoplayLevels level={levelOf(s, options)} onLevel={onLevel} /></span>
       </div>

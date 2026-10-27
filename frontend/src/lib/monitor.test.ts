@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   actionLabel, alertsOf, candidatesOf, decisionMark, decisionView, describeAction, factsOf, handMarks, healthOf, meldView, newestSnapshot, ownHand,
-  serverLine, decisionSound, controlLabel,
-  type MonitorDecision, type MonitorSnapshot, type Table,
+  serverLine, decisionSound, controlLabel, forecastView,
+  type ForecastStatus, type MonitorDecision, type MonitorSnapshot, type Table,
 } from './monitor'
 import type { GameStateSnapshot, MjaiEvent, ShowItem } from '@/types'
 
@@ -14,7 +14,7 @@ function decision(response: MjaiEvent & { meta?: unknown }, items: ShowItem[], t
     state: 'awaiting', response: { ...response, meta: { show: { items } } } as MonitorDecision['response'], error: null, confirmed_seq: null }
 }
 function snapshot(d: MonitorDecision, patch: Partial<MonitorSnapshot> = {}): MonitorSnapshot {
-  return { control: null, revision: 1, context: d.context, names: [], red_fives: true, game: { our_seat: 0, num_players: 4 } as GameStateSnapshot, view: null,
+  return { control: null, forecast: { owner: 0, state: 'disabled' }, revision: 1, context: d.context, names: [], red_fives: true, game: { our_seat: 0, num_players: 4 } as GameStateSnapshot, view: null,
     round_ended: false, game_ended: false, capture: { state: 'running', descriptor: 'test' },
     bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null, sync_fault: null,
     brand: 'Demo', facts: [], autoplay_enabled: true, decision: d, previous_decision: null,
@@ -22,6 +22,33 @@ function snapshot(d: MonitorDecision, patch: Partial<MonitorSnapshot> = {}): Mon
 }
 
 describe('monitor stream identities', () => {
+  it('reports all forecast phases independently of formal advice, health and source', () => {
+    const d = decision({ type: 'dahai', actor: 0, pai: '9m', tsumogiri: true }, [])
+    const s = snapshot(d, { control: {
+      context: d.context, window: null, source: 'primary',
+      primary: { state: 'ready', through: 10 }, standby: { state: 'ready', through: 10 },
+    } })
+    const phases: Array<[ForecastStatus, string]> = [
+      [{ owner: 7, state: 'disabled' }, '已关闭'],
+      [{ owner: 7, state: 'unsupported', reason: 'protocol lacks forecast' }, '不支持'],
+      [{ owner: 7, state: 'waiting' }, '等待中'],
+      [{ owner: 7, state: 'running', context: d.context, through: 10, position: 6 }, '计算中'],
+      [{ owner: 7, state: 'ready', context: d.context, through: 10, position: 6 }, '可用'],
+      [{ owner: 7, state: 'unavailable', reason: 'forecast worker timed out' }, '不可用'],
+    ]
+    for (const [forecast, label] of phases) {
+      const next = { ...s, forecast }
+      expect(forecastView(forecast).label).toBe(label)
+      if ('reason' in forecast) expect(forecastView(forecast).detail).toBe(forecast.reason)
+      expect(decisionView(next)).toEqual(decisionView(s))
+      expect(decisionSound(next)).toBe(true)
+      expect(healthOf(next)).toEqual(healthOf(s))
+      expect(alertsOf(next, { ui: null, bridge: null })).toEqual([])
+      expect(controlLabel(next.control!)).toBe('主模型 · 主模型就绪')
+    }
+    expect(forecastView(null)).toEqual({ label: '读取中', detail: '正在读取预推理状态', tone: 'idle' })
+  })
+
   it('keeps standby advice valid during a primary fault and still rejects a real tracker gap', () => {
     const d = decision({ type: 'dahai', actor: 0, pai: '9s', tsumogiri: false }, [])
     const control: NonNullable<MonitorSnapshot['control']> = {

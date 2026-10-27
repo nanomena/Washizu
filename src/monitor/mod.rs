@@ -127,6 +127,8 @@ pub struct HandSummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct MonitorSnapshot {
     pub control: Option<crate::bot::control::DecisionControl>,
+    /// Optional pointer prediction; never a decision source or primary health.
+    pub forecast: crate::bot::forecast::ForecastStatus,
     pub revision: u64,
     pub context: DecisionContext,
     pub names: Vec<String>,
@@ -171,6 +173,7 @@ impl Default for MonitorSnapshot {
     fn default() -> Self {
         Self {
             control: None,
+            forecast: crate::bot::forecast::status(),
             revision: 0,
             context: DecisionContext {
                 game: 0,
@@ -611,6 +614,10 @@ impl MonitorHandle {
         });
     }
 
+    pub fn set_forecast(&self, status: crate::bot::forecast::ForecastStatus) {
+        self.update(|inner| inner.snapshot.forecast = status);
+    }
+
     pub fn set_runner_health(
         &self,
         primary: crate::bot::control::RunnerHealth,
@@ -841,6 +848,63 @@ mod tests {
     }
     fn response(json: &str) -> BotResponse {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn forecast_updates_change_only_their_field_and_snapshot_revision() {
+        use crate::bot::control::{DecisionControl, DecisionSource, RunnerHealth};
+        use crate::bot::forecast::{ForecastPhase, ForecastStatus};
+        for source in [DecisionSource::Primary, DecisionSource::NativeStandby] {
+            let m = MonitorHandle::default();
+            let context = hand(&m);
+            m.set_bot(BotStatus::Ready {
+                bot: "demo".into(),
+                actor_id: 0,
+            });
+            let control = DecisionControl {
+                context,
+                window: None,
+                source,
+                primary: RunnerHealth::Ready { through: 2 },
+                standby: RunnerHealth::Ready { through: 2 },
+            };
+            m.set_control(control.clone());
+            let id = m.begin(context, "demo", &MjaiEvent::None).unwrap();
+            let mut reply = response(r#"{"type":"dahai","actor":0,"pai":"9m","tsumogiri":true}"#);
+            reply.set_control(control);
+            m.complete(id, &reply, 10);
+            let before = serde_json::to_value(m.snapshot()).unwrap();
+            for phase in [
+                ForecastPhase::Disabled,
+                ForecastPhase::Unsupported {
+                    reason: "no forecast protocol".into(),
+                },
+                ForecastPhase::Waiting,
+                ForecastPhase::Running {
+                    context,
+                    through: 2,
+                    position: 1,
+                },
+                ForecastPhase::Ready {
+                    context,
+                    through: 2,
+                    position: 1,
+                },
+                ForecastPhase::Unavailable {
+                    reason: "forecast pipe closed".into(),
+                },
+            ] {
+                let status = ForecastStatus { owner: 9, phase };
+                let revision = m.snapshot().revision;
+                m.set_forecast(status.clone());
+                let mut after = serde_json::to_value(m.snapshot()).unwrap();
+                assert_eq!(after["forecast"], serde_json::to_value(status).unwrap());
+                assert_eq!(after["revision"], revision + 1);
+                after["forecast"] = before["forecast"].clone();
+                after["revision"] = before["revision"].clone();
+                assert_eq!(after, before);
+            }
+        }
     }
 
     #[test]

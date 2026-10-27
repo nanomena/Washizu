@@ -39,6 +39,14 @@
 //! | `pointer`         | `{x, y, down}` — autoplay's pointer, while the trail is on |
 //! | `shutdown-complete` | `{ok, error}` — terminal, flushed only after owned service cleanup |
 //!
+//! `MonitorSnapshot.forecast` is the optional pointer prediction's own status:
+//! `{owner, state, ...}`. `state` is disabled, unsupported, waiting, running,
+//! ready or unavailable. Running/ready carry `{context, through, position}`;
+//! unsupported/unavailable carry `reason`. Private session references never
+//! enter this DTO. This field changes neither decision source nor primary
+//! health. It uses the existing snapshot revision and `monitor-updated` stream;
+//! `set_monitor_lean` remains the single setting for this feature.
+//!
 //! # Lifetime
 //!
 //! The core lives as long as its stdin is open. The shell holds the other end
@@ -466,6 +474,11 @@ fn start_autoplay(state: &AppState, enabled: bool) {
 /// core has to say and with the player's own ranks, and the capture control's
 /// copy of its status with it.
 fn mirror_statuses(state: &AppState) {
+    mirror_forecast(
+        crate::bot::forecast::subscribe_status(),
+        state.monitor.clone(),
+    );
+
     let mut bots = state.bot_status_bus.subscribe();
     let monitor = state.monitor.clone();
     tokio::spawn(async move {
@@ -516,6 +529,22 @@ fn mirror_statuses(state: &AppState) {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => return,
             }
+        }
+    });
+}
+
+/// Subscribe before the bot manager starts. Seed synchronously, then copy only
+/// the producer's latest value; never hold a watch borrow across an await.
+fn mirror_forecast(
+    mut statuses: tokio::sync::watch::Receiver<crate::bot::forecast::ForecastStatus>,
+    monitor: crate::monitor::MonitorHandle,
+) {
+    let initial = statuses.borrow_and_update().clone();
+    monitor.set_forecast(initial);
+    tokio::spawn(async move {
+        while statuses.changed().await.is_ok() {
+            let status = statuses.borrow_and_update().clone();
+            monitor.set_forecast(status);
         }
     });
 }
@@ -601,6 +630,60 @@ async fn write_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn forecast_is_seeded_then_forwarded_on_the_existing_snapshot_stream() {
+        use crate::bot::forecast::{ForecastPhase, ForecastStatus};
+        let monitor = crate::monitor::MonitorHandle::default();
+        let initial = ForecastStatus {
+            owner: 12,
+            phase: ForecastPhase::Waiting,
+        };
+        let (statuses, updates) = tokio::sync::watch::channel(initial.clone());
+        mirror_forecast(updates, monitor.clone());
+        // Startup exposes the current worker state before any task is polled.
+        assert_eq!(monitor.snapshot().forecast, initial);
+        let (out, mut lines) = mpsc::unbounded_channel();
+        tokio::spawn(forward_monitor(monitor.subscribe(), out));
+        let context = monitor.snapshot().context;
+        for phase in [
+            ForecastPhase::Running {
+                context,
+                through: 17,
+                position: 4,
+            },
+            ForecastPhase::Ready {
+                context,
+                through: 17,
+                position: 4,
+            },
+            ForecastPhase::Unavailable {
+                reason: "forecast timed out".into(),
+            },
+            ForecastPhase::Unsupported {
+                reason: "protocol lacks forecast".into(),
+            },
+            ForecastPhase::Disabled,
+        ] {
+            let status = ForecastStatus { owner: 12, phase };
+            statuses.send_replace(status.clone());
+            let line = tokio::time::timeout(std::time::Duration::from_secs(1), lines.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let message: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(message["event"], "monitor-updated");
+            assert_eq!(
+                message["payload"],
+                serde_json::to_value(monitor.snapshot()).unwrap()
+            );
+            assert_eq!(
+                message["payload"]["forecast"],
+                serde_json::to_value(status).unwrap()
+            );
+            assert!(!line.contains("session"));
+        }
+    }
 
     #[test]
     fn a_request_needs_no_params() {

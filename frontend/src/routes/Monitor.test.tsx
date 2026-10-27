@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { MonitorConfig, MonitorEvent, MonitorSnapshot } from '@/lib/monitor'
+import type { ForecastStatus, MonitorConfig, MonitorEvent, MonitorSnapshot } from '@/lib/monitor'
 import { setLang } from '@/lib/i18n'
 
 const fixture = vi.hoisted(() => ({
@@ -47,7 +47,7 @@ import { Monitor } from './Monitor'
 function state(): MonitorSnapshot {
   const context = { game: 1, round: 1, event_seq: 10 }
   return {
-    control: null, revision: 1, context, names: [], red_fives: true,
+    control: null, forecast: { owner: 0, state: 'disabled' }, revision: 1, context, names: [], red_fives: true,
     game: null, view: null, round_ended: false, game_ended: false,
     capture: { state: 'running', descriptor: 'test' },
     bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null, sync_fault: null,
@@ -65,6 +65,52 @@ const candidates = () => screen.queryAllByRole('listitem').filter(li => li.class
 
 describe('monitor user states', () => {
   beforeEach(() => { fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = [] })
+
+  it('shows forecast phases on every tab without changing the formal source or issuing input', async () => {
+    fixture.options = { pointer_lean: true }
+    const context = fixture.snapshot!.context
+    fixture.snapshot!.control = {
+      context, window: null, source: 'native_standby',
+      primary: { state: 'recovering', through: 9, reason: 'primary recovering' }, standby: { state: 'ready', through: 10 },
+    }
+    const phases: Array<[ForecastStatus, string]> = [
+      [{ owner: 8, state: 'disabled' }, '已关闭'],
+      [{ owner: 8, state: 'unsupported', reason: 'worker protocol unsupported' }, '不支持'],
+      [{ owner: 8, state: 'waiting' }, '等待中'],
+      [{ owner: 8, state: 'running', context, through: 10, position: 4 }, '计算中'],
+      [{ owner: 8, state: 'ready', context, through: 10, position: 4 }, '可用'],
+      [{ owner: 8, state: 'unavailable', reason: 'forecast pipe closed' }, '不可用'],
+    ]
+    const { rerender } = render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
+    const inputs = fixture.inputs.length
+    for (const [forecast, label] of phases) {
+      fixture.snapshot = { ...fixture.snapshot!, forecast }
+      rerender(<Monitor />)
+      for (const name of ['决策', '本局', '对局', '统计', '设置']) {
+        fireEvent.click(screen.getByRole('tab', { name }))
+        const indicator = screen.getByRole('group', { name: '预推理状态' })
+        expect(indicator.textContent).toBe(`预推理 · ${label}`)
+        expect(indicator.getAttribute('data-state')).toBe(forecast.state)
+        if ('reason' in forecast) expect(indicator.title).toBe(forecast.reason)
+        expect(screen.getByText('本地备用 · 主模型恢复中')).toBeTruthy()
+        expect(screen.getByRole('status').textContent).toBe('待确认')
+        expect(screen.queryByRole('alert')).toBeNull()
+      }
+    }
+    fireEvent.click(screen.getByRole('button', { name: '自动操作' }))
+    expect(screen.getByRole('switch', { name: '预推理' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText(/不可用 · forecast pipe closed/).title).toContain('forecast pipe closed')
+    expect(fixture.calls.some(([cmd]) => /source|fallback|recovery|set_monitor_lean/.test(cmd))).toBe(false)
+    expect(fixture.inputs).toHaveLength(inputs)
+  })
+
+  it('waits for a reported forecast status even when its saved switch is on', () => {
+    fixture.snapshot = null
+    fixture.options = { pointer_lean: true }
+    render(<Monitor />)
+    expect(screen.getByRole('group', { name: '预推理状态' }).textContent).toBe('预推理 · 读取中')
+  })
 
 
   it('shows the selected source on every tab and never switches sources in the UI', () => {
