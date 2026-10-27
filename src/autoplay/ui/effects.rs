@@ -46,10 +46,6 @@ impl<I> Default for Effects<I> {
 }
 
 impl<I: Copy + PartialEq> Effects<I> {
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
     pub fn revoke(&mut self) {
         self.revision += 1;
         self.cancel();
@@ -258,7 +254,7 @@ mod tests {
         let mut effects = Effects::default();
         let old = effects.issue(Input::Press);
         effects.revoke();
-        assert_eq!(effects.revision(), 1);
+        assert_eq!(effects.revision, 1);
         let at = Instant::now();
         effects.schedule(at, Input::Observe);
         assert!(!effects.consume(old, true));
