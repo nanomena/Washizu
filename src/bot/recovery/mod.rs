@@ -417,15 +417,11 @@ fn inference_deadline(
     cfg: &AppConfig,
     now: Instant,
 ) -> (Instant, u32, u32) {
-    let click = &cfg.autoplay.input;
-    // Reserve a three-input plan, pointer travel, configured scheduling margin.
-    let reserve = cfg
-        .autoplay
-        .delay
-        .safety_margin_ms
-        .saturating_add(3 * click.hover_delay_ms.saturating_add(click.click_hold_ms))
-        .saturating_add(2 * click.inter_click_delay_ms)
-        .saturating_add(600);
+    let timing = crate::autoplay::input_timing::InputTiming::for_clock(
+        &cfg.autoplay.input,
+        window.and_then(InputWindow::fixed_ms),
+    );
+    let reserve = timing.inference_reserve_ms(cfg.autoplay.delay.safety_margin_ms);
     let remaining = match window {
         Some(InputWindow::Majsoul(b)) => Some({
             b.fixed_ms

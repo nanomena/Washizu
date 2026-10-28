@@ -302,6 +302,9 @@ impl Rig {
         cfg.autoplay.input.hover_delay_ms = 0;
         cfg.autoplay.input.click_hold_ms = 0;
         cfg.autoplay.input.inter_click_delay_ms = 0;
+        Self::with_config(primary, cfg)
+    }
+    fn with_config(primary: Box<dyn BotRunner>, cfg: AppConfig) -> Self {
         let config = Arc::new(RwLock::new(cfg));
         let clock = Arc::new(AutoplayContext::new());
         let monitor = MonitorHandle::default();
@@ -840,6 +843,61 @@ fn remaining_budget_deducts_elapsed_time_input_reserve_and_bounded_bank() {
     assert_eq!(remaining, 7_500);
     assert_eq!(reserve, 870);
     assert_eq!(deadline.duration_since(now), Duration::from_millis(6_630));
+}
+
+#[test]
+fn default_fast_input_budget_leaves_inference_time_without_spending_unknown_bank() {
+    use crate::autoplay::tenhou_state::{DecisionWindow, TurnClock};
+    let now = Instant::now();
+    let config = AppConfig::default();
+    let window = DecisionWindow {
+        ops: 0,
+        opened_at: now,
+        clock: Some(TurnClock::FAST),
+    };
+    let (deadline, reserve, remaining) =
+        inference_deadline(Some(InputWindow::Tenhou(window)), &config, now);
+    assert_eq!((reserve, remaining), (2_350, 3_000));
+    assert_eq!(deadline.duration_since(now), Duration::from_millis(650));
+    let later = now + Duration::from_millis(200);
+    let (deadline, reserve, remaining) =
+        inference_deadline(Some(InputWindow::Tenhou(window)), &config, later);
+    assert_eq!((reserve, remaining), (2_350, 2_800));
+    assert_eq!(deadline.duration_since(later), Duration::from_millis(450));
+}
+
+#[tokio::test]
+async fn fast_tenhou_with_production_defaults_can_select_the_primary() {
+    use crate::autoplay::tenhou_state::{DecisionWindow, TenhouState, TurnClock};
+    let mut rig = Rig::with_config(Box::new(Primary::new(None)), AppConfig::default());
+    let window = DecisionWindow {
+        ops: 0,
+        opened_at: Instant::now(),
+        clock: Some(TurnClock::FAST),
+    };
+    *rig.clock.tenhou_state.write().unwrap() = Some(TenhouState {
+        window: Some(window),
+        ..Default::default()
+    });
+    for event in opening() {
+        rig.captured(crate::event_bus::CapturedEvent {
+            event,
+            window: Some(InputWindow::Tenhou(window)),
+        });
+    }
+    let reply = rig.reply().await;
+    assert_eq!(
+        reply.control().unwrap().unwrap().source,
+        DecisionSource::Primary
+    );
+    assert_eq!(
+        reply.request.unwrap().window,
+        Some(InputWindow::Tenhou(window))
+    );
+    assert_eq!(
+        reply.meta.unwrap()["recovery_timing"]["input_reserve_ms"],
+        2_350
+    );
 }
 
 #[test]

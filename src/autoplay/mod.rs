@@ -19,6 +19,7 @@ pub mod context;
 pub mod delay;
 pub mod humanize;
 pub mod inject;
+pub(crate) mod input_timing;
 pub mod majsoul;
 pub mod manager;
 mod manual_pointer;

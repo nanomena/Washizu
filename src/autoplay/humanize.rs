@@ -135,11 +135,13 @@ impl Hazard {
 
 // ---- Times ----
 
+/// Minimum reliable nonzero hover for the browser clients' input sampling.
+pub const MIN_HOVER_MS: u32 = 100;
 /// Over the target before pressing it, about the configured hover.
 pub const HOVER: Scaled = Scaled {
     spread: 0.3,
     low: 0.6,
-    floor: 80.0,
+    floor: MIN_HOVER_MS as f64,
     high: 3.0,
 };
 /// The button held down, about the configured hold.

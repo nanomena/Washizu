@@ -87,12 +87,18 @@ impl AutoplayManager {
         if !cfg_guard.autoplay.enabled {
             return None;
         }
-        let cfg = cfg_guard.autoplay.input.clone();
+        let request = resp.request?;
+        let cfg = crate::autoplay::input_timing::InputTiming::for_clock(
+            &cfg_guard.autoplay.input,
+            request
+                .window
+                .and_then(crate::bot::control::InputWindow::fixed_ms),
+        )
+        .input;
         let delay_cfg = cfg_guard.autoplay.delay.clone();
         let platform = cfg_guard.platform.kind;
         drop(cfg_guard);
 
-        let request = resp.request?;
         if matches!(platform, Platform::Majsoul | Platform::Tenhou)
             && !selected_window_current(
                 resp,

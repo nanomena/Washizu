@@ -35,6 +35,14 @@ pub enum InputWindow {
 }
 
 impl InputWindow {
+    /// Known base-clock fact from this original window, never a newer slot.
+    pub fn fixed_ms(self) -> Option<u32> {
+        match self {
+            Self::Majsoul(b) => Some(b.fixed_ms),
+            Self::Tenhou(w) => w.clock.map(|clock| clock.fixed_ms),
+        }
+    }
+
     pub fn proof(self) -> WindowProof {
         match self {
             Self::Majsoul(b) => WindowProof::Majsoul {
