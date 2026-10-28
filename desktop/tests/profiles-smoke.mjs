@@ -46,7 +46,7 @@ class DevTools {
   call(method, params = {}, sessionId) {
     const id = ++this.next
     return new Promise((done, fail) => {
-      const timer = setTimeout(() => { this.pending.delete(id); fail(new Error(`DevTools timeout: ${method}`)) }, 15_000)
+      const timer = setTimeout(() => { this.pending.delete(id); fail(new Error(`DevTools timeout: ${method}${method === 'Runtime.evaluate' ? ' '+String(params.expression).slice(0, 240) : ''}`)) }, 15_000)
       this.pending.set(id, { done, fail, timer }); this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
     })
   }
@@ -72,7 +72,7 @@ const fake = path.join(work, 'core.sh')
 fs.writeFileSync(fake, `#!/bin/sh\nexec "${process.execPath}" "${path.join(HERE, 'stand-in-core.js')}" --mode monitor --live-game --delay-release --release-delay 1200 "$@"\n`, { mode: 0o755 })
 const port = await new Promise(done => { const probe = net.createServer().listen(0, '127.0.0.1', () => { const n = /** @type {net.AddressInfo} */ (probe.address()).port; probe.close(() => done(n)) }) })
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-const shell = spawn(electron, [path.join(HERE, 'profiles-app.js'), '--no-sandbox', `--remote-debugging-port=${port}`, `--data=${root}`, `--core=${fake}`, `--dock=${path.join(DESKTOP, '..', 'frontend', 'dist')}`], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+const shell = spawn(electron, [path.join(HERE, 'profiles-app.js'), '--no-sandbox', `--remote-debugging-port=${port}`, `--data=${root}`, `--core=${fake}`, `--dock=${path.join(DESKTOP, '..', 'frontend', 'dist')}`], { env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
 let diagnostic = '', next = 0
 assert.ok(shell.stdout && shell.stderr)
 shell.stdout.on('data', data => { diagnostic += data }); shell.stderr.on('data', data => { diagnostic += data })
@@ -217,11 +217,21 @@ try {
   await survivor.tools.close(); workers.delete(c.id)
   await until(() => Promise.resolve(fs.existsSync(marker(c.id))), Boolean, 'survivor cleans up after chooser IPC loss')
   console.log('ok unexpected chooser exit leaves its client/capture running; disconnected account button reports failure; client still closes and cleans up independently')
-} catch (error) { console.error(error); console.error(diagnostic.slice(-5000)); process.exitCode = 1 }
+} catch (error) {
+  console.error(error); console.error(diagnostic.slice(-5000)); process.exitCode = 1
+  for (const client of workers.values()) {
+    const logs = path.join(client.home, 'logs')
+    if (fs.existsSync(logs)) for (const file of fs.readdirSync(logs).filter(f => /^shell-.*\.log$/.test(f))) console.error(file, fs.readFileSync(path.join(logs, file), 'utf8').slice(-4000))
+  }
+}
 finally {
   for (const client of workers.values()) await client.tools.close().catch(() => {})
   if (browser) await browser.close().catch(() => {})
   shell.kill(); await sleep(1600)
+  // These temporary, account-free fixtures own a process group. A broken
+  // client must neither keep CI's pipes alive nor leave its fake core behind.
+  if (process.platform !== 'win32' && shell.pid) { try { process.kill(-shell.pid, 'SIGKILL') } catch (error) { if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ESRCH') throw error } }
+  shell.stdout.destroy(); shell.stderr.destroy()
   assert.equal(path.dirname(path.resolve(work)), path.resolve(os.tmpdir()))
   assert.ok(path.basename(work).startsWith('washizu-profiles-smoke-'))
   fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
