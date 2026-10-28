@@ -632,6 +632,29 @@ describe('the record', () => {
     expect(screen.getByText('暂无和了记录')).toBeTruthy()
     expect(screen.getByText('和了率').closest('.mfact')!.querySelector('dd')!.textContent).toBe('—')
   })
+
+  it('shows missing yaku coverage as missing data instead of zero wins', async () => {
+    fixture.history = [game(1, 80, 9, { round: 8, agari: 2 })]
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('已和了，但役种数据未记录')).toBeTruthy()
+    expect(screen.getByText('0/2 次和了')).toBeTruthy()
+    expect(screen.queryByText('0 次和了')).toBeNull()
+  })
+
+  it('names native Tenhou yaku and exposes incomplete detailed sample coverage', async () => {
+    fixture.options = { platform: 'Tenhou' }
+    const native = { ...game(1, null, 0, { round: 4, agari: 1 }, { 0: 1, 1: 1 }), platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0, dan: 8 } }
+    fixture.history = [native, { ...native, id: 'partial', stats_complete: false }]
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('规则pt · 2 场')).toBeTruthy()
+    expect(screen.getByText('4 局 · 1/2 场').title).toBe('详细统计仅使用 1/2 场完整记录')
+    expect(screen.getByText('2 次和了')).toBeTruthy()
+    const tsumo = screen.getByText('门前清自摸和').closest('li')!
+    expect(tsumo.textContent).toBe('门前清自摸和2100.0%')
+    expect(screen.getByText('立直').closest('li')!.textContent).toBe('立直2100.0%')
+  })
 })
 
 describe('the settings', () => {

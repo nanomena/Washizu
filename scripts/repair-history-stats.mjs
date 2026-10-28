@@ -87,7 +87,10 @@ export async function nativeScores(home, records) {
       if (!key) continue;
       const flow = flows.get(key) ?? {}; flows.set(key, flow);
       const method = row.parsed.method, payload = row.parsed.args?.payload;
-      if (method === '.lq.FastTest.authGame' && row.direction === 'up' && typeof payload?.game_uuid === 'string') flow.game = payload.game_uuid;
+      if (method === '.lq.FastTest.authGame' && row.direction === 'up' && typeof payload?.game_uuid === 'string') {
+        if (flow.game !== payload.game_uuid) flow.round=undefined;
+        flow.game = payload.game_uuid;
+      }
       if (row.direction !== 'down') continue;
       if (method === '.lq.FastTest.syncGame') {
         const actions=payload?.game_restore?.actions;
@@ -101,7 +104,7 @@ export async function nativeScores(home, records) {
         if (Number.isInteger(d?.chang) && Number.isInteger(d?.ju) && Number.isInteger(d?.ben)) flow.round = `${['E','S','W','N'][d.chang]}:${d.ju + 1}:${d.ben}`;
       }
       if (method === '.lq.ActionPrototype' && payload?.name === 'ActionHule') for (const hule of payload.data?.hules ?? []) put(flow.game, flow.round, hule.seat, majsoulScore(hule));
-      if (method === 'TAIKYOKU') flow.game = row.parsed.args?.log;
+      if (method === 'TAIKYOKU') { if(flow.game !== row.parsed.args?.log) flow.round=undefined; flow.game = row.parsed.args?.log; }
       if (method === 'INIT' || method === 'REINIT') {
         const seed = csv(row.parsed.args?.seed);
         if (seed?.length >= 2) flow.round = `${['E','S','W','N'][Math.floor(seed[0] / 4)]}:${seed[0] % 4 + 1}:${seed[1]}`;
