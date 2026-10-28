@@ -9,6 +9,7 @@ const fixture=()=>{
   /** @type {Array<Record<string,unknown>>} */ const reports=[]
   /** @type {unknown[]} */ const errors=[]
   const observer=new PhysicalPointerObserver(async p=>{reports.push(p);return false},e=>errors.push(e))
+  observer.observe(sample({point:{x:10,y:20},area:null,now:900}))
   return{observer,reports,errors}
 }
 
@@ -21,6 +22,12 @@ test('movement outside the focused game produces no ownership claim',async()=>{
   const f=fixture();f.observer.observe(sample({area:null}));await flush()
   f.observer.observe(sample({point:{x:10,y:20}}));await flush()
   assert.deepEqual(f.reports,[])
+})
+test('an initial stationary sample does not invent user movement when a window opens',async()=>{
+  /** @type {Array<Record<string,unknown>>} */ const reports=[]
+  const observer=new PhysicalPointerObserver(async p=>{reports.push(p)},e=>assert.fail(String(e)))
+  observer.observe(sample());await flush()
+  assert.deepEqual(reports,[{window:'1234',active:false,x:200,y:200}])
 })
 test('candidate ownership is resampled for overlays and never treated as an input permit',async()=>{
   const f=fixture();f.observer.observe(sample());await flush()
@@ -46,6 +53,7 @@ test('only one ownership report can be pending, including a slow core response',
   /** @type {(value:unknown)=>void} */ let resolve=()=>assert.fail('No request pending')
   /** @type {Array<Record<string,unknown>>} */ const reports=[]
   const observer=new PhysicalPointerObserver(p=>{reports.push(p);return new Promise(r=>{resolve=r})},e=>assert.fail(String(e)))
+  observer.observe(sample({point:{x:10,y:20},area:null,now:900}))
   observer.observe(sample());observer.observe(sample({now:1050}));observer.observe(sample({area:null,now:1100}))
   assert.equal(reports.length,1);resolve(false);await flush()
   observer.observe(sample({area:null,now:1150}));assert.equal(reports.length,2)

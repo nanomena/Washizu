@@ -17,7 +17,7 @@ export class PhysicalPointerObserver {
     this.failed = failed
     this.stillMs = stillMs
     /** @type {{x:number,y:number} | null} */ this.point = null
-    this.movedAt = 0
+    this.movedAt = Number.NEGATIVE_INFINITY
     this.active = false
     this.overGame = false
     this.pending = false
@@ -30,7 +30,9 @@ export class PhysicalPointerObserver {
     if (window !== this.window) {
       this.window = window; this.point = null; this.active = false; this.overGame = false
     }
-    if (!this.point || point.x !== this.point.x || point.y !== this.point.y) {
+    if (!this.point) {
+      this.point = point; this.movedAt = Number.NEGATIVE_INFINITY
+    } else if (point.x !== this.point.x || point.y !== this.point.y) {
       this.point = point; this.movedAt = now
     }
     const active = handOnGame(point, area, this.movedAt, now, this.stillMs)
