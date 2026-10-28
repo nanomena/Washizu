@@ -10,7 +10,7 @@ pub mod inspector;
 pub mod mjai;
 pub mod status;
 
-pub use account::{AccountLevels, Level};
+pub use account::{AccountLevels, AccountPlatform, Level};
 pub use history::{
     GameRecord, GameStats, HistoryEvent, HistoryEventLog, HistoryFilter, KyokuMode, MatchInfo,
     Platform,

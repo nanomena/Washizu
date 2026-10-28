@@ -24,7 +24,7 @@ use super::{Bridge, Direction, ParseResult};
 use crate::{
     autoplay::tenhou_state::{SharedTenhouState, TenhouState},
     config::Platform,
-    event_bus::NotifyBus,
+    event_bus::{AccountBus, NotifyBus},
     logger::{FlowLogger, Session},
     schema::{mjai::Actor, GameMeta, MatchInfo, MjaiEvent, Notification},
 };
@@ -57,6 +57,7 @@ pub struct TenhouBridge {
     /// Frontend toast channel, for states the user has to know about but no
     /// mjai event can carry (a mid-hand reconnect). `None` in tests.
     notify: Option<NotifyBus>,
+    account_bus: Option<AccountBus>,
 }
 
 impl TenhouBridge {
@@ -70,6 +71,7 @@ impl TenhouBridge {
             shared: None,
             input_watch: None,
             notify: None,
+            account_bus: None,
         }
     }
 
@@ -77,6 +79,26 @@ impl TenhouBridge {
     pub fn with_notify(mut self, notify: Option<NotifyBus>) -> Self {
         self.notify = notify;
         self
+    }
+
+    /// Observe account reports without adding game events or making requests.
+    pub fn with_account_bus(mut self, bus: Option<AccountBus>) -> Self {
+        self.account_bus = bus;
+        self
+    }
+
+    fn publish_account(&self, msg: &JsonValue) {
+        let Some(bus) = &self.account_bus else { return };
+        let level = account_level(msg.get("PF4"));
+        let level3 = account_level(msg.get("PF3"));
+        if level.is_some() || level3.is_some() {
+            let _ = bus.send(crate::schema::AccountLevels {
+                platform: crate::schema::AccountPlatform::Tenhou,
+                level,
+                level3,
+                at: chrono::Utc::now(),
+            });
+        }
     }
 
     fn notify(&self, n: Notification) {
@@ -174,7 +196,11 @@ impl TenhouBridge {
         // sent between `<UN/>` and `<REINIT/>`; everything it says, REINIT
         // repeats.
         match tag {
-            "HELO" | "REJOIN" | "SAIKAI" | "BYE" | "SHUFFLE" => return Vec::new(),
+            "HELO" => {
+                self.publish_account(msg);
+                return Vec::new();
+            }
+            "REJOIN" | "SAIKAI" | "BYE" | "SHUFFLE" => return Vec::new(),
             _ => {}
         }
 
@@ -1194,6 +1220,15 @@ fn dahai_actor(tag: &str) -> Option<(u8, bool)> {
 }
 
 /// Parse `tag[skip..]` as a `u32`. Returns `None` if there is no digit suffix.
+/// The first two native PF columns are rank and current pt. Never infer them
+/// from a roster, a placement, PROF's deltas, or the recorded game's points.
+fn account_level(value: Option<&JsonValue>) -> Option<crate::schema::Level> {
+    let mut fields = value?.as_str()?.split(',');
+    let id: u32 = fields.next()?.trim().parse().ok()?;
+    let score = fields.next()?.trim().parse().ok()?;
+    (id <= 20).then_some(crate::schema::Level { id, score })
+}
+
 fn parse_tail_u32(tag: &str, skip: usize) -> Option<u32> {
     if tag.len() <= skip {
         return None;
@@ -1246,6 +1281,71 @@ mod tests {
 
     fn parse_one(b: &mut TenhouBridge, json: &str) -> Vec<MjaiEvent> {
         b.parse(Direction::Down, json.as_bytes()).events
+    }
+
+    #[test]
+    fn official_login_and_post_game_reports_publish_native_account_balances() {
+        let bus = crate::event_bus::account_bus();
+        let mut heard = bus.subscribe();
+        let mut bridge = crate::bridge::for_platform(
+            crate::config::Platform::Tenhou,
+            None,
+            None,
+            crate::bridge::BridgeHooks {
+                account: Some(bus),
+                ..Default::default()
+            },
+        );
+        // Real PF4 head captured from utakata; PF3 is a separate ladder.
+        assert!(bridge.parse(Direction::Down, br#"{"tag":"HELO","uname":"utakata","PF4":"6,70,1749.80,392.9,9,8,5,1,0,133,43,10,65,23","PF3":"11,420,1600"}"#).events.is_empty());
+        let first = heard.try_recv().expect("server account report");
+        assert_eq!(first.platform, crate::schema::AccountPlatform::Tenhou);
+        assert_eq!(first.level, Some(crate::schema::Level { id: 6, score: 70 }));
+        assert_eq!(
+            first.level3,
+            Some(crate::schema::Level { id: 11, score: 420 })
+        );
+        assert_eq!(serde_json::to_value(&first).unwrap()["platform"], "tenhou");
+        // Promotion resets the balance: use the next server report verbatim.
+        bridge.parse(
+            Direction::Down,
+            br#"{"tag":"HELO","uname":"utakata","PF4":"7,0,1760"}"#,
+        );
+        let next = heard.try_recv().unwrap();
+        assert_eq!(next.level, Some(crate::schema::Level { id: 7, score: 0 }));
+        assert_eq!(next.level3, None, "unreported ladder remains unknown");
+    }
+
+    #[test]
+    fn invalid_or_non_account_frames_cannot_invent_a_rank_balance() {
+        let bus = crate::event_bus::account_bus();
+        let mut heard = bus.subscribe();
+        let mut bridge = TenhouBridge::new(None, None).with_account_bus(Some(bus));
+        for row in ["", "6", "x,70", "6,x", "21,0", "-1,0", "6,2147483648"] {
+            let frame = serde_json::json!({"tag":"HELO", "PF4":row}).to_string();
+            assert!(parse_one(&mut bridge, &frame).is_empty());
+            assert!(heard.try_recv().is_err());
+        }
+        for frame in [
+            r#"{"tag":"UN","n0":"us","n1":"other","dan":"6,20,20,20"}"#,
+            r#"{"tag":"PROF","lobby":"0","type":"1","add":"49.3,1,0,0,0,0,7,3,2,3,2"}"#,
+            r#"{"tag":"HELO","PF4":6}"#,
+        ] {
+            parse_one(&mut bridge, frame);
+            assert!(heard.try_recv().is_err());
+        }
+        bridge.parse(Direction::Up, br#"{"tag":"HELO","PF4":"6,70"}"#);
+        assert!(
+            heard.try_recv().is_err(),
+            "outgoing data is not a server account report"
+        );
+        parse_one(
+            &mut bridge,
+            r#"{"tag":"HELO","PF4":"bad","PF3":"0,0,1500"}"#,
+        );
+        let three = heard.try_recv().unwrap();
+        assert!(three.level.is_none());
+        assert_eq!(three.level3, Some(crate::schema::Level { id: 0, score: 0 }));
     }
 
     #[test]

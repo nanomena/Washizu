@@ -562,8 +562,24 @@ describe('the record', () => {
     expect(document.querySelector('.mstat-sum')!.textContent).toContain('3 场')
   })
 
+  it('shows the native Tenhou balance separately from cumulative rule pt and follows promotion resets', async () => {
+    fixture.options = { platform: 'Tenhou' }
+    fixture.history = [{ ...game(1, null, 0, { round: 4 }), platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0, dan: 6 } }]
+    fixture.snapshot!.account = { platform: 'tenhou', level: { id: 6, score: 70 }, level3: { id: 11, score: 420 }, at: '2026-10-28T01:56:51Z' }
+    const { rerender } = render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('规则pt · 1 场')).toBeTruthy()
+    expect(document.querySelector('.mstat-ladder')!.textContent).toBe('四级70 / 80 pt')
+    expect(document.querySelector('.mstat-ladder i')!.getAttribute('style')).toContain('0.875')
+    expect(screen.getByTitle('所选记录的累计规则pt变化').textContent).toBe('+20')
+    fixture.snapshot = { ...fixture.snapshot!, revision: 2, account: { platform: 'tenhou', level: { id: 7, score: 0 }, level3: null, at: '2026-10-28T02:10:00Z' } }
+    rerender(<Monitor />)
+    await waitFor(() => expect(document.querySelector('.mstat-ladder')!.textContent).toBe('三级0 / 100 pt'))
+    expect(screen.getByTitle('所选记录的累计规则pt变化').textContent).toBe('+20')
+  })
+
   it('names the rank the platform last said, with its points toward the next star', async () => {
-    fixture.snapshot!.account = { level: { id: 10303, score: 1274 }, level3: { id: 20101, score: 0 }, at: '2026-10-17T22:28:35Z' }
+    fixture.snapshot!.account = { platform: 'majsoul', level: { id: 10303, score: 1274 }, level3: { id: 20101, score: 0 }, at: '2026-10-17T22:28:35Z' }
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '统计' }))
     expect(await screen.findByText('2 场的段位分变化')).toBeTruthy()
@@ -577,7 +593,7 @@ describe('the record', () => {
   })
 
   it('changes where we stand, the points and the placings together, when the platform says where we stand', async () => {
-    fixture.snapshot!.account = { level: { id: 10303, score: 1274 }, level3: null, at: '2026-10-18T21:00:00Z' }
+    fixture.snapshot!.account = { platform: 'majsoul', level: { id: 10303, score: 1274 }, level3: null, at: '2026-10-18T21:00:00Z' }
     const { rerender } = render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '统计' }))
     expect(await screen.findByText('2 场的段位分变化')).toBeTruthy()
@@ -592,7 +608,7 @@ describe('the record', () => {
     expect(place(1)).toBe('1')
     expect(screen.getByText('雀杰三').closest('.mstat-ladder')!.textContent).toContain('1,274')
     // Some twenty seconds later it says where we stand: all of it changes at once.
-    fixture.snapshot = { ...fixture.snapshot!, revision: 3, account: { level: { id: 10303, score: 1379 }, level3: null, at: '2026-10-18T21:00:20Z' } }
+    fixture.snapshot = { ...fixture.snapshot!, revision: 3, account: { platform: 'majsoul', level: { id: 10303, score: 1379 }, level3: null, at: '2026-10-18T21:00:20Z' } }
     rerender(<Monitor />)
     expect(await screen.findByText('3 场的段位分变化')).toBeTruthy()
     expect(place(1)).toBe('2')
@@ -805,7 +821,7 @@ describe('another language', () => {
       { round: 1, bakaze: 'E', kyoku: 1, honba: 0, result: draw, events: 12 },
       { round: 2, bakaze: 'E', kyoku: 1, honba: 1, result: null, events: 2 },
     ]
-    fixture.snapshot.account = { level: { id: 10303, score: 1274 }, level3: null, at: '2026-10-17T22:28:35Z' }
+    fixture.snapshot.account = { platform: 'majsoul', level: { id: 10303, score: 1274 }, level3: null, at: '2026-10-17T22:28:35Z' }
     fixture.snapshot.events = [
       { seq: 90, ts_ms: 0, event: { type: 'reach', actor: 2 } },
       { seq: 91, ts_ms: 0, event: { type: 'dahai', actor: 2, pai: '5pr', tsumogiri: false } },

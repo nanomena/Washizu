@@ -1035,6 +1035,7 @@ mod tests {
         let m = MonitorHandle::default();
         assert!(m.snapshot().account.is_none());
         let first = AccountLevels {
+            platform: crate::schema::AccountPlatform::Majsoul,
             level: Some(crate::schema::Level {
                 id: 10203,
                 score: 761,
@@ -1046,6 +1047,7 @@ mod tests {
         hand(&m);
         assert_eq!(m.snapshot().account, Some(first));
         let next = AccountLevels {
+            platform: crate::schema::AccountPlatform::Majsoul,
             level: Some(crate::schema::Level {
                 id: 10203,
                 score: 800,
