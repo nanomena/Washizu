@@ -111,8 +111,8 @@ pub struct BridgeHooks {
     /// that no mjai event can carry (Tenhou: a mid-hand rejoin pauses
     /// analysis until the next hand). Wired by both capture backends.
     pub notify: Option<crate::event_bus::NotifyBus>,
-    /// Majsoul: where the player's own ranks go when the server says them
-    /// (login, a game's start, the account asked for again after a game).
+    /// The player's native account ranks, observed from the platform server
+    /// at login and after games. Separate from computed history pt changes.
     /// Wired by the capture backend.
     pub account: Option<crate::event_bus::AccountBus>,
     /// Majsoul: folder an opened replay is exported to as a tenhou.net/6 log
@@ -145,7 +145,8 @@ pub fn for_platform(
             TenhouBridge::new(flow_log, session)
                 .with_shared_state(hooks.tenhou_state)
                 .with_input_watch(hooks.input_watch)
-                .with_notify(hooks.notify),
+                .with_notify(hooks.notify)
+                .with_account_bus(hooks.account),
         ),
         crate::config::Platform::RiichiCity => {
             Box::new(RiichiCityBridge::new(flow_log, session).with_inject(hooks.riichi_inject))

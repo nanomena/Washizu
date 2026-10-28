@@ -28,12 +28,12 @@ const points = (n: number) => new Intl.NumberFormat('en-US').format(n)
  *  points change; the bar's place is kept where there is no next star. */
 function Ladder({ account, players }: { account: AccountLevels | null; players: number }) {
   const level = (players === 3 ? account?.level3 : account?.level) ?? null
-  const rung = level ? rungOf(level) : null
+  const rung = level && account ? rungOf(level, account.platform) : null
   const when = account ? new Date(account.at).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }) : ''
   const ceiling = rung?.ceiling ?? null
   return <span className="mstat-ladder" title={rung ? tr('客户端在 {0} 报告的段位，每场结束后更新', when) : tr('尚未收到客户端段位数据')}>
     <strong>{rung?.name ?? '—'}</strong>
-    <span>{rung ? (ceiling != null ? `${points(rung.score)} / ${points(ceiling)}` : points(rung.score)) : ''}</span>
+    <span>{rung ? `${ceiling != null ? `${points(rung.score)} / ${points(ceiling)}` : points(rung.score)}${account?.platform === 'tenhou' ? ' pt' : ''}` : ''}</span>
     <i data-empty={ceiling == null || undefined} style={{ '--share': rung && ceiling ? Math.max(0, Math.min(1, rung.score / ceiling)) : 0 } as CSSProperties} />
   </span>
 }

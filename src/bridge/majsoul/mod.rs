@@ -1694,6 +1694,7 @@ fn account_levels(account: &JsonValue) -> Option<AccountLevels> {
     let level = level_of(account.get("level"));
     let level3 = level_of(account.get("level3"));
     (level.is_some() || level3.is_some()).then(|| AccountLevels {
+        platform: crate::schema::AccountPlatform::Majsoul,
         level,
         level3,
         at: Utc::now(),
