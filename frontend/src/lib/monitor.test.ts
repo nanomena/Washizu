@@ -14,7 +14,7 @@ function decision(response: MjaiEvent & { meta?: unknown }, items: ShowItem[], t
     state: 'awaiting', response: { ...response, meta: { show: { items } } } as MonitorDecision['response'], error: null, confirmed_seq: null }
 }
 function snapshot(d: MonitorDecision, patch: Partial<MonitorSnapshot> = {}): MonitorSnapshot {
-  return { control: null, forecast: { owner: 0, state: 'disabled' }, revision: 1, context: d.context, names: [], red_fives: true, game: { our_seat: 0, num_players: 4 } as GameStateSnapshot, view: null,
+  return { control: null, forecast: { owner: 0, state: 'disabled' }, revision: 1, history_revision: 0, context: d.context, names: [], red_fives: true, game: { our_seat: 0, num_players: 4 } as GameStateSnapshot, view: null,
     round_ended: false, game_ended: false, capture: { state: 'running', descriptor: 'test' },
     bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null, sync_fault: null,
     brand: 'Demo', facts: [], autoplay_enabled: true, decision: d, previous_decision: null,

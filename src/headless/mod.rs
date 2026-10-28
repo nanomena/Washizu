@@ -231,9 +231,11 @@ async fn serve(
         Some(post_tracker_bus.clone()),
         Some(state.monitor.clone()),
     ));
+    let history_bus = event_bus::history_bus();
+    mirror_history(history_bus.subscribe(), state.monitor.clone());
     tokio::spawn(history::recorder::drive_loop(
         history_store,
-        event_bus::history_bus(),
+        history_bus,
         history_platform,
         mjai_bus.subscribe(),
     ));
@@ -543,6 +545,25 @@ fn mirror_statuses(state: &AppState) {
     });
 }
 
+/// A record notification is sent only after append succeeds. A lagged reader
+/// likewise invalidates its cached list and reads the complete persisted history.
+fn mirror_history(
+    mut records: broadcast::Receiver<schema::HistoryEvent>,
+    monitor: monitor::MonitorHandle,
+) {
+    tokio::spawn(async move {
+        loop {
+            match records.recv().await {
+                Ok(schema::HistoryEvent::Recorded { .. })
+                | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    monitor.history_changed();
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
 /// Subscribe before the bot manager starts. Seed synchronously, then copy only
 /// the producer's latest value; never hold a watch borrow across an await.
 fn mirror_forecast(
@@ -722,6 +743,67 @@ mod tests {
         assert!(error.starts_with("invalid params:"), "{error}");
         let game: Game = parse(json!({ "port": 9222, "target": "T" })).unwrap();
         assert_eq!((game.port, game.target.as_str()), (9222, "T"));
+    }
+
+    #[tokio::test]
+    async fn committed_history_reaches_the_monitor_without_an_account_or_game_update() {
+        let root = tempfile::tempdir().unwrap();
+        let store = history::HistoryStore::new(root.path().to_path_buf()).unwrap();
+        let monitor = monitor::MonitorHandle::default();
+        let account: schema::AccountLevels = serde_json::from_value(json!({
+            "platform": "majsoul", "level": { "id": 10501, "score": 1838 },
+            "level3": null, "at": "2026-10-28T22:11:40Z"
+        }))
+        .unwrap();
+        monitor.set_account(account.clone());
+        let context = monitor.snapshot().context;
+        let (history, records) = broadcast::channel(8);
+        mirror_history(records, monitor.clone());
+        let (out, mut lines) = mpsc::unbounded_channel();
+        tokio::spawn(forward_monitor(monitor.subscribe(), out));
+        let now = chrono::Utc::now();
+        let record = schema::GameRecord {
+            id: "committed".into(),
+            started_at: now,
+            ended_at: now,
+            platform: schema::Platform::Majsoul,
+            num_players: 4,
+            kyoku_mode: schema::KyokuMode::EastOnly,
+            names: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            our_seat: Some(0),
+            final_scores: vec![30000, 25000, 25000, 20000],
+            final_ranks: vec![1, 2, 3, 4],
+            our_rank: Some(1),
+            our_delta: Some(5000),
+            stats: Default::default(),
+            match_info: None,
+            our_rank_points: Some(120),
+            our_level: None,
+            yaku: Default::default(),
+            yaku_wins: Some(0),
+            stats_complete: true,
+            stats_version: 1,
+            log_path: "games/committed.mjai.jsonl".into(),
+        };
+        store.append(&record, &vec![]).unwrap();
+        history
+            .send(schema::HistoryEvent::Recorded {
+                record: Box::new(record),
+            })
+            .unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(1), lines.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let message: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(message["event"], "monitor-updated");
+        assert_eq!(message["payload"]["history_revision"], 1);
+        assert_eq!(
+            message["payload"]["account"],
+            serde_json::to_value(account).unwrap()
+        );
+        assert_eq!(monitor.snapshot().context, context);
+        assert_eq!(store.read_all().unwrap().len(), 1);
     }
 
     #[test]

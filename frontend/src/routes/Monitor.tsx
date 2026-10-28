@@ -143,7 +143,7 @@ function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onCon
       {tab === 'hand' && (s?.game ? <SeatColumns snapshot={s} /> : <p className="mslot-empty md-wide">{tr('对局开始后，这里显示公开的牌河、副露和点数')}</p>)}
       {tab === 'game' && (s ? <GamePages key={s.context.game} snapshot={s} /> : <p className="mslot-empty md-wide">{tr('正在连接监视数据')}</p>)}
       {/* The record changes when the platform says where we stand after a game, or else when a game starts or ends. */}
-      {tab === 'stats' && <Statistics game={`${s?.context.game ?? 0}:${s?.game_ended ?? true}`} account={s?.account ?? null} platform={options.platform} />}
+      {tab === 'stats' && <Statistics historyRevision={s?.history_revision ?? 0} account={s?.account ?? null} platform={options.platform} />}
       {tab === 'settings' && <Settings group={group} onGroup={openGroup} snapshot={s} options={options} health={m.health} now={m.now} onLevel={onLevel} onTrail={onTrail} onLean={onLean}
         onConfirm={onConfirm} onAutoWin={onAutoWin}
         onObsOutput={onObsOutput} onProfiles={onProfiles} />}

@@ -22,7 +22,7 @@ time — lexicographically sortable by start time, doubles as the filename stem.
                     └──────────────┘
                             │
                             ▼
-                       HistoryBus  (nothing listens yet: the records are the product)
+                       HistoryBus -> monitor.history_revision -> statistics refresh
 ```
 
 A `RecorderState` machine buffers events between `StartGame` and a confirmed
@@ -31,6 +31,14 @@ rounds and replaces the server-restored copy of the current round. A different
 next game, explicit server termination, or shutdown drops the incomplete
 buffer. A confirmed final standing can survive an earlier capture gap, so a
 finished game is not automatically a complete detailed-statistics sample.
+
+The headless service subscribes before the recorder starts. A successful append
+publishes a HistoryBus record and advances `monitor.history_revision`; a lagged
+consumer likewise invalidates its cached list. The existing monitor stream
+delivers that revision to both clients' statistics tab. It reads committed
+history immediately, independently of tracker EndGame timing or native account
+reports. Rank/balance display continues to use only the platform's own report.
+There is no timer-based refresh or guessed post-game balance.
 
 ## Modules
 

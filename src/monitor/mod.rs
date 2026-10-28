@@ -130,6 +130,9 @@ pub struct MonitorSnapshot {
     /// Optional pointer prediction; never a decision source or primary health.
     pub forecast: crate::bot::forecast::ForecastStatus,
     pub revision: u64,
+    /// Invalidates persisted-history readers after a completed record is written.
+    /// Independent of account reports and of the tracker's EndGame processing.
+    pub history_revision: u64,
     pub context: DecisionContext,
     pub names: Vec<String>,
     pub red_fives: Option<bool>,
@@ -175,6 +178,7 @@ impl Default for MonitorSnapshot {
             control: None,
             forecast: crate::bot::forecast::status(),
             revision: 0,
+            history_revision: 0,
             context: DecisionContext {
                 game: 0,
                 round: 0,
@@ -669,6 +673,10 @@ impl MonitorHandle {
     /// The player's own ranks, as the platform has just said them.
     pub fn set_account(&self, levels: AccountLevels) {
         self.update(|i| i.snapshot.account = Some(levels));
+    }
+
+    pub fn history_changed(&self) {
+        self.update(|i| i.snapshot.history_revision += 1);
     }
 
     pub fn notification(&self, notice: &Notification) {
