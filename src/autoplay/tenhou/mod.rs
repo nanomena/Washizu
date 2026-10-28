@@ -65,7 +65,7 @@ impl TenhouAutoplay {
             clock: None,
             continuation: None,
         };
-        if !input.ready || !same_hand(input, state) {
+        if !same_hand(input, state) {
             return observation;
         }
         let (Some(protocol_window), Some(native_window)) = (state.window, input.window.as_ref())

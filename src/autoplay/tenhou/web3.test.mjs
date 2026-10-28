@@ -74,6 +74,26 @@ test('playing API is read-only, exact physical red/plain geometry uses native sc
   assert.equal(api.probeTarget({ ...red.request, targetIdentity: red.probe.target.identity, point: middle(red.probe.target.bounds) }).status, 'ready');
   assert.deepEqual(state.effects, []); assert.deepEqual({ epoch: state.epoch, hand: state.hand }, before);
 });
+test('real timing survives a temporarily unclickable target without granting input', () => {
+  const f=fixture(); f.state.target={};
+  const s=f.api.readInput();
+  assert.equal(s.ready,false); assert.ok(s.window); assert.equal(s.clock.fixedMs,5000);
+  assert.equal(s.clock.grantedBankMs,7000);
+  assert.notEqual(f.probeDiscard().probe.status,'ready');
+  assert.deepEqual(f.state.effects,[]);
+});
+test('zero fixed time is a valid measured clock and the bank is not reset by observation', () => {
+  const f=fixture();
+  f.state.clockFacts={startedAt:100,now:3100,fixedMs:0,bankMs:10000,remainingMs:7000};
+  const s=f.api.readInput();
+  assert.equal(s.clock.fixedMs,0);assert.equal(s.clock.grantedBankMs,10000);
+  assert.equal(s.clock.elapsedMs,3000);assert.equal(s.clock.remainingBankMs,7000);
+  f.state.clockFacts.now=4100;f.state.clockFacts.remainingMs=6000;
+  const next=f.api.readInput();
+  assert.equal(next.window,s.window);assert.equal(next.clock.elapsedMs,4000);
+  assert.equal(next.clock.remainingBankMs,6000);
+  f.state.ready=false; assert.equal(f.api.readInput().clock,null);
+});
 test('tsumogiri and a riichi-locked discard cannot be changed to another physical copy', () => {
   const f = fixture();
   assert.equal(f.probeDiscard(48, true).probe.status, 'ready');

@@ -28,7 +28,7 @@
 //! | `set_monitor_confirm`  | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_auto_win` | `{enabled}`              | `MonitorConfig`   |
 //! | `set_monitor_continue` | `{enabled}`              | `MonitorConfig`   |
-//! | `set_user_pointer`     | `{active, x?, y?}`       | `null`            |
+//! | `set_user_pointer`     | `{window, active, x?, y?}` | `bool`            |
 //! | `set_monitor_autoplay` | `{enabled}`              | `null`            |
 //! | `open_game`            | `{port, target}`         | `null`            |
 //!
@@ -109,6 +109,7 @@ static TRAIL: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize)]
 struct UserPointer {
+    window: String,
     active: bool,
     /// Where the user's mouse rests on the game view, in the game page's CSS
     /// pixels, when it comes to rest there.
@@ -352,14 +353,23 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
         // while the user's own mouse moves over the game, and goes on from
         // where it came to rest.
         "set_user_pointer" => {
-            let UserPointer { active, x, y } = parse(params)?;
-            if let (false, Some(x), Some(y)) = (active, x, y) {
-                if x.is_finite() && y.is_finite() {
-                    autoplay::cdp_input::user_left_pointer_at((x, y));
-                }
+            let UserPointer {
+                window,
+                active,
+                x,
+                y,
+            } = parse(params)?;
+            if x.is_some() != y.is_some() {
+                return Err("Pointer position requires both coordinates".into());
             }
-            autoplay::cdp_input::set_user_active(active);
-            Ok(Value::Null)
+            let at = x.zip(y);
+            if at.is_some_and(|(x, y)| !x.is_finite() || !y.is_finite()) {
+                return Err("Invalid pointer position".into());
+            }
+            reply(
+                autoplay::cdp_input::set_user_pointer(&window, active, at)
+                    .map_err(|error| error.to_string())?,
+            )
         }
         "set_monitor_lean" => {
             let Enabled { enabled } = parse(params)?;
@@ -695,10 +705,11 @@ mod tests {
 
     #[test]
     fn the_users_mouse_may_say_where_it_came_to_rest() {
-        let busy: UserPointer = parse(json!({ "active": true })).unwrap();
+        assert!(parse::<UserPointer>(json!({ "active": true })).is_err());
+        let busy: UserPointer = parse(json!({ "window": "1234", "active": true })).unwrap();
         assert!(busy.active && busy.x.is_none() && busy.y.is_none());
         let rested: UserPointer =
-            parse(json!({ "active": false, "x": 600.5, "y": 350.0 })).unwrap();
+            parse(json!({ "window": "1234", "active": false, "x": 600.5, "y": 350.0 })).unwrap();
         assert_eq!(
             (rested.active, rested.x, rested.y),
             (false, Some(600.5), Some(350.0))

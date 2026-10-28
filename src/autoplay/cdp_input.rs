@@ -11,70 +11,49 @@ use chromiumoxide::cdp::browser_protocol::input::{
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::Page;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-/// Whether the user's own mouse is moving over the game, as the shell sees
-/// the system cursor (which input sent over CDP never moves). The page takes
-/// both kinds of input, and a press of ours made while the user's mouse moves
-/// can be read by the client as part of the user's drag, and come to nothing.
-static USER_HAND: AtomicBool = AtomicBool::new(false);
-static USER_REVISION: AtomicU64 = AtomicU64::new(0);
+/// One owner for physical user input; CDP motion never moves the system cursor.
+static USER_POINTER: std::sync::Mutex<super::manual_pointer::ManualPointer> =
+    std::sync::Mutex::new(super::manual_pointer::ManualPointer::new());
 
 pub fn user_revision() -> u64 {
-    USER_REVISION.load(Ordering::SeqCst)
+    USER_POINTER.lock().map(|p| p.revision).unwrap_or(u64::MAX)
 }
 
-/// Until when a hand that has come to rest still counts as on the mouse:
-/// autoplay has the pointer back a while after the user stops, a while of its
-/// own each time (`humanize::HAND_BACK`).
-static RESTING_UNTIL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-/// The shell's word on the user's mouse: moving over the game, or come to rest.
-pub fn set_user_active(active: bool) {
-    if active && !USER_HAND.load(Ordering::Relaxed) {
-        USER_REVISION.fetch_add(1, Ordering::SeqCst);
-    }
-    let until = (!active).then(|| {
-        let wait = crate::autoplay::humanize::HAND_BACK.draw_ms(&mut rand::rng());
-        std::time::Instant::now() + Duration::from_millis(u64::from(wait))
-    });
-    if let Ok(mut resting) = RESTING_UNTIL.lock() {
-        *resting = until;
-    }
-    USER_HAND.store(active, Ordering::Relaxed);
+/// The shell supplies a focused-game candidate. Windows independently checks
+/// the actual foreground and window beneath the physical pointer before it
+/// can suspend shared input. Leaving the game releases ownership immediately.
+pub fn set_user_pointer(window: &str, active: bool, at: Option<(f64, f64)>) -> Result<bool> {
+    let owned = super::manual_pointer::owns_physical_pointer(window)?;
+    let now = std::time::Instant::now();
+    let wait = super::humanize::HAND_BACK.draw_ms(&mut rand::rng());
+    let mut pointer = USER_POINTER
+        .lock()
+        .map_err(|_| anyhow!("physical pointer owner poisoned"))?;
+    pointer.report(
+        active,
+        at,
+        owned,
+        now,
+        Duration::from_millis(u64::from(wait)),
+    );
+    Ok(pointer.active(now))
 }
 
-/// Whether the user's hand is on the mouse over the game: moving, or not yet
-/// rested long enough for autoplay to have the pointer back.
 pub fn user_active() -> bool {
-    USER_HAND.load(Ordering::Relaxed)
-        || RESTING_UNTIL
-            .lock()
-            .ok()
-            .and_then(|until| *until)
-            .is_some_and(|until| std::time::Instant::now() < until)
+    // A poisoned owner cannot safely grant an automatic mouse press.
+    USER_POINTER
+        .lock()
+        .map(|p| p.active(std::time::Instant::now()))
+        .unwrap_or(true)
 }
 
-/// Where the user's own mouse last left the game's pointer, when it came to
-/// rest over the game: the page's pointer is there, wherever autoplay last
-/// put it, since the user's input moves it too. Taken once (see
-/// [`take_user_left_pointer`]).
-static USER_LEFT: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
-
-pub fn user_left_pointer_at(at: (f64, f64)) {
-    if let Ok(mut left) = USER_LEFT.lock() {
-        *left = Some(at);
-    }
-}
-
-/// Where the user's mouse left the pointer since this was last asked, if it did.
-/// The next mark then starts a fresh stretch of the path: the pointer got there
-/// by the user's hand, not by a move autoplay made.
 pub fn take_user_left_pointer() -> Option<(f64, f64)> {
-    let left = USER_LEFT.lock().ok().and_then(|mut left| left.take());
+    let left = USER_POINTER.lock().ok().and_then(|mut p| p.take_left());
     if left.is_some() {
         FRESH.store(true, Ordering::Relaxed);
     }
@@ -377,40 +356,4 @@ pub async fn evaluate_canvas_rect(page: &Page) -> Result<CanvasRect> {
     let rect: CanvasRect = serde_json::from_value(value.clone())
         .context("canvas rect: deserialise from page value")?;
     Ok(rect)
-}
-
-#[cfg(test)]
-mod user_left_tests {
-    use super::*;
-
-    /// Where the user's mouse left the pointer is taken once: the next move
-    /// goes on from there, and the one after from wherever that move ended.
-    #[test]
-    fn where_the_user_left_the_pointer_is_taken_once() {
-        let _ = take_user_left_pointer();
-        user_left_pointer_at((10.0, 20.0));
-        user_left_pointer_at((30.0, 40.0));
-        assert_eq!(
-            take_user_left_pointer(),
-            Some((30.0, 40.0)),
-            "the last place"
-        );
-        assert_eq!(take_user_left_pointer(), None);
-    }
-
-    /// A hand that comes to rest keeps the pointer a while before autoplay
-    /// has it back: half a second at the least.
-    #[test]
-    fn a_hand_that_comes_to_rest_keeps_the_pointer_a_while() {
-        set_user_active(true);
-        assert!(user_active());
-        set_user_active(false);
-        assert!(user_active(), "not handed back at once");
-        let until = RESTING_UNTIL.lock().unwrap().expect("a wait drawn");
-        let left = until.saturating_duration_since(std::time::Instant::now());
-        assert!(
-            left >= Duration::from_millis(450) && left <= Duration::from_millis(1000),
-            "{left:?}"
-        );
-    }
 }

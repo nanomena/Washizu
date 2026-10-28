@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import * as relay from '../src/relay.js'
 import * as layout from '../src/layout.js'
 import * as input from '../src/input.js'
+import * as physicalPointer from '../src/physical-pointer.js'
 import * as preferences from '../src/view-preferences.js'
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'washizu-obs-test-'))
@@ -106,7 +107,7 @@ const namespaces = {
     const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() })
     senders.push({ args, child }); return child
   } },
-  './core.js': { Core }, './input.js': input,
+  './core.js': { Core }, './input.js': input, './physical-pointer.js': physicalPointer,
   './journal.js': { Journal: class { note() {} }, chromiumSwitches() {}, hasChromiumLog: () => true, prune() {}, runName: () => 'test' },
   './layout.js': layout, './dock.js': { registerDockScheme() {}, serveDock() {} }, './relay.js': relay,
   './watch.js': { COLLECT_AFTER_MS: 1000, FrameMeter: class { paint() {} }, GL_STATE: '', GlWatch: class {},

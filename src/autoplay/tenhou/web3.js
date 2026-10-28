@@ -60,10 +60,13 @@
     const target = native.clock.target();
     const source = native.menu.offers();
     if (!source || typeof source !== 'object') return { dto: unavailable, entries: [] };
+    // A real timer is independent of whether a tile is currently clickable.
+    // Keep its identity while waiting for native input readiness; this grants
+    // no input permission and must never restart the clock on a later probe.
+    const window = documentId + ':input:' + epoch;
     const discardReady = ownTarget(target);
     const responseReady = target === native.menu.responseTarget() && Object.prototype.hasOwnProperty.call(source, '2360326');
-    if (!discardReady && !responseReady) return { dto: unavailable, entries: [] };
-    const window = documentId + ':input:' + epoch;
+    if (!discardReady && !responseReady) return { dto: { ...unavailable, window }, entries: [] };
     const entries = [];
     for (const [key, original] of Object.entries(source)) {
       if (!/^[0-9]+$/.test(key) || !u32(Number(key))) continue;
@@ -187,10 +190,10 @@
     const current = inputSnapshot();
     const view = viewport();
     const dto = { ...current.dto, viewport: view, clock: null, tiles: [], offers: current.dto.offers.map(offer => ({ ...offer, bounds: null, reveal: null })), nextDraw: null, rest: null };
-    if (current.dto.ready) {
+    if (current.dto.window !== null && native.clock.mounted()) {
       const facts = native.clock.facts();
       if (facts && [facts.startedAt, facts.now, facts.fixedMs, facts.bankMs, facts.remainingMs].every(Number.isFinite)
-        && facts.fixedMs > 0 && facts.bankMs >= 0 && facts.now >= facts.startedAt && facts.remainingMs >= 0) {
+        && facts.fixedMs >= 0 && facts.bankMs >= 0 && facts.fixedMs + facts.bankMs > 0 && facts.now >= facts.startedAt && facts.remainingMs >= 0) {
         const elapsedMs = Math.floor(facts.now - facts.startedAt), fixedMs = Math.floor(facts.fixedMs);
         const grantedBankMs = Math.floor(facts.bankMs);
         const remainingBaseMs = Math.floor(Math.max(0, facts.remainingMs - facts.bankMs));

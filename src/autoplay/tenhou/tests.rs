@@ -193,6 +193,31 @@ fn native_clock_is_stable_and_bank_is_the_actual_grant_at_that_window_start() {
 }
 
 #[test]
+fn unclickable_target_keeps_the_real_clock_without_creating_input_permission() {
+    let now = Instant::now();
+    let shared = Arc::new(AutoplayContext::new());
+    let adapter = TenhouAutoplay::new(shared);
+    let state = state(&[0, 17, 19]);
+    let raw=serde_json::from_value::<client::InputSnapshot>(serde_json::json!({
+        "client":"web3","ready":false,"window":"native-unready","hand":[0,17,19],
+        "viewport":{"x":0,"y":0,"width":900,"height":600},"tiles":[],"offers":[],"nextDraw":null,"rest":null,
+        "clock":{"elapsedMs":3000,"fixedMs":0,"grantedBankMs":10000,"remainingBaseMs":0,"remainingBankMs":7000}
+    })).unwrap();
+    let action = MjaiEvent::Dahai {
+        actor: 0,
+        pai: "5m".into(),
+        tsumogiri: false,
+    };
+    let facts = adapter.facts(&state, &raw, &action, now);
+    assert!(!facts.ready);
+    assert!(facts.target.is_none());
+    let clock = facts.clock.unwrap();
+    assert_eq!(clock.fixed_ms, 0);
+    assert_eq!(clock.bank_at_start_ms, Some(10000));
+    assert_eq!(clock.started_at, now - Duration::from_millis(3000));
+}
+
+#[test]
 fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_is_gone() {
     use crate::autoplay::context::CanvasRect;
     use crate::autoplay::transaction::{

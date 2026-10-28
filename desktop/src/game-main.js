@@ -26,7 +26,8 @@ import { fileURLToPath } from 'node:url'
 import { Core } from './core.js'
 import { TEXT_MAX, toGame } from './input.js'
 import { Journal, chromiumSwitches, hasChromiumLog, prune, runName } from './journal.js'
-import { MIN, conform, gameBounds, handOnGame, manualPointerArea, onGame, onView, openingSize, restoredBounds, trailBounds } from './layout.js'
+import { PhysicalPointerObserver, nativeWindowIdentity } from './physical-pointer.js'
+import { MIN, conform, gameBounds, manualPointerArea, onView, openingSize, restoredBounds, trailBounds } from './layout.js'
 import { registerDockScheme, serveDock } from './dock.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, WEBGL_CONTEXTS, processLine, worthKeeping } from './watch.js'
@@ -99,15 +100,7 @@ let core = null
 /** Autoplay's pointer, drawn over the game while the option is on. */
 /** @type {BrowserWindow | null} */
 let trail = null
-/** The system cursor, as last read, when it last moved, and whether the user's hand is on the game. */
-/** @type {{ x: number, y: number } | null} */
-let cursorAt = null
-let cursorMovedAt = 0
-let userActive = false
-/** How long the cursor has to stand still before it counts as at rest. How
- *  long autoplay then waits before it has the pointer back is the core's to
- *  draw (`humanize::HAND_BACK`). */
-const USER_STILL_MS = 150
+const physicalPointer = new PhysicalPointerObserver(params => running().call('set_user_pointer', params), error => note(`physical pointer ownership unavailable: ${error}`))
 /** Where the game view is in the window's content, while it is shown. */
 /** @type {import('./layout.js').Rect | null} */
 let gameAt = null
@@ -469,21 +462,11 @@ function placeTrail() {
 
 function watchCursor() {
   if (!window || !core) return
-  const point = screen.getCursorScreenPoint()
-  const now = Date.now()
-  if (!cursorAt || point.x !== cursorAt.x || point.y !== cursorAt.y) {
-    cursorAt = point
-    cursorMovedAt = now
-  }
-  const area = manualPointerArea(window.getContentBounds(), gameAt, window.isFocused(), window.isMinimized())
-  const active = handOnGame(point, area, cursorMovedAt, now, USER_STILL_MS)
-  if (active !== userActive) {
-    userActive = active
-    // Resting over the game, the user's own mouse left the game's pointer where
-    // it is: autoplay goes on from there, not from where it last put it.
-    const at = active ? null : onGame(point, area, OFFSCREEN)
-    core.call('set_user_pointer', at ? { active, x: at.x, y: at.y } : { active }).catch(() => {})
-  }
+  physicalPointer.observe({
+    point: screen.getCursorScreenPoint(), now: Date.now(),
+    area: manualPointerArea(window.getContentBounds(), gameAt, window.isFocused(), window.isMinimized()),
+    page: OFFSCREEN, window: nativeWindowIdentity(window.getNativeWindowHandle()),
+  })
 }
 
 /** @param {BaseWindow} owner */

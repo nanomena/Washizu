@@ -21,6 +21,7 @@ pub mod humanize;
 pub mod inject;
 pub mod majsoul;
 pub mod manager;
+mod manual_pointer;
 pub mod pixels;
 pub mod platform;
 pub mod pointer;

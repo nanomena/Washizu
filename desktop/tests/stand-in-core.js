@@ -47,6 +47,11 @@ const answers = {
   get_hand_events: () => [],
   get_history: () => [],
   set_monitor_autoplay: () => null,
+  set_user_pointer: ({ window, active, x, y }) => {
+    if (typeof window !== 'string' || !/^[0-9a-f]{1,16}$/i.test(window) || BigInt('0x' + window) === 0n || typeof active !== 'boolean'
+      || (x === undefined) !== (y === undefined) || x !== undefined && ![x, y].every(Number.isFinite)) throw new Error('invalid pointer ownership facts')
+    return active
+  },
   open_game: ({ port, target }) => {
     if (!Number.isInteger(port) || typeof target !== 'string' || !target) throw new Error('invalid params')
     capture = { state: 'running', kind: 'chromium', descriptor: 'chromium (embedded)' }
