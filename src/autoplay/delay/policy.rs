@@ -295,6 +295,35 @@ mod tests {
         }
     }
     #[test]
+    fn site_clocks_zero_plus_ten_five_plus_ten_and_five_plus_twenty_share_elapsed_math() {
+        let action = MjaiEvent::None;
+        let snapshot = snapshot();
+        let cfg = cfg();
+        let model = model();
+        let policy = PacingPolicy::new(&cfg, &model, None);
+        let origin = Instant::now();
+        for (fixed, bank) in [(0, 10000), (5000, 10000), (5000, 20000)] {
+            let mut ctx = context(&action, &snapshot, origin);
+            ctx.clock = Some(TurnClockFacts {
+                started_at: origin,
+                fixed_ms: fixed,
+                bank_at_start_ms: Some(bank),
+            });
+            ctx.now = origin + Duration::from_millis(800);
+            let result = policy.decide(&ctx, &mut rng()).unwrap();
+            assert!(result.start_at >= ctx.now);
+            assert!(
+                result.start_at + Duration::from_millis(u64::from(ctx.click_overhead_ms))
+                    <= origin + Duration::from_millis(u64::from(fixed + bank))
+            );
+            ctx.now = origin + Duration::from_millis(u64::from(fixed + bank - 100));
+            assert!(matches!(
+                policy.decide(&ctx, &mut rng()),
+                Err(PacingError::Deadline { .. })
+            ));
+        }
+    }
+    #[test]
     fn elapsed_time_counts_without_restarting_a_wait_and_expired_input_is_refused() {
         let action = MjaiEvent::None;
         let snapshot = snapshot();
