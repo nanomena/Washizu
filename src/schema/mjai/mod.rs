@@ -50,8 +50,8 @@ pub struct GameMeta {
 /// stream a bot is sent or a log is written in.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HandScore {
-    /// The hand's yaku as (the provider's id for it, its han); dora counts
-    /// are among them, as the provider lists them.
+    /// The hand's yaku as (provider id, nonzero reported value); yakuman
+    /// entries use units. Dora counts are included when the provider lists them.
     pub yaku: Vec<(u32, u32)>,
     pub han: u32,
     pub fu: u32,

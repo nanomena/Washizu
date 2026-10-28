@@ -145,6 +145,9 @@ pub struct GameStats {
     pub houjuu_to_oya: i64,
     pub houjuu_point_to_oya: i64,
     pub houjuu_point_to_ko: i64,
+    /// Combined loss whose provider did not separate each ron winner's payment.
+    #[serde(default)]
+    pub houjuu_point_unattributed: i64,
 
     pub riichi: i64,
     pub riichi_as_oya: i64,
@@ -239,6 +242,18 @@ pub struct GameRecord {
     /// how a hand was scored, and for records written before this was kept.
     #[serde(default)]
     pub yaku: std::collections::BTreeMap<u32, u32>,
+
+    /// Exact number of our wins with recorded yaku metadata. None on legacy
+    /// records whose sample coverage was not recorded; never infer it from wins.
+    #[serde(default)]
+    pub yaku_wins: Option<u32>,
+    /// Detailed counters require a closed event stream with known payments.
+    /// Legacy records remain unverified until their saved stream is checked.
+    #[serde(default)]
+    pub stats_complete: bool,
+    /// Version 1 uses one-based declaration/tsumo turns and per-hand losses.
+    #[serde(default)]
+    pub stats_version: u32,
 
     /// Path of the mjai.jsonl copy, relative to the history root —
     /// always `"games/<id>.mjai.jsonl"`.
@@ -396,6 +411,9 @@ mod tests {
             our_rank_points: None,
             our_level: None,
             yaku: Default::default(),
+            yaku_wins: Some(0),
+            stats_complete: true,
+            stats_version: 1,
             id: "OLD".into(),
             started_at: Utc::now(),
             ended_at: Utc::now(),
@@ -430,6 +448,9 @@ mod tests {
             our_rank_points: None,
             our_level: None,
             yaku: Default::default(),
+            yaku_wins: Some(0),
+            stats_complete: true,
+            stats_version: 1,
             id: "01ARZ".into(),
             started_at: Utc::now(),
             ended_at: Utc::now(),
@@ -455,6 +476,9 @@ mod tests {
             our_rank_points: None,
             our_level: None,
             yaku: Default::default(),
+            yaku_wins: Some(0),
+            stats_complete: true,
+            stats_version: 1,
             id: "x".into(),
             started_at: Utc::now(),
             ended_at: Utc::now(),
@@ -484,6 +508,9 @@ mod tests {
             our_rank_points: None,
             our_level: None,
             yaku: Default::default(),
+            yaku_wins: Some(0),
+            stats_complete: true,
+            stats_version: 1,
             id: "rec1".into(),
             started_at: Utc::now(),
             ended_at: Utc::now(),

@@ -29,6 +29,63 @@ const STARTING_SCORE_3P: i32 = 35_000;
 const TOTAL_SCORE_4P: i32 = 100_000;
 const TOTAL_SCORE_3P: i32 = 105_000;
 
+#[derive(Default)]
+struct Losses {
+    groups: Vec<(Vec<i32>, Vec<u8>)>,
+}
+
+impl Losses {
+    fn push(&mut self, delta: &[i32], actor: u8) {
+        if let Some((_, actors)) = self.groups.iter_mut().find(|(old, _)| old == delta) {
+            if !actors.contains(&actor) {
+                actors.push(actor);
+            }
+        } else {
+            self.groups.push((delta.to_vec(), vec![actor]));
+        }
+    }
+
+    fn finish(
+        &mut self,
+        stats: &mut GameStats,
+        me: Option<u8>,
+        oya: u8,
+        jun: i64,
+        riichi: bool,
+        fuuro: bool,
+    ) {
+        let groups = std::mem::take(&mut self.groups);
+        let Some(me) = me else { return };
+        if groups.is_empty() {
+            return;
+        }
+        stats.houjuu += 1;
+        stats.houjuu_jun += jun;
+        if groups.iter().any(|(_, actors)| actors.contains(&oya)) {
+            stats.houjuu_to_oya += 1;
+        }
+        let mut total = 0;
+        for (delta, actors) in groups {
+            let point = i64::from(delta[usize::from(me)]);
+            total += point;
+            if actors.len() != 1 {
+                stats.houjuu_point_unattributed += point;
+            } else if actors[0] == oya {
+                stats.houjuu_point_to_oya += point;
+            } else {
+                stats.houjuu_point_to_ko += point;
+            }
+        }
+        if riichi {
+            stats.riichi_houjuu += 1;
+            stats.riichi_point += total;
+        } else if fuuro {
+            stats.fuuro_houjuu += 1;
+            stats.fuuro_point += total;
+        }
+    }
+}
+
 /// Inputs not derivable from the event stream.
 pub struct AggregateInput<'a> {
     pub events: &'a HistoryEventLog,
@@ -84,6 +141,12 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
     };
 
     let mut yaku = std::collections::BTreeMap::<u32, u32>::new();
+    let mut yaku_wins = 0;
+    let mut stats_complete = our_seat.is_some();
+    let mut hand_open = false;
+    let mut hand_result = false;
+    let mut payments = Vec::<Vec<i32>>::new();
+    let mut losses = Losses::default();
     // Per-kyoku transient state. Only meaningful when our_seat is Some.
     let mut riichi_declared = false;
     let mut riichi_accepted = false;
@@ -100,6 +163,13 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
                 scores,
                 ..
             } => {
+                if hand_open {
+                    stats_complete = false;
+                }
+                hand_open = true;
+                hand_result = false;
+                payments.clear();
+                losses = Losses::default();
                 stats.round += 1;
 
                 // Track game length from the highest-bakaze round seen.
@@ -153,7 +223,7 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
                     if *actor == me {
                         riichi_declared = true;
                         stats.riichi += 1;
-                        stats.riichi_jun += jun;
+                        stats.riichi_jun += jun + 1;
                         if cur_oya == me {
                             stats.riichi_as_oya += 1;
                         }
@@ -187,24 +257,47 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
                 score,
                 ..
             } => {
+                hand_result = true;
                 // How our wins were made, whether or not the points are known.
                 if let (true, Some(score)) = (our_seat == Some(*actor), score) {
-                    for (id, _) in &score.yaku {
-                        *yaku.entry(*id).or_insert(0) += 1;
+                    let ids: std::collections::BTreeSet<_> = score
+                        .yaku
+                        .iter()
+                        .filter(|(_, value)| *value > 0)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    if !ids.is_empty() {
+                        yaku_wins += 1;
+                    }
+                    for id in ids {
+                        *yaku.entry(id).or_insert(0) += 1;
                     }
                 }
                 let Some(deltas) = deltas else {
+                    if our_seat.is_some_and(|me| *actor == me || *target == me) {
+                        stats_complete = false;
+                    }
                     continue;
                 };
-                add_deltas(&mut cur_scores, deltas);
+                if deltas.len() != n {
+                    stats_complete = false;
+                    continue;
+                }
+                // Mahjong Soul repeats a combined multi-ron payment; Tenhou
+                // supplies distinct per-winner payments. Count each exact group once.
+                if !payments.contains(deltas) {
+                    add_deltas(&mut cur_scores, deltas);
+                    payments.push(deltas.clone());
+                }
 
                 let Some(me) = our_seat else { continue };
 
                 if *actor == me {
+                    let win_jun = (jun + i64::from(actor == target)).max(1);
                     let point = i64::from(deltas.get(me as usize).copied().unwrap_or(0))
                         - i64::from(riichi_accepted) * 1000;
                     stats.agari += 1;
-                    stats.agari_jun += jun;
+                    stats.agari_jun += win_jun;
                     if cur_oya == me {
                         stats.agari_as_oya += 1;
                         stats.agari_point_oya += point;
@@ -214,72 +307,81 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
 
                     if riichi_accepted {
                         stats.riichi_agari += 1;
-                        stats.riichi_agari_jun += jun;
+                        stats.riichi_agari_jun += win_jun;
                         stats.riichi_agari_point += point;
                         stats.riichi_point += point;
                     } else if fuuro_num > 0 {
                         stats.fuuro_agari += 1;
-                        stats.fuuro_agari_jun += jun;
+                        stats.fuuro_agari_jun += win_jun;
                         stats.fuuro_agari_point += point;
                         stats.fuuro_point += point;
                     } else {
                         stats.dama_agari += 1;
-                        stats.dama_agari_jun += jun;
+                        stats.dama_agari_jun += win_jun;
                         stats.dama_agari_point += point;
                     }
 
-                    // Yakuman threshold mirrors libriichi: dealer ron 48000,
-                    // non-dealer ron 32000. We approximate via the received
-                    // amount only — close enough at this granularity.
-                    let yakuman_threshold = if cur_oya == me { 48000 } else { 32000 };
-                    if point >= yakuman_threshold {
+                    if score.as_ref().is_some_and(|score| score.yakuman) {
                         stats.yakuman += 1;
                     }
                 } else if *target == me {
-                    let point = i64::from(deltas.get(me as usize).copied().unwrap_or(0));
-                    stats.houjuu += 1;
-                    stats.houjuu_jun += jun;
-                    if cur_oya == *actor {
-                        stats.houjuu_to_oya += 1;
-                        stats.houjuu_point_to_oya += point;
-                    } else {
-                        stats.houjuu_point_to_ko += point;
-                    }
-
-                    if riichi_declared {
-                        stats.riichi_houjuu += 1;
-                        stats.riichi_point += point;
-                    } else if fuuro_num > 0 {
-                        stats.fuuro_houjuu += 1;
-                        stats.fuuro_point += point;
-                    }
+                    losses.push(deltas, *actor);
                 }
             }
 
-            MjaiEvent::Ryukyoku { deltas, .. } => {
+            MjaiEvent::Ryukyoku { deltas, reason, .. } => {
+                hand_result = true;
+                if our_seat.is_some() {
+                    stats.ryukyoku += 1;
+                    if riichi_accepted {
+                        stats.riichi_ryukyoku += 1;
+                    }
+                }
                 let Some(deltas) = deltas else {
+                    if !matches!(
+                        reason.as_deref(),
+                        Some(
+                            "kyuushu" | "four_winds" | "four_riichis" | "three_rons" | "four_kans"
+                        )
+                    ) {
+                        stats_complete = false;
+                    }
                     continue;
                 };
+                if deltas.len() != n {
+                    stats_complete = false;
+                    continue;
+                }
                 add_deltas(&mut cur_scores, deltas);
 
                 let Some(me) = our_seat else { continue };
 
                 let point = i64::from(deltas.get(me as usize).copied().unwrap_or(0));
-                stats.ryukyoku += 1;
                 stats.ryukyoku_point += point;
                 if riichi_accepted {
-                    stats.riichi_ryukyoku += 1;
                     stats.riichi_point += point - 1000;
                 } else if fuuro_num > 0 {
                     stats.fuuro_point += point;
                 }
 
-                if point >= 8000 {
+                if reason.as_deref() == Some("nagashi") && point > 0 {
                     stats.nagashi_mangan += 1;
                 }
             }
 
             MjaiEvent::EndKyoku => {
+                if !hand_open || !hand_result {
+                    stats_complete = false;
+                }
+                hand_open = false;
+                losses.finish(
+                    &mut stats,
+                    our_seat,
+                    cur_oya,
+                    jun,
+                    riichi_declared,
+                    fuuro_num > 0,
+                );
                 if let Some(_me) = our_seat {
                     if fuuro_num > 0 {
                         stats.fuuro += 1;
@@ -292,6 +394,9 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
         }
     }
 
+    if hand_open || stats.round == 0 {
+        stats_complete = false;
+    }
     // Prefer the platform's final-result payload when present. Incremental
     // deltas still feed detailed statistics, while the authoritative result
     // prevents score/rank drift after reconnects and platform adjustments.
@@ -369,6 +474,9 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
         match_info: game_meta.and_then(|meta| meta.match_info),
         our_rank_points,
         yaku,
+        yaku_wins: Some(yaku_wins),
+        stats_complete,
+        stats_version: 1,
         log_path: format!("games/{id}.mjai.jsonl"),
     })
 }
@@ -457,6 +565,132 @@ mod tests {
             tehais: vec![vec![]; 4],
             num_players: 4,
         }
+    }
+
+    fn record(events: Vec<MjaiEvent>) -> GameRecord {
+        aggregate(AggregateInput {
+            events: &events,
+            platform: Platform::Tenhou,
+            started_at: ts(),
+            ended_at: ts(),
+            id: "COUNTERS".into(),
+        })
+        .unwrap()
+    }
+
+    fn hora(actor: u8, target: u8, delta: Vec<i32>) -> MjaiEvent {
+        MjaiEvent::Hora {
+            actor,
+            target,
+            deltas: Some(delta),
+            score: None,
+            ura_markers: None,
+            pai: None,
+            tehai: None,
+            scores: None,
+        }
+    }
+
+    #[test]
+    fn declaration_and_tsumo_turns_are_one_based_and_yaku_count_hands() {
+        let mut win = hora(0, 0, vec![48000, -16000, -16000, -16000]);
+        if let MjaiEvent::Hora { score, .. } = &mut win {
+            *score = Some(crate::schema::mjai::HandScore {
+                yaku: vec![(0, 1), (1, 1), (1, 1), (52, 0)],
+                han: 3,
+                fu: 30,
+                yakuman: false,
+            });
+        }
+        let rec = record(vec![
+            start_game_4p(0),
+            start_kyoku("E", 0, vec![25000; 4]),
+            MjaiEvent::Reach {
+                actor: 0,
+                pai: None,
+                tsumogiri: None,
+            },
+            win,
+            MjaiEvent::EndKyoku,
+            MjaiEvent::end_game(),
+        ]);
+        assert_eq!((rec.stats.riichi_jun, rec.stats.agari_jun), (1, 1));
+        assert_eq!(rec.yaku_wins, Some(1));
+        assert_eq!(rec.yaku.into_iter().collect::<Vec<_>>(), [(0, 1), (1, 1)]);
+        assert_eq!(
+            rec.stats.yakuman, 0,
+            "large payment is not proof of yakuman"
+        );
+        assert!(rec.stats_complete);
+    }
+
+    #[test]
+    fn double_ron_counts_one_loss_and_each_payment_group_once() {
+        for combined in [true, false] {
+            let first = if combined {
+                vec![-12000, 8000, 4000, 0]
+            } else {
+                vec![-8000, 8000, 0, 0]
+            };
+            let second = if combined {
+                first.clone()
+            } else {
+                vec![-4000, 0, 4000, 0]
+            };
+            let rec = record(vec![
+                start_game_4p(0),
+                start_kyoku("E", 1, vec![25000; 4]),
+                MjaiEvent::Reach {
+                    actor: 0,
+                    pai: None,
+                    tsumogiri: None,
+                },
+                hora(1, 0, first),
+                hora(2, 0, second),
+                MjaiEvent::EndKyoku,
+                MjaiEvent::end_game(),
+            ]);
+            assert_eq!(
+                (
+                    rec.stats.houjuu,
+                    rec.stats.riichi_houjuu,
+                    rec.stats.houjuu_to_oya
+                ),
+                (1, 1, 1)
+            );
+            assert_eq!(rec.stats.riichi_point, -12000);
+            assert_eq!(rec.final_scores, [13000, 33000, 29000, 25000]);
+            assert_eq!(
+                rec.stats.houjuu_point_unattributed,
+                if combined { -12000 } else { 0 }
+            );
+            assert_eq!(
+                rec.stats.houjuu_point_to_oya,
+                if combined { 0 } else { -8000 }
+            );
+        }
+    }
+
+    #[test]
+    fn abortive_draw_without_payment_counts_and_unfinished_hand_is_incomplete() {
+        let events = vec![
+            start_game_4p(0),
+            start_kyoku("E", 0, vec![25000; 4]),
+            MjaiEvent::Ryukyoku {
+                deltas: None,
+                tehais: None,
+                scores: None,
+                reason: Some("kyuushu".into()),
+            },
+            MjaiEvent::EndKyoku,
+            MjaiEvent::end_game(),
+        ];
+        let rec = record(events.clone());
+        assert_eq!(rec.stats.ryukyoku, 1);
+        assert!(rec.stats_complete);
+        let mut missing = events;
+        missing.remove(3);
+        assert!(!record(missing).stats_complete);
     }
 
     /// `match_info` and where we stood as the game began ride the

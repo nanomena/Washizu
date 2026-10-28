@@ -2,7 +2,7 @@
 //! No wall reconstruction or inference from another player's concealed hand.
 
 use super::{state::State, tile::tenhou_to_mjai_one};
-use crate::schema::MjaiEvent;
+use crate::schema::{mjai::HandScore, MjaiEvent};
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 
@@ -90,6 +90,40 @@ struct Win {
     payment: Payment,
 }
 
+/// Optional result metadata must not invalidate the authoritative settlement.
+fn hand_score(msg: &Value) -> Result<HandScore> {
+    let ten = csv::<u32>(msg, "ten")?;
+    ensure!(ten.len() == 3, "ten must contain fu, points and limit");
+    let (yaku, han, yakuman) = if msg.get("yakuman").is_some() {
+        let ids = csv::<u32>(msg, "yakuman")?;
+        ensure!(!ids.is_empty(), "empty yakuman list");
+        (ids.into_iter().map(|id| (id, 1)).collect(), 0, true)
+    } else {
+        let pairs = csv::<u32>(msg, "yaku")?;
+        ensure!(
+            !pairs.is_empty() && pairs.len() % 2 == 0,
+            "yaku must contain id/value pairs"
+        );
+        let mut han = 0u32;
+        let mut yaku = Vec::new();
+        for pair in pairs.chunks_exact(2) {
+            if pair[1] == 0 {
+                continue;
+            }
+            han = han.checked_add(pair[1]).context("han overflow")?;
+            yaku.push((pair[0], pair[1]));
+        }
+        ensure!(!yaku.is_empty(), "no nonzero yaku");
+        (yaku, han, ten[2] >= 5)
+    };
+    Ok(HandScore {
+        yaku,
+        han,
+        fu: ten[0],
+        yakuman,
+    })
+}
+
 impl Win {
     fn parse(msg: &Value, state: &State) -> Result<Self> {
         let actor = seat(msg, "who", state)?;
@@ -125,7 +159,13 @@ impl Win {
             pai: Some(tenhou_to_mjai_one(tile)),
             tehai: Some(hand.into_iter().map(tenhou_to_mjai_one).collect()),
             scores: None,
-            score: None,
+            score: match hand_score(msg) {
+                Ok(score) => Some(score),
+                Err(error) => {
+                    tracing::warn!("Tenhou hand-score metadata unavailable: {error:#}");
+                    None
+                }
+            },
         };
         Ok(Self {
             event,
@@ -334,6 +374,37 @@ mod tests {
             "hai":"6,8,12,48,51,52,58,61,85,91,93",
             "sc":"382,39,120,0,11,-39,487,0"}),
         ]
+    }
+
+    #[test]
+    fn score_metadata_preserves_native_ids_nonzero_values_and_yakuman() {
+        let score = hand_score(&json!({"ten":"30,3900,0","yaku":"0,1,1,1,52,0,999,1"})).unwrap();
+        assert_eq!(score.yaku, [(0, 1), (1, 1), (999, 1)]);
+        assert_eq!((score.han, score.fu, score.yakuman), (3, 30, false));
+        assert!(
+            hand_score(&json!({"ten":"30,32000,5","yaku":"35,6,52,7"}))
+                .unwrap()
+                .yakuman
+        );
+        let limit = hand_score(&json!({"ten":"0,64000,5","yakuman":"41,42"})).unwrap();
+        assert_eq!(limit.yaku, [(41, 1), (42, 1)]);
+        assert!(limit.yakuman);
+    }
+
+    #[test]
+    fn missing_or_malformed_optional_score_does_not_drop_real_settlement() {
+        for metadata in [
+            json!({}),
+            json!({"ten":"30,8000,0","yaku":"1"}),
+            json!({"ten":"30,8000,0","yakuman":"bad"}),
+        ] {
+            let mut raw = double_ron()[0].clone();
+            raw.as_object_mut()
+                .unwrap()
+                .extend(metadata.as_object().unwrap().clone());
+            let win = Win::parse(&raw, &State::default()).unwrap();
+            assert!(matches!(win.event, MjaiEvent::Hora { score: None, .. }));
+        }
     }
 
     #[test]
