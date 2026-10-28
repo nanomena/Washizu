@@ -359,16 +359,17 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
                 x,
                 y,
             } = parse(params)?;
-            anyhow::ensure!(
-                x.is_some() == y.is_some(),
-                "Pointer position requires both coordinates"
-            );
+            if x.is_some() != y.is_some() {
+                return Err("Pointer position requires both coordinates".into());
+            }
             let at = x.zip(y);
-            anyhow::ensure!(
-                at.is_none_or(|(x, y)| x.is_finite() && y.is_finite()),
-                "Invalid pointer position"
-            );
-            reply(autoplay::cdp_input::set_user_pointer(&window, active, at)?)
+            if at.is_some_and(|(x, y)| !x.is_finite() || !y.is_finite()) {
+                return Err("Invalid pointer position".into());
+            }
+            reply(
+                autoplay::cdp_input::set_user_pointer(&window, active, at)
+                    .map_err(|error| error.to_string())?,
+            )
         }
         "set_monitor_lean" => {
             let Enabled { enabled } = parse(params)?;
