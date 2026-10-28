@@ -34,12 +34,64 @@ use serde_json::Value as JsonValue;
 use state::State;
 use std::sync::Arc;
 use tile::{tenhou_to_mjai, tenhou_to_mjai_one};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 const HEARTBEAT: &[u8] = b"<Z/>";
 const BAKAZE: [&str; 4] = ["E", "S", "W", "N"];
 /// Sentinel in a `<REINIT/>` `kawa<n>` list marking the riichi declaration.
 const REINIT_RIICHI_MARK: u32 = 255;
+
+/// Normalize only actions whose legality the original live frame proves.
+/// A snapshot says nothing about missed furiten/kuikae or riichi eligibility:
+/// never derive a full legal mask, call, kan or declaration from it.
+pub(crate) fn observed_actions(
+    event: &MjaiEvent,
+    seat: u8,
+    window: crate::autoplay::tenhou_state::DecisionWindow,
+) -> Vec<MjaiEvent> {
+    use crate::autoplay::tenhou_state::{OP_RON, OP_TSUMO};
+    let mut legal = Vec::new();
+    match event {
+        MjaiEvent::Tsumo { actor, pai } if *actor == seat && pai != "?" => {
+            if window.allows(OP_TSUMO) {
+                legal.push(MjaiEvent::Hora {
+                    actor: seat,
+                    target: seat,
+                    pai: Some(pai.clone()),
+                    ura_markers: None,
+                    deltas: None,
+                    scores: None,
+                    tehai: None,
+                    score: None,
+                });
+            }
+            legal.push(MjaiEvent::Dahai {
+                actor: seat,
+                pai: pai.clone(),
+                tsumogiri: true,
+            });
+        }
+        MjaiEvent::Dahai { actor, pai, .. } | MjaiEvent::Kakan { actor, pai, .. }
+            if *actor != seat && window.has_declinable_claim() =>
+        {
+            if window.allows(OP_RON) {
+                legal.push(MjaiEvent::Hora {
+                    actor: seat,
+                    target: *actor,
+                    pai: Some(pai.clone()),
+                    ura_markers: None,
+                    deltas: None,
+                    scores: None,
+                    tehai: None,
+                    score: None,
+                });
+            }
+            legal.push(MjaiEvent::None);
+        }
+        _ => {}
+    }
+    legal
+}
 
 /// Per-flow Tenhou state. One bridge instance per WebSocket connection.
 pub struct TenhouBridge {
@@ -216,26 +268,9 @@ impl TenhouBridge {
         }
         events.extend(self.dispatch_tag(tag, msg));
 
-        // A flow that attached mid-kyoku (`<REINIT/>`) has no history for the
-        // hand in progress, so its events would land on whatever the tracker
-        // last saw — a hand it may be several turns behind on, or none at
-        // all. The handler still ran (autoplay needs the hand and window it
-        // maintains); only the stream is withheld until `on_init` lifts the
-        // suspension at the next kyoku.
-        // The one exception is the game's end: the tracker has to close the
-        // game, the bot manager stop its runner, History reset — so
-        // `end_game` alone passes, and as terminated (see `end_game_event`).
-        if self.state.suspended {
-            let before = events.len();
-            events.retain(|e| matches!(e, MjaiEvent::EndGame { .. }));
-            if before != events.len() {
-                debug!(
-                    target: "akagi::bridge::tenhou",
-                    "dropping {} event(s) from <{tag}/>: joined mid-kyoku, waiting for the next INIT",
-                    before - events.len()
-                );
-            }
-        }
+        // InterruptedKyoku retires stale rules/model context explicitly.
+        // Real subsequent events must still reach the single coordinator so
+        // its restricted standby can play the observed current-hand windows.
         events
     }
 
@@ -253,12 +288,7 @@ impl TenhouBridge {
     }
 
     fn finish_wins(&mut self) -> Vec<MjaiEvent> {
-        let events = self.pending_wins.finish();
-        if self.state.suspended {
-            Vec::new()
-        } else {
-            events
-        }
+        self.pending_wins.finish()
     }
 
     fn dispatch_tag(&mut self, tag: &str, msg: &JsonValue) -> Vec<MjaiEvent> {
@@ -391,7 +421,6 @@ impl TenhouBridge {
         self.state.seat = (4 - oya_rel) % 4;
         self.state.seat_resolved = true;
         // A new game on a flow that was waiting out a mid-kyoku join.
-        self.state.suspended = false;
         self.state.rejoined_mid_game = false;
         self.state.pending_start_game = true;
         self.rotate_mjai_log();
@@ -490,7 +519,6 @@ impl TenhouBridge {
         self.resolve_seat_from_kyoku("INIT", seed[0], oya_rel, first_deal);
         // A new kyoku is a clean slate for the tracker: whatever this flow
         // missed of the previous one no longer matters.
-        self.state.suspended = false;
         if first_deal {
             // E1H0 happens once per game, so it is a game start whether or
             // not a <TAIKYOKU/> announced it; a flow that rejoined the
@@ -612,15 +640,11 @@ impl TenhouBridge {
     /// It is a snapshot, not a log: each seat's river and calls are listed,
     /// but nothing says *when* a call happened relative to the discards, so
     /// the mjai stream for the hand cannot be rebuilt (Majsoul's
-    /// `GameRestore` can — it is an ordered action log). We therefore emit
-    /// nothing, rebuild only what this flow itself needs — our seat, the
-    /// player count, and the hand / calls / riichi state autoplay and
-    /// `build` read — and suspend the stream until the next `<INIT/>`,
-    /// which re-opens the game with a fresh `start_game`. Feeding the live
-    /// events into the tracker instead would apply them to a hand it last
-    /// saw several turns ago (or, with a fresh seat-0 bridge, to the wrong
-    /// seats altogether), and every `?` draw that lands on our seat renders
-    /// as a 1m.
+    /// `GameRestore` can — it is an ordered action log). Restore the observed
+    /// hand/identity and emit an explicit interruption. The tracker retires
+    /// its old rules state, Primary waits for a real new deal, and the one
+    /// coordinator can choose restricted standby actions from subsequent
+    /// live windows. No river ordering or private draws are invented.
     ///
     /// Field layout mirrors `<INIT/>` (`seed` / `ten` / `oya` / `hai`, all
     /// wire-relative) plus per-seat `m<rel>` (comma-separated `<N m=…/>`
@@ -694,14 +718,12 @@ impl TenhouBridge {
         // counter nothing downstream reads precisely.
         let discarded: u32 = (0..4).map(|rel| kawa(rel).len() as u32).sum();
         self.state.live_wall = 70u32.saturating_sub(discarded + u32::from(self.state.is_tsumo));
-
-        self.state.suspended = true;
         self.state.rejoined_mid_game = true;
         self.state.pending_start_game = true;
         self.ensure_mjai_log();
         warn!(
             target: "akagi::bridge::tenhou",
-            "REINIT: rejoined seed={} as seat {} with {} tiles, {} call(s){}; analysis paused until the next INIT",
+            "REINIT: rejoined seed={} as seat {} with {} tiles, {} call(s){}; restricted standby until a real INIT",
             seed[0],
             self.state.seat,
             self.state.hand.len(),
@@ -710,10 +732,36 @@ impl TenhouBridge {
         );
         self.notify(
             Notification::warn("Tenhou: rejoined mid-hand")
-                .body("The hand in progress can't be reconstructed, so analysis is paused until the next hand starts.")
+                .body("本手历史不完整：备用策略仅按服务器实际窗口和新摸牌接续；下一手重新建立主模型上下文。")
                 .id("tenhou-reinit"),
         );
-        Vec::new()
+        let roster = self.state.un_names.clone();
+        let names = self.build_start_names();
+        self.state.un_names = roster; // the next real INIT keeps the same observed roster
+        let start = MjaiEvent::StartGame {
+            names,
+            kyoku_first: None,
+            aka_flag: self.state.go_type.map(|rules| rules & 0x02 == 0),
+            id: Some(self.state.seat),
+            num_players: self.state.num_players,
+            game_meta: Some(GameMeta {
+                game_id: None,
+                match_mode: self
+                    .state
+                    .go_type
+                    .map(|rules| if rules & 0x08 == 0 { 1 } else { 2 }),
+                match_info: Some(MatchInfo::Tenhou {
+                    log_id: self.state.log_id.clone(),
+                    go_type: self.state.go_type,
+                    lobby: self.state.lobby,
+                    dan: self.state.dan,
+                }),
+                our_level: None,
+            }),
+        };
+        vec![start, MjaiEvent::InterruptedKyoku {
+            reason: "Tenhou REINIT contains a snapshot, not the missing ordered hand history. Primary awaits the next real INIT; restricted standby uses only observed legal actions.".into(),
+        }]
     }
 
     /// `<T0/>`, `<U7/>`, `<V12/>`, `<W3/>` — tsumo.
@@ -2556,23 +2604,24 @@ mod tests {
     /// The reconnect sequence as the bridge sees it on a fresh WebSocket:
     /// no `<TAIKYOKU/>`, a `<REINIT/>` snapshot of the hand in progress, then
     /// live play. The seat comes from the kyoku frame, the rest of the hand
-    /// is withheld, and the next `<INIT/>` reopens the game on the right
+    /// is observed with explicit incomplete provenance, and `<INIT/>` reopens
     /// seat with a fresh `start_game`.
     #[test]
-    fn reinit_on_a_fresh_flow_resolves_seat_and_suspends_until_next_init() {
+    fn reinit_resolves_seat_and_keeps_real_live_events_without_a_fake_deal() {
         let mut b = TenhouBridge::new(None, None);
         // E3 (seed 2): the dealer is wire-abs 2 and we see them at rel 1,
         // so we sit at wire-abs 1.
         let reinit = format!(
             r#"{{"tag":"REINIT","seed":"2,1,0,3,4,60","ten":"230,260,250,260","oya":"1","hai":"{HAND_NO_1M}","kawa0":"20,255,24","kawa1":"33","kawa2":"5","kawa3":"9"}}"#
         );
-        assert!(
-            parse_one(&mut b, &reinit).is_empty(),
-            "REINIT emits nothing"
-        );
+        let restored = parse_one(&mut b, &reinit);
+        assert_eq!(restored.len(), 2);
+        assert!(matches!(restored[1], MjaiEvent::InterruptedKyoku { .. }));
+        assert!(!restored
+            .iter()
+            .any(|e| matches!(e, MjaiEvent::StartKyoku { .. })));
         assert_eq!(b.state.seat, 1);
         assert!(b.state.seat_resolved);
-        assert!(b.state.suspended);
         assert!(b.state.in_riichi, "255 in kawa0 marks our riichi");
         assert_eq!(b.state.hand.len(), 13);
         assert!(!b.state.is_tsumo);
@@ -2582,29 +2631,39 @@ mod tests {
             "five discards, riichi mark excluded"
         );
 
-        // Live play for the rest of this hand is withheld, but the hand keeps
-        // tracking for autoplay.
-        assert!(parse_one(&mut b, r#"{"tag":"U"}"#).is_empty());
-        assert!(parse_one(&mut b, r#"{"tag":"E33"}"#).is_empty());
-        assert!(parse_one(&mut b, r#"{"tag":"T60","t":"16"}"#).is_empty());
+        // Keep actual events for the restricted standby, never fake history.
+        assert!(matches!(
+            parse_one(&mut b, r#"{"tag":"U"}"#)[0],
+            MjaiEvent::Tsumo { .. }
+        ));
+        assert!(matches!(
+            parse_one(&mut b, r#"{"tag":"E33"}"#)[0],
+            MjaiEvent::Dahai { .. }
+        ));
+        assert!(matches!(
+            parse_one(&mut b, r#"{"tag":"T60","t":"16"}"#)[0],
+            MjaiEvent::Tsumo { .. }
+        ));
         assert_eq!(b.state.hand.len(), 14);
         assert!(b.state.is_tsumo);
         assert!(b.state.window.is_some(), "autoplay still sees the window");
-        assert!(parse_one(&mut b, r#"{"tag":"D60"}"#).is_empty());
+        assert!(matches!(
+            parse_one(&mut b, r#"{"tag":"D60"}"#)[0],
+            MjaiEvent::Dahai { .. }
+        ));
         assert_eq!(b.state.hand.len(), 13);
         let agari = r#"{"tag":"AGARI","who":"2","fromWho":"1","machi":"109","hai":"0,1,2,36,37,38,72,73,74,128,129,130,108,109","sc":"230,0,260,-20,250,20,260,0","ba":"1,0"}"#;
         assert!(
             parse_one(&mut b, agari).is_empty(),
-            "the hand's end is withheld too"
+            "AGARI still waits for its actual settlement group boundary"
         );
-        assert!(b.state.suspended);
 
         // E4 (seed 3): dealer wire-abs 3, at rel 2 from seat 1 — consistent.
         let init = format!(
             r#"{{"tag":"INIT","seed":"3,0,0,1,2,8","ten":"230,260,270,240","oya":"2","hai":"{HAND_NO_1M}"}}"#
         );
         let events = parse_one(&mut b, &init);
-        assert!(!b.state.suspended);
+        let events = &events[events.len() - 2..];
         assert_eq!(events.len(), 2, "start_game + start_kyoku, got {events:?}");
         match &events[0] {
             MjaiEvent::StartGame {
@@ -2733,9 +2792,11 @@ mod tests {
         let reinit = format!(
             r#"{{"tag":"REINIT","seed":"0,0,0,1,2,4","ten":"250,250,250,250","oya":"2","hai":"{HAND_NO_1M}","kawa0":"20","kawa2":"5"}}"#
         );
-        assert!(parse_one(&mut b, &reinit).is_empty());
+        assert!(matches!(
+            parse_one(&mut b, &reinit).last(),
+            Some(MjaiEvent::InterruptedKyoku { .. })
+        ));
         assert_eq!(b.state.seat, 2);
-        assert!(b.state.suspended);
         let init = format!(
             r#"{{"tag":"INIT","seed":"1,0,0,1,2,8","ten":"250,250,250,250","oya":"3","hai":"{HAND_NO_1M}"}}"#
         );
@@ -2917,22 +2978,25 @@ mod tests {
     /// a game rejoined mid-way ends terminated while the next, seen whole,
     /// ends confirmed.
     #[test]
-    fn new_game_after_a_suspended_hand_resumes_normally() {
+    fn new_game_after_an_interrupted_hand_resumes_normally() {
         let mut b = TenhouBridge::new(None, None);
         let reinit = format!(
             r#"{{"tag":"REINIT","seed":"7,0,0,1,2,4","ten":"250,250,250,250","oya":"0","hai":"{HAND_NO_1M}"}}"#
         );
         parse_one(&mut b, &reinit);
-        assert!(b.state.suspended);
         // The game's end still goes out — as terminated, since this flow
         // never saw the whole game — so every consumer closes it.
         let events = parse_one(
             &mut b,
             r#"{"tag":"RYUUKYOKU","sc":"250,0,250,0,250,0,250,0","owari":"1"}"#,
         );
-        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events.len(),
+            3,
+            "actual draw, hand end and incomplete game end: {events:?}"
+        );
         assert!(matches!(
-            &events[0],
+            events.last().unwrap(),
             MjaiEvent::EndGame {
                 reason: GameEndReason::Terminated,
                 ..
@@ -2940,7 +3004,6 @@ mod tests {
         ));
         parse_one(&mut b, r#"{"tag":"GO","type":"9","lobby":"0"}"#);
         parse_one(&mut b, r#"{"tag":"TAIKYOKU","oya":"1"}"#);
-        assert!(!b.state.suspended);
         assert!(!b.state.rejoined_mid_game);
         let init = format!(
             r#"{{"tag":"INIT","seed":"0,0,0,1,2,4","ten":"250,250,250,250","oya":"1","hai":"{HAND_NO_1M}"}}"#
@@ -3096,10 +3159,12 @@ mod tests {
         )
         .is_empty());
         let reinit = r#"{"tag":"REINIT","seed":"0,0,1,3,0,23","ten":"240,250,250,250","oya":"2","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96","m3":"48203","kawa0":"1,106,74,8,255,40","kawa1":"79,122,3,6,41","kawa2":"72,100,9,21,98","kawa3":"107,78,67,43,113,73"}"#;
-        assert!(parse_one(&mut b, reinit).is_empty());
+        assert!(matches!(
+            parse_one(&mut b, reinit).last(),
+            Some(MjaiEvent::InterruptedKyoku { .. })
+        ));
         assert_eq!(b.state.seat, 2, "E1 dealer at rel 2 → we sit at wire-abs 2");
         assert!(b.state.seat_resolved);
-        assert!(b.state.suspended);
         assert!(b.state.in_riichi);
         assert!(b.state.melds.is_empty());
         assert_eq!(b.state.hand.len(), 13);
@@ -3107,14 +3172,23 @@ mod tests {
         assert!(!b.state.is_3p);
         assert_eq!(b.state.num_players, 4);
 
-        // Our draw right after the rejoin: tracked for autoplay, not emitted.
-        assert!(parse_one(&mut b, r#"{"tag":"T120"}"#).is_empty());
+        // Our draw right after rejoin reaches the coordinator.
+        assert!(matches!(
+            parse_one(&mut b, r#"{"tag":"T120"}"#)[0],
+            MjaiEvent::Tsumo { .. }
+        ));
         assert!(b.state.is_tsumo);
         assert_eq!(b.state.hand.len(), 14);
         assert!(b.state.window.is_some());
-        assert!(parse_one(&mut b, r#"{"tag":"D120"}"#).is_empty());
+        assert!(matches!(
+            parse_one(&mut b, r#"{"tag":"D120"}"#)[0],
+            MjaiEvent::Dahai { .. }
+        ));
         assert_eq!(b.state.hand.len(), 13);
-        assert!(parse_one(&mut b, r#"{"tag":"U"}"#).is_empty());
+        assert!(matches!(
+            parse_one(&mut b, r#"{"tag":"U"}"#)[0],
+            MjaiEvent::Tsumo { .. }
+        ));
 
         // The hand ends (our ron) and E2 begins: the game reopens on seat 2
         // with the roster from the rejoin's <UN/>.
@@ -3127,7 +3201,16 @@ mod tests {
             &mut b,
             r#"{"tag":"INIT","seed":"1,0,0,2,0,55","ten":"317,173,250,250","oya":"3","hai":"36,4,124,72,84,50,60,128,32,40,62,44,63"}"#,
         );
-        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(matches!(
+            events.as_slice(),
+            [
+                MjaiEvent::Hora { .. },
+                MjaiEvent::EndKyoku,
+                MjaiEvent::StartGame { .. },
+                MjaiEvent::StartKyoku { .. }
+            ]
+        ));
+        let events = &events[2..];
         match &events[0] {
             MjaiEvent::StartGame {
                 id,
@@ -3157,8 +3240,76 @@ mod tests {
             }
             other => panic!("expected StartKyoku, got {other:?}"),
         }
-        assert!(!b.state.suspended);
         let events = parse_one(&mut b, r#"{"tag":"W"}"#);
         assert!(matches!(&events[0], MjaiEvent::Tsumo { actor: 1, pai } if pai == "?"));
+    }
+}
+
+#[cfg(test)]
+mod interrupted_window_tests {
+    use super::*;
+    use crate::autoplay::tenhou_state::{DecisionWindow, OP_REACH, OP_RON, OP_TSUMO};
+    use std::time::Instant;
+    fn window(ops: u32) -> DecisionWindow {
+        DecisionWindow {
+            ops,
+            opened_at: Instant::now(),
+            clock: None,
+        }
+    }
+    #[test]
+    fn interrupted_candidates_only_use_the_original_server_window_and_actual_tile() {
+        let draw = MjaiEvent::Tsumo {
+            actor: 2,
+            pai: "5pr".into(),
+        };
+        let choices = observed_actions(&draw, 2, window(OP_REACH));
+        assert_eq!(
+            choices,
+            vec![MjaiEvent::Dahai {
+                actor: 2,
+                pai: "5pr".into(),
+                tsumogiri: true
+            }]
+        );
+        let win = observed_actions(&draw, 2, window(OP_TSUMO));
+        assert!(
+            matches!(&win[0], MjaiEvent::Hora { actor: 2, target: 2, pai: Some(tile), .. } if tile == "5pr")
+        );
+        assert!(observed_actions(&draw, 1, window(OP_TSUMO)).is_empty());
+        assert!(observed_actions(
+            &MjaiEvent::Tsumo {
+                actor: 2,
+                pai: "?".into()
+            },
+            2,
+            window(0)
+        )
+        .is_empty());
+        let discard = MjaiEvent::Dahai {
+            actor: 3,
+            pai: "5mr".into(),
+            tsumogiri: false,
+        };
+        assert!(observed_actions(&discard, 2, window(0)).is_empty());
+        let ron = observed_actions(&discard, 2, window(OP_RON));
+        assert!(
+            matches!(&ron[0], MjaiEvent::Hora { actor: 2, target: 3, pai: Some(tile), .. } if tile == "5mr")
+        );
+        assert_eq!(ron[1], MjaiEvent::None);
+        assert!(
+            observed_actions(
+                &MjaiEvent::Pon {
+                    actor: 2,
+                    target: 3,
+                    pai: "P".into(),
+                    consumed: ["P".into(), "P".into()]
+                },
+                2,
+                window(0)
+            )
+            .is_empty(),
+            "unknown post-call restrictions cannot invent a discard"
+        );
     }
 }

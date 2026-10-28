@@ -2,6 +2,7 @@
 // the Rust side: `src/schema`, `src/game_state` and `src/bot`.
 
 export type MjaiEvent =
+  | { type: 'interrupted_kyoku'; reason: string }
   | { type: 'start_game'; names: string[]; kyoku_first?: number; aka_flag?: boolean; id?: number; num_players?: number }
   | { type: 'start_kyoku'; bakaze: string; dora_marker: string; kyoku: number; honba: number; kyotaku: number; oya: number; scores: number[]; tehais: string[][]; num_players?: number }
   | { type: 'tsumo'; actor: number; pai: string }

@@ -80,6 +80,12 @@ fn default_num_players() -> u8 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MjaiEvent {
+    /// A provider restored a live hand without its ordered history. This is
+    /// an explicit observation gap, never a synthetic deal or replay move.
+    /// Primary runners must not receive this marker or the incomplete hand.
+    InterruptedKyoku {
+        reason: String,
+    },
     StartGame {
         names: Vec<String>,
         kyoku_first: Option<u8>,

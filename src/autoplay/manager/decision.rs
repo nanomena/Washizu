@@ -43,7 +43,7 @@ pub(super) struct Decision {
     pub(super) probs: Option<DecisionProbs>,
     pub(super) our_seat: u8,
     pub(super) legal_actions: Vec<Action>,
-    pub(super) snapshot: GameStateSnapshot,
+    pub(super) snapshot: Option<GameStateSnapshot>,
     pub(super) num_players: u8,
     pub(super) reading: Reading,
     pub(super) pointer: Option<(f64, f64)>,
@@ -57,7 +57,7 @@ impl Decision {
     pub(super) fn context<'a>(&'a self, action: &'a MjaiEvent) -> ActionContext<'a> {
         ActionContext {
             action,
-            snapshot: &self.snapshot,
+            snapshot: self.snapshot.as_ref(),
             legal_actions: &self.legal_actions,
             our_seat: self.our_seat,
             last_kawa_tile: self.last_kawa_tile.as_deref(),
@@ -120,8 +120,13 @@ impl AutoplayManager {
             let our_seat = tracker.our_seat()?;
             // Keep cached_our_seat up to date for handle_mjai_event.
             self.state.cached_our_seat = Some(our_seat);
-            let snapshot = tracker.snapshot()?;
-            let num_players = snapshot.num_players;
+            let snapshot = tracker.snapshot();
+            if snapshot.is_none()
+                && !matches!(resp.control(), Ok(Some(control)) if control.source == DecisionSource::NativeStandby)
+            {
+                return None;
+            }
+            let num_players = tracker.num_players()?;
             let legal_actions: Vec<Action> = if num_players == 3 {
                 tracker
                     .state_3p()
@@ -136,7 +141,9 @@ impl AutoplayManager {
             (our_seat, legal_actions, snapshot, num_players)
         };
 
-        let reading = self.reading(resp, &snapshot, our_seat);
+        let reading = snapshot.as_ref().map_or_else(Reading::default, |snapshot| {
+            self.reading(resp, snapshot, our_seat)
+        });
         // One line a decision, for measuring a pace against afterwards.
         info!(action = ?resp.action, ?probs, ?reading, "autoplay: decision read");
 

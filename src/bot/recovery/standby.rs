@@ -13,6 +13,34 @@ pub struct LocalStandby {
 }
 
 impl LocalStandby {
+    /// With an incomplete observation history, the neural rules replay is
+    /// unavailable. Prefer only provider-proved wins, otherwise the actual
+    /// new draw or a legal decline. This policy owns no input or retry loop.
+    pub fn observed_reply(legal: &[MjaiEvent]) -> Option<BotResponse> {
+        let action = legal
+            .iter()
+            .find(|e| matches!(e, MjaiEvent::Hora { .. }))
+            .or_else(|| {
+                legal.iter().find(|e| {
+                    matches!(
+                        e,
+                        MjaiEvent::Dahai {
+                            tsumogiri: true,
+                            ..
+                        }
+                    )
+                })
+            })
+            .or_else(|| legal.iter().find(|e| matches!(e, MjaiEvent::None)))?
+            .clone();
+        Some(BotResponse {
+            request: None,
+            action,
+            meta: Some(
+                serde_json::json!({"recovery_policy":"Observed win / drawn-tile discard / decline only; ordered hand history is unavailable."}),
+            ),
+        })
+    }
     pub fn new(seat: u8, players: u8) -> Result<Self> {
         Ok(Self {
             engine: native_bot::defaults::engine(players, seat)?,

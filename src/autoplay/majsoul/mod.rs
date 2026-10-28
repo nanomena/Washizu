@@ -104,7 +104,7 @@ fn tile_bounds(rect: CanvasRect, point: (f64, f64)) -> CanvasRect {
 /// The already confirmed protocol hand, in the client's established sorted
 /// rack order. This does not claim Unity exposes native hand objects.
 fn protocol_tiles(ctx: &ActionContext<'_>) -> Option<Vec<(String, bool)>> {
-    let player = ctx.snapshot.players.get(ctx.our_seat as usize)?;
+    let player = ctx.snapshot?.players.get(ctx.our_seat as usize)?;
     let mut hand = player.tehai.clone();
     if hand.iter().any(|tile| tile == "?") {
         return None;
@@ -170,6 +170,9 @@ fn layout(view: &ClientView, ctx: &ActionContext<'_>) -> Option<PointerLayout> {
 #[async_trait::async_trait]
 impl SiteAdapter for MajsoulAutoplay {
     fn plan(&self, ctx: &ActionContext<'_>) -> TurnPlan {
+        if ctx.snapshot.is_none() {
+            return TurnPlan::default();
+        }
         let normalized = ActionContext {
             pointer: None,
             ..*ctx
@@ -498,7 +501,10 @@ fn mapped_targets(ctx: &ActionContext) -> TargetMapping {
             // Extra guard: never click Pass during WaitAct (own draw turn).
             // Stale legal_actions from the previous round can falsely expose
             // Pass before the tracker has processed start_kyoku.
-            if ctx.snapshot.phase != crate::game_state::snapshot::Phase::WaitResponse {
+            if !ctx
+                .snapshot
+                .is_some_and(|s| s.phase == crate::game_state::snapshot::Phase::WaitResponse)
+            {
                 return result;
             }
             // Extra guard: only click Skip when there's an actual claim option
@@ -691,18 +697,13 @@ fn pick_copy(
 
 /// Plan a hand-tile click for a discard or riichi-declaring discard.
 fn plan_dahai_click(pai: &str, whence: Whence, ctx: &ActionContext) -> Option<MappedClick> {
+    let snapshot = ctx.snapshot?;
     {
         use rand::SeedableRng;
         use std::hash::{Hash, Hasher};
         let mut key = std::collections::hash_map::DefaultHasher::new();
-        (
-            pai,
-            ctx.snapshot.kyoku,
-            ctx.snapshot.honba,
-            ctx.snapshot.turn_count,
-        )
-            .hash(&mut key);
-        if let Some(player) = ctx.snapshot.players.get(ctx.our_seat as usize) {
+        (pai, snapshot.kyoku, snapshot.honba, snapshot.turn_count).hash(&mut key);
+        if let Some(player) = snapshot.players.get(ctx.our_seat as usize) {
             player.tehai.hash(&mut key);
         }
         plan_dahai_click_with(
@@ -720,8 +721,9 @@ fn plan_dahai_click_with(
     ctx: &ActionContext,
     rng: &mut impl Rng,
 ) -> Option<MappedClick> {
+    let snapshot = ctx.snapshot?;
     let our_seat = ctx.our_seat as usize;
-    if our_seat >= ctx.snapshot.players.len() {
+    if our_seat >= snapshot.players.len() {
         return None;
     }
 
@@ -730,7 +732,7 @@ fn plan_dahai_click_with(
     // the index in the fully-sorted 14-tile array, using TILES[i]
     // directly (not get_pai_coord, which would add TSUMO_SPACE for i=13).
     if is_dealer_opening(ctx) {
-        let mut sorted = ctx.snapshot.players[our_seat].tehai.clone();
+        let mut sorted = snapshot.players[our_seat].tehai.clone();
         sorted.sort_by(|a, b| compare_pai(a, b));
         let copies: Vec<usize> = (0..sorted.len()).filter(|&i| sorted[i] == pai).collect();
         let idx = pick_copy(&copies, |i| TILES.get(i).copied(), ctx.pointer, rng)?;
@@ -741,13 +743,12 @@ fn plan_dahai_click_with(
         });
     }
 
-    let tehai: Vec<String> = ctx.snapshot.players[our_seat].tehai.clone();
+    let tehai: Vec<String> = snapshot.players[our_seat].tehai.clone();
     // Prefer snapshot drawn_tile (always accurate) over last_self_tsumo
     // (None after pon/chi/kita since no Tsumo event fires for those draws).
     // In 3p: if snapshot_drawn is "N" but last_self_tsumo is set to something
     // else, the snapshot predates the Kita; use last_self_tsumo (rinshan).
-    let snapshot_drawn = ctx
-        .snapshot
+    let snapshot_drawn = snapshot
         .players
         .get(our_seat)
         .and_then(|p| p.drawn_tile.as_deref());
@@ -832,11 +833,14 @@ fn plan_dahai_click_with(
 /// path, otherwise every closed tile sorting after the rinshan gets
 /// clicked one slot too far right.
 fn is_dealer_opening(ctx: &ActionContext) -> bool {
-    let our_seat = ctx.our_seat as usize;
-    let Some(player) = ctx.snapshot.players.get(our_seat) else {
+    let Some(snapshot) = ctx.snapshot else {
         return false;
     };
-    ctx.snapshot.oya == ctx.our_seat
+    let our_seat = ctx.our_seat as usize;
+    let Some(player) = snapshot.players.get(our_seat) else {
+        return false;
+    };
+    snapshot.oya == ctx.our_seat
         && player.tehai.len() == 14
         && player.river.is_empty()
         && player.melds.is_empty()
@@ -957,7 +961,7 @@ fn plan_kan(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx: 
 /// Look up the on-screen position of the action button for `op`, given
 /// the currently-legal actions.
 fn action_button_for(op: MajsoulOpType, ctx: &ActionContext) -> Option<(f64, f64)> {
-    let ops = legal_op_set(ctx.legal_actions, ctx.snapshot, ctx.our_seat);
+    let ops = legal_op_set(ctx.legal_actions, ctx.snapshot?, ctx.our_seat);
     action_button_pos(&ops, op)
 }
 
@@ -1275,7 +1279,7 @@ mod tests {
     ) -> ActionContext<'a> {
         ActionContext {
             action,
-            snapshot,
+            snapshot: Some(snapshot),
             legal_actions: legal,
             our_seat: snapshot.our_seat.unwrap_or(0),
             last_kawa_tile: last_kawa,

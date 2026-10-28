@@ -97,6 +97,7 @@ struct Coordinator {
     selected: Option<WindowProof>,
     primary_health: RunnerHealth,
     standby_health: RunnerHealth,
+    interrupted: bool,
 }
 
 impl Coordinator {
@@ -142,6 +143,7 @@ impl Coordinator {
                 through: 0,
                 reason: "Local standby is starting.".into(),
             },
+            interrupted: false,
         }
     }
 
@@ -169,6 +171,7 @@ impl Coordinator {
     }
 
     async fn observe(&mut self, tracked: TrackedEvent) -> bool {
+        self.interrupted |= matches!(tracked.event, MjaiEvent::InterruptedKyoku { .. });
         let Some(context) = tracked.context else {
             self.monitor.gap(
                 "A real event lacked its tracked identity; no recovery decision can be validated."
@@ -192,6 +195,7 @@ impl Coordinator {
         let boundary = matches!(
             tracked.event,
             MjaiEvent::StartGame { .. }
+                | MjaiEvent::InterruptedKyoku { .. }
                 | MjaiEvent::StartKyoku { .. }
                 | MjaiEvent::EndKyoku
                 | MjaiEvent::EndGame { .. }
@@ -223,6 +227,11 @@ impl Coordinator {
             event,
             through,
             decide: can_decide,
+            interrupted_legal: self.interrupted.then(|| {
+                tracked.window.map_or_else(Vec::new, |window| {
+                    window.interrupted_actions(&tracked.event, self.seat)
+                })
+            }),
         };
         if self.primary.input.send(work.clone()).is_err() || self.standby.input.send(work).is_err()
         {

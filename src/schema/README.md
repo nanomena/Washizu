@@ -17,6 +17,16 @@ here so it isn't owned by a single subsystem.
   and `StartKyoku` carry `num_players: u8` (serde default `4` for
   backward-compat with pre-3p log lines).
 
+`interrupted_kyoku { reason }` is an explicit observation gap on the internal
+event bus, also visible in diagnostics. It is not a synthetic `start_kyoku`
+and is never sent to a bot's MJAI transport. The tracker discards incomplete
+rules state; the coordinator can select only the restricted actions proved by
+subsequent original provider windows. Positioned Primary waits for the next
+real deal and a fresh lifecycle. Unpositioned runners stop until that boundary.
+The recorder drops incomplete history instead of counting it as a full game.
+`ActionContext.snapshot` is absent during this interval: consumers must not
+invent a native rules snapshot for pacing or targets.
+
 `hora` also carries optional public `pai`, `tehai` and `scores`. `pai` is the
 winning tile, retaining red-five identity. `tehai` contains only the revealed
 closed tiles, excluding `pai`; melds are already public. `scores` contains

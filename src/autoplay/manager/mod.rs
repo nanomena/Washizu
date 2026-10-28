@@ -344,7 +344,7 @@ impl AutoplayManager {
         };
         let observation = ActionContext {
             action: &MjaiEvent::None,
-            snapshot: &snapshot,
+            snapshot: Some(&snapshot),
             legal_actions: &[],
             our_seat: seat,
             last_kawa_tile: self.state.last_kawa_tile.as_deref(),
