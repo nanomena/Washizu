@@ -106,7 +106,7 @@ fn hand_score(msg: &Value) -> Result<HandScore> {
         );
         let mut han = 0u32;
         let mut yaku = Vec::new();
-        for pair in pairs.chunks_exact(2) {
+        for pair in pairs.as_chunks::<2>().0 {
             if pair[1] == 0 {
                 continue;
             }
