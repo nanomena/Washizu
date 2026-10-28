@@ -119,7 +119,7 @@ pub struct ActionContext<'a> {
     /// The bot's chosen action (from `BotResponseBus`).
     pub action: &'a MjaiEvent,
     /// Live game state from the riichi engine.
-    pub snapshot: &'a GameStateSnapshot,
+    pub snapshot: Option<&'a GameStateSnapshot>,
     /// Currently legal actions for `our_seat`, sourced from the riichi
     /// engine's `_get_legal_actions_internal`. The platform impl uses
     /// this to:

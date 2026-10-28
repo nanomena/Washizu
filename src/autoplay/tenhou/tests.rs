@@ -36,7 +36,7 @@ fn plan(action: &MjaiEvent, state: &TenhouState, accepted: bool) -> TurnPlan {
     semantic_plan(
         &ActionContext {
             action,
-            snapshot: &snapshot(),
+            snapshot: Some(&snapshot()),
             legal_actions: &[],
             our_seat: 0,
             last_kawa_tile: None,

@@ -114,6 +114,7 @@ impl RecorderState {
 
     fn handle(&mut self, ev: MjaiEvent, store: &HistoryStore, bus: &HistoryBus) {
         match &ev {
+            MjaiEvent::InterruptedKyoku { .. } => self.reset(),
             MjaiEvent::StartGame { game_meta, .. } => {
                 let incoming_game_id = game_meta.as_ref().and_then(|meta| meta.game_id);
                 let reconnecting_same_game = incoming_game_id.is_some()
@@ -546,6 +547,34 @@ mod tests {
         state.handle(start_game_with_id(7), &store, &history_tx);
         state.handle(start_kyoku(), &store, &history_tx);
         state.handle(MjaiEvent::terminated_game(), &store, &history_tx);
+        assert!(store
+            .list(&HistoryFilter::default(), 100, 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn an_observation_gap_cannot_be_filed_as_a_complete_game() {
+        let tmp = TempDir::new().unwrap();
+        let store = HistoryStore::new(tmp.path().to_path_buf()).unwrap();
+        let (history_tx, _): (HistoryBus, _) = broadcast::channel(8);
+        let mut state = RecorderState::new(shared_platform(Platform::Tenhou));
+        for event in [
+            start_game(),
+            start_kyoku(),
+            MjaiEvent::InterruptedKyoku {
+                reason: "captured REINIT".into(),
+            },
+            MjaiEvent::Dahai {
+                actor: 0,
+                pai: "N".into(),
+                tsumogiri: true,
+            },
+            MjaiEvent::EndKyoku,
+            MjaiEvent::end_game(),
+        ] {
+            state.handle(event, &store, &history_tx);
+        }
         assert!(store
             .list(&HistoryFilter::default(), 100, 0)
             .unwrap()

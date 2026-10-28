@@ -353,6 +353,20 @@ impl BotManager {
             return Ok(());
         }
 
+        if matches!(event, MjaiEvent::InterruptedKyoku { .. })
+            && !matches!(self.runner, Some(ManagedBot::Coordinated { .. }))
+        {
+            // This observation marker is never part of a bot's MJAI wire
+            // protocol. Unpositioned runners cannot validate partial context.
+            self.runner = None;
+            self.pending.clear();
+            self.emit_notify(
+                Notification::warn("重连后的本手上下文不完整")
+                    .body("当前 Bot 没有受协调的恢复接口；等待下一手真实发牌后重新启动。"),
+            );
+            return Ok(());
+        }
+
         if let (Some(context), Some(worker)) =
             (context, self.runner.as_ref().and_then(ManagedBot::forecast))
         {

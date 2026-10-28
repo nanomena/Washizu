@@ -15,6 +15,9 @@ pub struct Observation {
     pub event: Option<MjaiEvent>,
     pub through: u64,
     pub decide: bool,
+    /// Restricted actions proved directly by the provider's live window
+    /// while native replay context is incomplete; never a guessed full mask.
+    pub interrupted_legal: Option<Vec<MjaiEvent>>,
 }
 
 pub enum Report {
@@ -43,6 +46,9 @@ impl Drop for PrimaryWorker {
 }
 
 enum PrimaryState {
+    AwaitingHand {
+        reason: String,
+    },
     Ready,
     Recovering {
         retry_at: Instant,
@@ -64,7 +70,7 @@ impl PrimaryState {
                 through,
                 reason: reason.clone(),
             },
-            Self::Blocked { reason, .. } => RunnerHealth::Blocked {
+            Self::Blocked { reason, .. } | Self::AwaitingHand { reason } => RunnerHealth::Blocked {
                 through,
                 reason: reason.clone(),
             },
@@ -84,6 +90,14 @@ impl PrimaryWorker {
             let mut through = 0;
             let mut state = PrimaryState::Ready;
             while let Some(work) = observations.recv().await {
+                if let Some(MjaiEvent::InterruptedKyoku { reason }) = &work.event {
+                    state = PrimaryState::AwaitingHand {
+                        reason: reason.clone(),
+                    };
+                    if let Some(forecast) = &forecast {
+                        forecast.revoke();
+                    }
+                }
                 let replay_attempt = match &state {
                     PrimaryState::Recovering {
                         attempts, retry_at, ..
@@ -100,6 +114,7 @@ impl PrimaryWorker {
                     PrimaryState::Recovering { .. } | PrimaryState::Blocked { .. } => {
                         replay_attempt.is_some()
                     }
+                    PrimaryState::AwaitingHand { .. } => false,
                 };
                 let mut response = None;
                 if can_run {
@@ -286,32 +301,47 @@ impl StandbyWorker {
             let mut engine = LocalStandby::new(seat, players).map_err(|e| format!("{e:#}"));
             let mut through = 0;
             let mut policy_error: Option<String> = None;
+            let mut interrupted = false;
             while let Some(work) = observations.blocking_recv() {
+                interrupted |= matches!(work.event, Some(MjaiEvent::InterruptedKyoku { .. }));
                 let mut legal = vec![];
                 let mut response = None;
-                let result = match &mut engine {
-                    Ok(bot) => work
-                        .event
-                        .as_ref()
-                        .map_or(Ok(()), |event| bot.observe(event))
-                        .map(|_| {
-                            through = work.through;
-                            if work.decide {
-                                legal = bot.legal();
-                                match bot.decide() {
-                                    Ok(reply) => {
-                                        response = Some(reply);
-                                        policy_error = None;
-                                    }
-                                    Err(error) => {
-                                        policy_error =
-                                            Some(format!("Local inference failed: {error:#}"));
+                let result = if interrupted {
+                    through = work.through;
+                    legal = work.interrupted_legal.unwrap_or_default();
+                    response = if work.decide {
+                        LocalStandby::observed_reply(&legal)
+                    } else {
+                        None
+                    };
+                    policy_error = (work.decide && response.is_none())
+                        .then(|| "No safe action is proved by this restored live window.".into());
+                    Ok(())
+                } else {
+                    match &mut engine {
+                        Ok(bot) => work
+                            .event
+                            .as_ref()
+                            .map_or(Ok(()), |event| bot.observe(event))
+                            .map(|_| {
+                                through = work.through;
+                                if work.decide {
+                                    legal = bot.legal();
+                                    match bot.decide() {
+                                        Ok(reply) => {
+                                            response = Some(reply);
+                                            policy_error = None;
+                                        }
+                                        Err(error) => {
+                                            policy_error =
+                                                Some(format!("Local inference failed: {error:#}"));
+                                        }
                                     }
                                 }
-                            }
-                        })
-                        .map_err(|e| format!("{e:#}")),
-                    Err(reason) => Err(reason.clone()),
+                            })
+                            .map_err(|e| format!("{e:#}")),
+                        Err(reason) => Err(reason.clone()),
+                    }
                 };
                 let health = match result {
                     Ok(()) => match &policy_error {
@@ -423,6 +453,7 @@ mod tests {
                     decide: matches!(event, MjaiEvent::Tsumo { .. }),
                     event: Some(event),
                     through: seq,
+                    interrupted_legal: None,
                 })
                 .unwrap();
             let Report::Primary {
@@ -522,6 +553,7 @@ mod tests {
                     context: context(seq),
                     event: Some(event),
                     through: seq,
+                    interrupted_legal: None,
                     decide,
                 })
                 .unwrap();

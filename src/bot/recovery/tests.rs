@@ -362,11 +362,12 @@ impl Rig {
 
     fn captured(&mut self, captured: crate::event_bus::CapturedEvent) {
         self.tracker.handle(&captured.event).unwrap();
-        self.publish(
-            captured.event,
-            self.tracker.our_seat_can_act(),
-            captured.window,
-        );
+        let can_act = if self.tracker.interrupted() {
+            Some(captured.window.is_some())
+        } else {
+            self.tracker.our_seat_can_act()
+        };
+        self.publish(captured.event, can_act, captured.window);
     }
 
     fn publish(&mut self, event: MjaiEvent, can_act: Option<bool>, window: Option<InputWindow>) {
@@ -405,6 +406,92 @@ impl Rig {
         .await
         .unwrap();
     }
+}
+
+#[tokio::test]
+async fn reinit_uses_one_restricted_standby_and_never_replays_the_missing_hand_to_primary() {
+    use crate::bridge::{Bridge, Direction, TenhouBridge};
+    let primary = Primary::new(None);
+    let calls = primary.calls.clone();
+    let mut rig = Rig::new(primary);
+    let mut bridge =
+        TenhouBridge::new(None, None).with_shared_state(Some(rig.clock.tenhou_state.clone()));
+    for frame in [
+        r#"{"tag":"GO","type":"1","lobby":"0"}"#,
+        r#"{"tag":"REINIT","seed":"0,0,0,3,0,23","ten":"250,250,250,250","oya":"0","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96","kawa0":"1,106,74","kawa1":"79,122,3","kawa2":"72,100,9","kawa3":"107,78,67"}"#,
+        r#"{"tag":"T120"}"#,
+    ] {
+        for captured in bridge
+            .parse(Direction::Down, frame.as_bytes())
+            .into_captured()
+        {
+            rig.captured(captured);
+        }
+    }
+    let response = rig.reply().await;
+    let control = response.control().unwrap().unwrap();
+    assert_eq!(control.source, DecisionSource::NativeStandby);
+    assert!(matches!(control.primary, RunnerHealth::Blocked { .. }));
+    assert_eq!(
+        response.action,
+        MjaiEvent::Dahai {
+            actor: 0,
+            pai: "N".into(),
+            tsumogiri: true
+        }
+    );
+    assert!(
+        rig.tracker.snapshot().is_none(),
+        "missing chronology cannot become a complete rules snapshot"
+    );
+    assert_eq!(rig.tracker.num_players(), Some(4));
+    assert!(rig.monitor.snapshot().sync_error.is_none());
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|e| matches!(e, MjaiEvent::StartGame { .. })),
+        "Primary receives no gap marker or fabricated/current-hand events"
+    );
+    let request = response.request.unwrap();
+    for captured in bridge
+        .parse(Direction::Down, br#"{"tag":"D120"}"#)
+        .into_captured()
+    {
+        rig.captured(captured);
+    }
+    assert!(
+        !request.window.unwrap().proof().is_current(&rig.clock),
+        "actual discard retires the old permission"
+    );
+    rig.handle.feed(rig.last.clone().unwrap()).unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(
+        rig.output.try_recv().is_err(),
+        "duplicate echo cannot produce another decision"
+    );
+    let mut next = Rig::new(Primary::new(None)); // BotManager starts a fresh owner at this real boundary
+    bridge = bridge.with_shared_state(Some(next.clock.tenhou_state.clone()));
+    let parsed = bridge.parse(Direction::Down, br#"{"tag":"INIT","seed":"1,0,0,1,2,8","ten":"250,250,250,250","oya":"1","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96"}"#);
+    assert!(matches!(
+        parsed.events.as_slice(),
+        [MjaiEvent::StartGame { .. }, MjaiEvent::StartKyoku { .. }]
+    ));
+    for captured in parsed.into_captured() {
+        next.captured(captured);
+    }
+    for captured in bridge
+        .parse(Direction::Down, br#"{"tag":"T120"}"#)
+        .into_captured()
+    {
+        next.captured(captured);
+    }
+    assert_eq!(
+        next.reply().await.control().unwrap().unwrap().source,
+        DecisionSource::Primary
+    );
 }
 
 #[tokio::test]

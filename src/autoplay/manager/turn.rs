@@ -43,10 +43,11 @@ async fn facts(
     };
     let cfg = cfg.read().await;
     let snapshot = monitor.snapshot();
+    let input = ctx.input_watch.ticket();
     let command = ticket.is_some_and(|ticket| match required {
-        InputRequirement::Any => ctx.input_watch.sent_since(ticket),
-        InputRequirement::NonDiscard => ctx.input_watch.non_discard_since(ticket),
-        InputRequirement::Declaration => ctx.input_watch.reach_since(ticket),
+        InputRequirement::Any => input.sent_since(ticket),
+        InputRequirement::NonDiscard => input.non_discard_since(ticket),
+        InputRequirement::Declaration => input.reach_since(ticket),
     });
     Facts {
         context: (snapshot.sync_error.is_none() && !snapshot.round_ended && !snapshot.game_ended)
@@ -55,7 +56,7 @@ async fn facts(
         window: WindowProof::capture(ctx, platform).map(window_identity),
         enabled: cfg.autoplay.enabled && cfg.platform.kind == platform,
         manual: crate::autoplay::cdp_input::user_active(),
-        input: ctx.input_watch.ticket(),
+        input,
         command,
         latest: snapshot.events.back().map(|event| {
             (
@@ -136,7 +137,7 @@ impl AutoplayManager {
         let now = Instant::now();
         let context = PacingContext {
             action,
-            snapshot: &decision.snapshot,
+            snapshot: decision.snapshot.as_ref(),
             legal_actions: &decision.legal_actions,
             our_seat: decision.our_seat,
             kind: kind(action),

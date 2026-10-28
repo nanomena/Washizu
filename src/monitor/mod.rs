@@ -305,7 +305,10 @@ impl MonitorHandle {
                 s.service_error = None;
                 s.facts.clear();
             }
-            if matches!(event, MjaiEvent::StartKyoku { .. }) {
+            if matches!(
+                event,
+                MjaiEvent::StartKyoku { .. } | MjaiEvent::InterruptedKyoku { .. }
+            ) {
                 expire(&mut s.decision);
                 s.previous_decision = s.decision.take().or(s.previous_decision.take());
                 s.previous_result = s.result.take().or(s.previous_result.take());

@@ -35,6 +35,18 @@ pub enum InputWindow {
 }
 
 impl InputWindow {
+    /// A deliberately restricted set proved without replaying missing history.
+    /// The provider adapter normalizes real observations; it selects no source.
+    pub fn interrupted_actions(
+        self,
+        event: &crate::schema::MjaiEvent,
+        seat: u8,
+    ) -> Vec<crate::schema::MjaiEvent> {
+        match self {
+            Self::Tenhou(window) => crate::bridge::tenhou::observed_actions(event, seat, window),
+            Self::Majsoul(_) => Vec::new(),
+        }
+    }
     /// Known base-clock fact from this original window, never a newer slot.
     pub fn fixed_ms(self) -> Option<u32> {
         match self {

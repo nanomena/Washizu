@@ -31,7 +31,7 @@ impl RiichiCityAutoplay {
         // `build::encode_action_with`). The snapshot's `drawn_tile` — not
         // `last_self_tsumo`, which stays stale through a post-call
         // discard — says whether a draw is actually in the rack now.
-        let player = ctx.snapshot.players.get(ctx.our_seat as usize);
+        let player = ctx.snapshot?.players.get(ctx.our_seat as usize);
         let hand = player.map(|p| p.tehai.clone());
         let drawn = player.and_then(|p| p.drawn_tile.clone());
         build::encode_action_with(
@@ -103,7 +103,7 @@ mod tests {
         fn ctx<'a>(&'a self, action: &'a MjaiEvent) -> ActionContext<'a> {
             ActionContext {
                 action,
-                snapshot: &self.snapshot,
+                snapshot: Some(&self.snapshot),
                 legal_actions: &[],
                 our_seat: 0,
                 last_kawa_tile: None,

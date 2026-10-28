@@ -69,6 +69,7 @@ pub struct GameTracker {
     rule: GameRule,
     /// The bot's own seat, captured from `start_game.id`.
     our_seat: Option<u8>,
+    interrupted_players: Option<u8>,
     /// Total events fed since process start. Useful for "is the bridge
     /// alive?" checks; not reset on game boundaries.
     pub events_seen: u64,
@@ -80,6 +81,7 @@ impl GameTracker {
             state: None,
             rule: GameRule::default_tenhou(),
             our_seat: None,
+            interrupted_players: None,
             events_seen: 0,
         }
     }
@@ -90,10 +92,19 @@ impl GameTracker {
     pub fn handle(&mut self, ev: &AkagiEvent) -> Result<()> {
         self.events_seen += 1;
 
+        if matches!(ev, AkagiEvent::InterruptedKyoku { .. }) {
+            self.interrupted_players = self.num_players();
+            // The missing river timing, furiten and concealed draws cannot
+            // be imported as native rules state. Retain only real identity.
+            self.state = None;
+            return Ok(());
+        }
+
         if let AkagiEvent::StartGame {
             id, num_players, ..
         } = ev
         {
+            self.interrupted_players = None;
             // Fresh game → fresh state. Constructor seeds round 0 with the
             // mode-appropriate starting score (25k for 4p, 35k for 3p).
             self.state = Some(match *num_players {
@@ -232,7 +243,14 @@ impl GameTracker {
 
     /// `Some(num_players)` if a game is in progress.
     pub fn num_players(&self) -> Option<u8> {
-        self.state.as_ref().map(|tg| tg.num_players())
+        self.state
+            .as_ref()
+            .map(|tg| tg.num_players())
+            .or(self.interrupted_players)
+    }
+
+    pub(crate) fn interrupted(&self) -> bool {
+        self.interrupted_players.is_some()
     }
 
     /// Borrow the live engine state. Returns `None` for non-4p games or no
@@ -461,7 +479,12 @@ async fn run(
                     let context = monitor
                         .as_ref()
                         .map(|m| m.game_event(&ev, t.snapshot(), error));
-                    (t.our_seat_can_act(), context)
+                    let can_act = if t.interrupted() {
+                        Some(captured.window.is_some())
+                    } else {
+                        t.our_seat_can_act()
+                    };
+                    (can_act, context)
                 };
                 if let Some(p) = &post {
                     // Receiver may have lagged or no-one subscribed yet — ignore.

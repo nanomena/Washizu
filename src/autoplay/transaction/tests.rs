@@ -643,7 +643,119 @@ fn wrong_or_skipped_declaration_echo_cannot_rebind_context_window_or_hand() {
             3 => h.observation.continuation.as_mut().unwrap().hand.reverse(),
             _ => h.facts.context.as_mut().unwrap().round += 1,
         }
+        if matches!(change, 2 | 3) {
+            assert!(matches!(h.next(), Effect::Observe));
+            h.now += Duration::from_millis(101);
+        }
         assert!(matches!(h.outcome(), Outcome::Cancelled(_)));
+    }
+}
+
+#[test]
+fn declaration_echo_before_browser_probe_waits_without_spending_the_discard_or_resetting_time() {
+    for site in ["dom", "canvas"] {
+        for browser_catches_up in [true, false] {
+            let action = reach();
+            let mut h = Harness::new(
+                site,
+                action.clone(),
+                vec![
+                    press(
+                        PressRole::Declaration,
+                        &action,
+                        Confirmation::DeclarationEcho,
+                    ),
+                    press(PressRole::Discard, &action, Confirmation::ClientCommand),
+                ],
+            );
+            let old_permit = h.dispatch();
+            h.command(InputKind::Reach);
+            let echoed = DecisionContext {
+                event_seq: 11,
+                ..h.binding.context
+            };
+            h.facts.context = Some(echoed);
+            h.facts.window = Some("declaring-discard".into());
+            h.facts.latest = Some((
+                echoed,
+                MjaiEvent::Reach {
+                    actor: 0,
+                    pai: None,
+                    tsumogiri: None,
+                },
+            ));
+            h.observation.ready = false;
+            h.observation.target = None;
+            assert!(matches!(h.next(), Effect::Observe));
+            assert_eq!(h.controller.phase(), Some(Phase::WaitingDeclaration));
+            assert!(!h.controller.consume(
+                old_permit,
+                &h.facts,
+                &h.observation,
+                (125., 530.),
+                100,
+                h.now
+            ));
+            h.now += Duration::from_millis(60);
+            if browser_catches_up {
+                h.observation.continuation = Some(DeclarationFacts {
+                    window: "declaring-discard".into(),
+                    hand: vec!["copy-16:red-5m".into(), "copy-17:plain-5m".into()],
+                });
+                assert!(matches!(h.next(), Effect::Observe));
+                assert_eq!(h.controller.intent().unwrap().role, PressRole::Discard);
+                assert_eq!(h.controller.input_ticket(), Some(h.facts.input));
+                assert_eq!(h.controller.phase(), Some(Phase::WaitingReady));
+            } else {
+                assert!(matches!(h.next(), Effect::Observe));
+                h.now += Duration::from_millis(41);
+                assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Unconfirmed));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_discard_or_other_command_during_declaration_can_never_be_consumed_as_the_followup() {
+    for kind in [InputKind::Discard, InputKind::Other, InputKind::Reach] {
+        let action = reach();
+        let mut h = Harness::new(
+            "either",
+            action.clone(),
+            vec![
+                press(
+                    PressRole::Declaration,
+                    &action,
+                    Confirmation::DeclarationEcho,
+                ),
+                press(PressRole::Discard, &action, Confirmation::ClientCommand),
+            ],
+        );
+        h.dispatch();
+        h.command(InputKind::Reach);
+        h.command(kind); // two declarations are also superseding input
+        let echoed = DecisionContext {
+            event_seq: 11,
+            ..h.binding.context
+        };
+        h.facts.context = Some(echoed);
+        h.facts.window = Some("declaring-discard".into());
+        h.facts.latest = Some((
+            echoed,
+            MjaiEvent::Reach {
+                actor: 0,
+                pai: None,
+                tsumogiri: None,
+            },
+        ));
+        h.observation.continuation = Some(DeclarationFacts {
+            window: "declaring-discard".into(),
+            hand: h.observation.target.as_ref().unwrap().identity.hand.clone(),
+        });
+        assert!(matches!(h.next(), Effect::Observe));
+        assert_eq!(h.controller.phase(), Some(Phase::WaitingDeclaration));
+        h.now += Duration::from_millis(101);
+        assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Unconfirmed));
     }
 }
 

@@ -68,7 +68,9 @@ impl AutoplayManager {
                 self.toggles.reset();
                 self.ui_transition("result", |ui| ui.result(confirmed, ours, Instant::now()));
             }
-            MjaiEvent::StartKyoku { .. } | MjaiEvent::EndKyoku => {
+            MjaiEvent::StartKyoku { .. }
+            | MjaiEvent::EndKyoku
+            | MjaiEvent::InterruptedKyoku { .. } => {
                 if matches!(ev, MjaiEvent::StartKyoku { .. }) {
                     self.toggles.reset();
                     let window = self

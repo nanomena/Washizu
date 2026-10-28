@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 /// readiness, and uses the same clock origin for inference and input costs.
 pub struct PacingContext<'a> {
     pub action: &'a MjaiEvent,
-    pub snapshot: &'a GameStateSnapshot,
+    pub snapshot: Option<&'a GameStateSnapshot>,
     pub legal_actions: &'a [Action],
     pub our_seat: u8,
     pub kind: DecisionKind,
@@ -102,7 +102,9 @@ impl<'a> PacingPolicy<'a> {
         if legacy {
             model.distribution = DelayDistribution::Uniform;
         }
-        let player = ctx.snapshot.players.iter().find(|p| p.seat == ctx.our_seat);
+        let player = ctx
+            .snapshot
+            .and_then(|s| s.players.iter().find(|p| p.seat == ctx.our_seat));
         let (is_tsumogiri, tile_class) = match (ctx.kind, ctx.action) {
             (DecisionKind::Dahai, MjaiEvent::Dahai { tsumogiri, pai, .. }) => {
                 (*tsumogiri, TileClass::of_mjai(pai))
@@ -123,11 +125,11 @@ impl<'a> PacingPolicy<'a> {
                 .iter()
                 .any(|a| a.action_type == ActionType::Riichi),
             in_riichi: ctx.in_riichi,
-            opponent_riichi: ctx
-                .snapshot
-                .players
-                .iter()
-                .any(|p| p.seat != ctx.our_seat && p.riichi_declared),
+            opponent_riichi: ctx.snapshot.is_some_and(|s| {
+                s.players
+                    .iter()
+                    .any(|p| p.seat != ctx.our_seat && p.riichi_declared)
+            }),
             tile_class,
             junme: player.map_or(0, |p| p.river.len() as u32 + 1),
             legal_action_count: ctx.legal_actions.len(),
@@ -255,7 +257,7 @@ mod tests {
     ) -> PacingContext<'a> {
         PacingContext {
             action,
-            snapshot,
+            snapshot: Some(snapshot),
             legal_actions: &[],
             our_seat: 0,
             kind: DecisionKind::Dahai,
@@ -276,6 +278,29 @@ mod tests {
     }
     fn rng() -> rand::rngs::StdRng {
         rand::rngs::StdRng::seed_from_u64(7)
+    }
+
+    #[test]
+    fn a_selected_recovery_action_needs_no_invented_rules_snapshot_to_obey_its_clock() {
+        let action = MjaiEvent::Dahai {
+            actor: 0,
+            pai: "N".into(),
+            tsumogiri: true,
+        };
+        let snapshot = snapshot();
+        let origin = Instant::now();
+        let mut ctx = context(&action, &snapshot, origin);
+        ctx.snapshot = None;
+        ctx.earliest_press_at = Some(origin);
+        let cfg = cfg();
+        let model = model();
+        let plan = PacingPolicy::new(&cfg, &model, None)
+            .decide(&ctx, &mut rng())
+            .unwrap();
+        assert!(
+            plan.start_at + Duration::from_millis(u64::from(ctx.click_overhead_ms))
+                <= origin + Duration::from_millis(5000)
+        );
     }
 
     #[test]

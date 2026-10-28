@@ -74,9 +74,7 @@ pub struct InputWatch {
     /// Real new-game/round/restore boundaries, available even while the UI
     /// executor is awaiting CDP and its mjai receiver has not drained yet.
     ui_table: AtomicU64,
-    sent: AtomicU64,
-    reach: AtomicU64,
-    non_discard: AtomicU64,
+    commands: Mutex<InputTicket>,
     /// How many hands' results the client has confirmed (`confirmNewRound`):
     /// one more means the result is gone from the screen.
     confirmed: AtomicU64,
@@ -86,11 +84,32 @@ pub struct InputWatch {
 }
 
 /// A snapshot of the counts, taken before a click.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InputTicket {
     sent: u64,
     reach: u64,
     non_discard: u64,
+}
+
+impl InputTicket {
+    /// The two-press declaration may acknowledge exactly its declaration,
+    /// or see the server echo before uplink capture. Any intervening discard
+    /// or other command has already superseded that continuation.
+    pub fn declaration_compatible(self, before: Self) -> bool {
+        let sent = self.sent.checked_sub(before.sent);
+        matches!(sent, Some(0 | 1))
+            && sent == self.reach.checked_sub(before.reach)
+            && sent == self.non_discard.checked_sub(before.non_discard)
+    }
+    pub fn sent_since(self, before: Self) -> bool {
+        self.sent != before.sent
+    }
+    pub fn reach_since(self, before: Self) -> bool {
+        self.reach != before.reach
+    }
+    pub fn non_discard_since(self, before: Self) -> bool {
+        self.non_discard != before.non_discard
+    }
 }
 
 impl InputWatch {
@@ -114,12 +133,16 @@ impl InputWatch {
 
     /// The bridge saw the client send an input command.
     pub fn note_sent(&self, kind: InputKind) {
-        self.sent.fetch_add(1, Ordering::Relaxed);
+        let mut commands = self
+            .commands
+            .lock()
+            .expect("input command observation poisoned");
+        commands.sent += 1;
         if kind == InputKind::Reach {
-            self.reach.fetch_add(1, Ordering::Relaxed);
+            commands.reach += 1;
         }
         if kind != InputKind::Discard {
-            self.non_discard.fetch_add(1, Ordering::Relaxed);
+            commands.non_discard += 1;
         }
     }
 
@@ -135,16 +158,15 @@ impl InputWatch {
 
     /// Snapshot to compare against later.
     pub fn ticket(&self) -> InputTicket {
-        InputTicket {
-            sent: self.sent.load(Ordering::Relaxed),
-            reach: self.reach.load(Ordering::Relaxed),
-            non_discard: self.non_discard.load(Ordering::Relaxed),
-        }
+        *self
+            .commands
+            .lock()
+            .expect("input command observation poisoned")
     }
 
     /// Whether any input command has been sent since `ticket` was taken.
     pub fn sent_since(&self, ticket: InputTicket) -> bool {
-        self.sent.load(Ordering::Relaxed) != ticket.sent
+        self.ticket().sent_since(ticket)
     }
 
     /// Whether an input command *other than a plain discard* has been sent
@@ -152,12 +174,12 @@ impl InputWatch {
     /// clicks were all action buttons, where a discard can only mean the
     /// client's own turn-timeout tsumogiri.
     pub fn non_discard_since(&self, ticket: InputTicket) -> bool {
-        self.non_discard.load(Ordering::Relaxed) != ticket.non_discard
+        self.ticket().non_discard_since(ticket)
     }
 
     /// Whether a *riichi* input has been sent since `ticket` was taken.
     pub fn reach_since(&self, ticket: InputTicket) -> bool {
-        self.reach.load(Ordering::Relaxed) != ticket.reach
+        self.ticket().reach_since(ticket)
     }
 }
 
@@ -170,6 +192,24 @@ pub type SharedInputWatch = Arc<InputWatch>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_kind_and_total_are_one_observation_during_concurrent_capture() {
+        let watch = Arc::new(InputWatch::default());
+        let writer = watch.clone();
+        let capture = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                writer.note_sent(InputKind::Reach);
+            }
+        });
+        for _ in 0..10_000 {
+            let ticket = watch.ticket();
+            assert_eq!(ticket.sent, ticket.reach);
+            assert_eq!(ticket.sent, ticket.non_discard);
+        }
+        capture.join().unwrap();
+        assert_eq!(watch.ticket().sent, 10_000);
+    }
 
     #[test]
     fn a_ticket_only_moves_when_input_is_sent() {

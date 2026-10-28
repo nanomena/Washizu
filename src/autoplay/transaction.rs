@@ -329,7 +329,12 @@ impl TurnController {
                 // This observation answered the declaration intent. Resolve
                 // the next physical target only with the next intent.
                 return Effect::Observe;
-            } else if facts.context == Some(run.binding.context) {
+            } else if facts.context == Some(run.binding.context) || run.declaration_echo(facts) {
+                // Capture, tracker and the read-only browser probe advance
+                // independently. The exact own echo can arrive after this
+                // iteration's probe. Keep waiting for its fresh hand/window
+                // proof within the original verification budget; never press
+                // the old target or restart the clock.
                 if facts.input != run.binding.input && !facts.command {
                     run.finish(Outcome::Cancelled(CancelReason::Context));
                     return run.effect();
@@ -655,15 +660,13 @@ impl Run {
         else {
             return false;
         };
-        let Some((context, action)) = &facts.latest else {
+        let Some((context, _)) = &facts.latest else {
             return false;
         };
-        let exact = same_round(*context, self.original)
-            && Some(context.event_seq) == self.original.event_seq.checked_add(1)
-            && facts.context == Some(*context)
+        let exact = self.declaration_echo(facts)
+            && facts.input.declaration_compatible(self.binding.input)
             && facts.window.as_deref() == Some(declaration.window.as_str())
             && declaration.window != self.binding.window
-            && matches!((&self.action, action), (MjaiEvent::Reach { actor: selected, .. }, MjaiEvent::Reach { actor, .. }) if selected == actor)
             && self.hand.as_ref() == Some(&declaration.hand);
         if exact {
             self.declaration = true;
@@ -672,6 +675,16 @@ impl Run {
             self.binding.input = facts.input;
         }
         exact
+    }
+
+    fn declaration_echo(&self, facts: &Facts) -> bool {
+        let Some((context, action)) = &facts.latest else {
+            return false;
+        };
+        same_round(*context, self.original)
+            && Some(context.event_seq) == self.original.event_seq.checked_add(1)
+            && facts.context == Some(*context)
+            && matches!((&self.action, action), (MjaiEvent::Reach { actor: selected, .. }, MjaiEvent::Reach { actor, .. }) if selected == actor)
     }
 }
 
