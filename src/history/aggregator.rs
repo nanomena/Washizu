@@ -258,6 +258,9 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
                 ..
             } => {
                 hand_result = true;
+                if our_seat == Some(*actor) {
+                    stats.agari += 1;
+                }
                 // How our wins were made, whether or not the points are known.
                 if let (true, Some(score)) = (our_seat == Some(*actor), score) {
                     let ids: std::collections::BTreeSet<_> = score
@@ -296,7 +299,6 @@ pub fn aggregate(input: AggregateInput<'_>) -> Option<GameRecord> {
                     let win_jun = (jun + i64::from(actor == target)).max(1);
                     let point = i64::from(deltas.get(me as usize).copied().unwrap_or(0))
                         - i64::from(riichi_accepted) * 1000;
-                    stats.agari += 1;
                     stats.agari_jun += win_jun;
                     if cur_oya == me {
                         stats.agari_as_oya += 1;
@@ -691,6 +693,30 @@ mod tests {
         let mut missing = events;
         missing.remove(3);
         assert!(!record(missing).stats_complete);
+    }
+
+    #[test]
+    fn known_win_with_missing_payment_retains_yaku_but_excludes_detailed_sample() {
+        let mut win = hora(0, 1, vec![8000, -8000, 0, 0]);
+        if let MjaiEvent::Hora { deltas, score, .. } = &mut win {
+            *deltas = None;
+            *score = Some(crate::schema::mjai::HandScore {
+                yaku: vec![(1, 1)],
+                han: 1,
+                fu: 30,
+                yakuman: false,
+            });
+        }
+        let rec = record(vec![
+            start_game_4p(0),
+            start_kyoku("E", 0, vec![25000; 4]),
+            win,
+            MjaiEvent::EndKyoku,
+            MjaiEvent::end_game(),
+        ]);
+        assert!(!rec.stats_complete);
+        assert_eq!(rec.stats.agari, 1);
+        assert_eq!(rec.yaku_wins, Some(1));
     }
 
     /// `match_info` and where we stood as the game began ride the

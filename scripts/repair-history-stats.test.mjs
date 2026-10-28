@@ -33,6 +33,10 @@ test('repair fixes declaration and tsumo turns while preserving identity and exa
   assert.deepEqual(r.match_info,record.match_info);
   assert.equal(repairRecord(r,[],new Map()).changed,false);
   assert.equal(repairRecord(record,[start,win],metadata).record.stats_complete,false);
+  const missingPayment=repairRecord({...record,stats:{...record.stats,agari:0}},[start,{...win,deltas:null},end],metadata).record;
+  assert.equal(missingPayment.stats_complete,false);
+  assert.equal(missingPayment.stats.agari,1);
+  assert.equal(missingPayment.yaku_wins,1);
 });
 test('partial metadata preserves legacy aggregates without inventing their sample count',()=>{
   const old={...record,yaku:{1:1,8:1}};

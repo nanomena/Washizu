@@ -174,6 +174,7 @@ export function repairRecord(record, events, metadata) {
     }
   }
   if (open || ownWins !== (record.stats.agari ?? 0) || !(record.stats.round > 0)) complete = false;
+  stats.agari=ownWins;
   stats.riichi_point += newRiichiLoss - oldRiichiLoss;
   stats.fuuro_point += newCallLoss - oldCallLoss;
   let yaku_wins = null, recoveredYaku = record.yaku ?? {};
