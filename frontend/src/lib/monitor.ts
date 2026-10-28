@@ -83,7 +83,7 @@ export type DecisionControl = {
 export type MonitorSnapshot = {
   control: DecisionControl | null
   forecast: ForecastStatus
-  revision: number; context: DecisionContext; names: string[]; red_fives: boolean | null
+  revision: number; history_revision: number; context: DecisionContext; names: string[]; red_fives: boolean | null
   game: GameStateSnapshot | null; view: MahgenView | null; round_ended: boolean; game_ended: boolean
   capture: CaptureStatus; bot: BotStatus; service: string; service_error: string | null; server: ServerStatus
   sync_error: string | null

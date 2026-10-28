@@ -47,7 +47,7 @@ import { Monitor } from './Monitor'
 function state(): MonitorSnapshot {
   const context = { game: 1, round: 1, event_seq: 10 }
   return {
-    control: null, forecast: { owner: 0, state: 'disabled' }, revision: 1, context, names: [], red_fives: true,
+    control: null, forecast: { owner: 0, state: 'disabled' }, revision: 1, history_revision: 0, context, names: [], red_fives: true,
     game: null, view: null, round_ended: false, game_ended: false,
     capture: { state: 'running', descriptor: 'test' },
     bot: { state: 'ready', bot: 'demo', actor_id: 0 }, service: 'connected', service_error: null, server: { state: 'none' }, sync_error: null, sync_fault: null,
@@ -592,27 +592,34 @@ describe('the record', () => {
     expect(screen.getByText('雀杰三')).toBeTruthy()
   })
 
-  it('changes where we stand, the points and the placings together, when the platform says where we stand', async () => {
+  it('refreshes committed results immediately while the native rank report remains unchanged', async () => {
     fixture.snapshot!.account = { platform: 'majsoul', level: { id: 10303, score: 1274 }, level3: null, at: '2026-10-18T21:00:00Z' }
     const { rerender } = render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '统计' }))
     expect(await screen.findByText('2 场的段位分变化')).toBeTruthy()
     const place = (n: number) => screen.getByText(`${n} 位`).closest('li')!.querySelector('b')!.textContent
     expect(place(1)).toBe('1')
-    // A game ends and is on file at once; the panel waits for the platform's word.
-    fixture.history = [...fixture.history, game(1, 105, 9, { round: 9, agari: 2, houjuu: 0, riichi: 1 })]
+    // EndGame can reach the tracker before the recorder commits its record.
     fixture.snapshot = { ...fixture.snapshot!, revision: 2, game_ended: true, context: { ...fixture.snapshot!.context, game: 2 } }
     rerender(<Monitor />)
-    await new Promise(done => setTimeout(done, 1700))
     expect(screen.getByText('2 场的段位分变化')).toBeTruthy()
     expect(place(1)).toBe('1')
     expect(screen.getByText('雀杰三').closest('.mstat-ladder')!.textContent).toContain('1,274')
-    // Some twenty seconds later it says where we stand: all of it changes at once.
+    // Persistence, with the same account timestamp and game identity, refreshes statistics.
+    fixture.history = [...fixture.history, game(1, 105, 9, { round: 9, agari: 2, houjuu: 0, riichi: 1 })]
+    fixture.snapshot = { ...fixture.snapshot!, history_revision: 1 }
+    rerender(<Monitor />)
+    expect(await screen.findByText('3 场的段位分变化')).toBeTruthy()
+    expect(place(1)).toBe('2')
+    expect(screen.getByText('雀杰三').closest('.mstat-ladder')!.textContent).toContain('1,274')
+    const reads = fixture.calls.filter(([cmd]) => cmd === 'get_history').length
+    // The platform's later report updates the rank independently, without another history query.
     fixture.snapshot = { ...fixture.snapshot!, revision: 3, account: { platform: 'majsoul', level: { id: 10303, score: 1379 }, level3: null, at: '2026-10-18T21:00:20Z' } }
     rerender(<Monitor />)
     expect(await screen.findByText('3 场的段位分变化')).toBeTruthy()
     expect(place(1)).toBe('2')
     expect(screen.getByText('雀杰三').closest('.mstat-ladder')!.textContent).toContain('1,379')
+    expect(fixture.calls.filter(([cmd]) => cmd === 'get_history')).toHaveLength(reads)
   })
 
   it('says nothing of a rank until the platform has', async () => {
