@@ -554,7 +554,9 @@ fn mirror_history(
     tokio::spawn(async move {
         loop {
             match records.recv().await {
-                Ok(schema::HistoryEvent::Recorded { .. })
+                Ok(
+                    schema::HistoryEvent::Recorded { .. } | schema::HistoryEvent::Deleted { .. },
+                )
                 | Err(broadcast::error::RecvError::Lagged(_)) => {
                     monitor.history_changed();
                 }
