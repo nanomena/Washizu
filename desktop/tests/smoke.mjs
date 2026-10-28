@@ -49,6 +49,8 @@ shell.on('exit', (code, signal) => { exited = signal ?? code })
 
 /** @type {string[]} */
 const failures = []
+class DevToolsTimeout extends Error {}
+let closeDevTools = () => {}
 const check = (/** @type {string} */ name, /** @type {unknown} */ ok, detail = '') => {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`)
   if (!ok) failures.push(name)
@@ -64,9 +66,10 @@ try {
   if (!version) throw new Error(`The shell did not open its DevTools port (exit: ${exited}).\n${said.slice(-2000)}`)
 
   const socket = new WebSocket(version.webSocketDebuggerUrl)
+  closeDevTools = () => socket.close()
   await new Promise((done, fail) => { socket.onopen = done; socket.onerror = () => fail(new Error('DevTools socket')) })
   let next = 0
-  /** @type {Map<number, { done: (value: any) => void, fail: (reason: Error) => void }>} */
+  /** @type {Map<number, { done: (value: any) => void, fail: (reason: Error) => void, timer: NodeJS.Timeout }>} */
   const waiting = new Map()
   /** @type {any[]} */
   const events = []
@@ -75,13 +78,19 @@ try {
     const asked = waiting.get(data.id)
     if (asked) {
       waiting.delete(data.id)
+      clearTimeout(asked.timer)
       if (data.error) asked.fail(new Error(JSON.stringify(data.error)))
       else asked.done(data.result)
     } else if (data.method) events.push(data)
   }
+  socket.onclose = () => {
+    for (const asked of waiting.values()) { clearTimeout(asked.timer); asked.fail(new Error('DevTools closed')) }
+    waiting.clear()
+  }
   const send = (/** @type {string} */ method, params = {}, /** @type {string | undefined} */ sessionId = undefined) => new Promise((done, fail) => {
     const id = ++next
-    waiting.set(id, { done, fail })
+    const timer = setTimeout(() => { waiting.delete(id); fail(new DevToolsTimeout(`DevTools timeout: ${method}`)) }, 15_000)
+    waiting.set(id, { done, fail, timer })
     socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
   })
   const pages = async () => (await send('Target.getTargets')).targetInfos.filter((/** @type {any} */ t) => t.type === 'page')
@@ -113,7 +122,7 @@ try {
       named: [...document.querySelectorAll('.mt .mt-ghost')].map(tile => tile.textContent).filter(Boolean),
       stage: (r => r && [Math.round(r.width), Math.round(r.height)])(document.querySelector('.mon-stage')?.getBoundingClientRect()),
       refused: await window.akagi.invoke('no_such_command').catch(error => String(error)),
-    }))()`).catch(error => ({ error: String(error) }))
+    }))()`).catch(error => { if (error instanceof DevToolsTimeout) throw error; return { error: String(error) } })
     if (seen.capture === 'running' && seen.drawn > 0 && seen.named?.length === 0) break
     await sleep(200)
   }
@@ -158,6 +167,7 @@ try {
 } catch (error) {
   check('the smoke test ran to its end', false, String(error instanceof Error ? error.stack : error))
 } finally {
+  closeDevTools()
   shell.kill()
   for (let i = 0; i < 50 && exited === null; i++) await sleep(100)
   if (exited === null) shell.kill('SIGKILL')
