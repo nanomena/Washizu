@@ -104,25 +104,25 @@ export function Statistics({ game, account, platform }: { game: string; account:
       <ol className="mstat-places">
         {t.places.map((n, i) => <li key={i}>
           <span>{tr('{0} 位', i + 1)}</span>
-          <i style={{ '--share': t.games > 0 ? n / t.games : 0 } as CSSProperties} />
+          <i style={{ '--share': t.placementGames > 0 ? n / t.placementGames : 0 } as CSSProperties} />
           <b>{n}</b>
-          <small>{share(n, t.games)}</small>
+          <small>{share(n, t.placementGames)}</small>
         </li>)}
       </ol>
     </section>
 
     <section className="mstat mstat-figures">
-      <header className="msec-head"><h3>{tr('数据')}<span>{tr('{0} 局', t.hands)}</span></h3></header>
+      <header className="msec-head"><h3>{tr('数据')}</h3><span title={t.detailGames < t.games ? tr('详细统计仅使用 {0}/{1} 场完整记录', t.detailGames, t.games) : undefined}>{t.detailGames < t.games ? tr('{0} 局 · {1}/{2} 场', t.hands, t.detailGames, t.games) : tr('{0} 局', t.hands)}</span></header>
       <dl className="mstat-scroll">
         {figures.map(f => <div key={f.name} className="mfact" title={f.note}><dt>{f.name}</dt><dd>{f.value}</dd></div>)}
       </dl>
     </section>
 
     <section className="mstat mstat-yakus">
-      <header className="msec-head"><h3>{tr('役种')}<span>{tr('{0} 次和了', t.scoredWins)}</span></h3></header>
-      {t.yaku.length === 0 ? <p className="mslot-empty">{tr('役种从记录它的版本起开始累计')}</p>
+      <header className="msec-head"><h3>{tr('役种')}</h3><span>{t.scoredWins === t.wins ? tr('{0} 次和了', t.wins) : tr('{0}/{1} 次和了', t.scoredWins, t.wins)}</span></header>
+      {t.yaku.length === 0 ? <p className="mslot-empty">{t.wins > 0 ? tr('已和了，但役种数据未记录') : tr('暂无和了记录')}</p>
         : <ol className="mstat-scroll">
-          {t.yaku.map(y => <li key={y.id} className="mfact mstat-yaku"><span>{yakuName(y.id)}</span><b>{y.wins}</b><small>{share(y.wins, t.scoredWins)}</small></li>)}
+          {t.yaku.map(y => <li key={`${y.platform}:${y.id}`} className="mfact mstat-yaku"><span>{yakuName(y.id, y.platform)}</span><b>{y.wins}</b><small>{share(y.wins, t.scoredWins)}</small></li>)}
         </ol>}
     </section>
   </div>

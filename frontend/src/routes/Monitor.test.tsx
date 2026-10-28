@@ -483,7 +483,7 @@ describe('the game as a whole', () => {
 describe('the record', () => {
   const game = (rank: number, points: number | null, room: number, stats: Record<string, number>, yaku: Record<string, number> = {}) => ({
     id: `G${rank}${room}`, ended_at: '2026-01-01T00:00:00Z', platform: 'majsoul', num_players: 4, our_seat: 0,
-    final_scores: [25000, 25000, 25000, 25000], our_rank: rank, stats, yaku,
+    final_scores: [25000, 25000, 25000, 25000], our_rank: rank, stats, yaku, stats_complete: true, stats_version: 1, yaku_wins: Object.keys(yaku).length ? (stats.agari ?? 0) : 0,
     match_info: { platform: 'majsoul', mode_id: room }, ...(points == null ? {} : { our_rank_points: points }),
   })
   beforeEach(() => {
@@ -629,8 +629,31 @@ describe('the record', () => {
     render(<Monitor />)
     fireEvent.click(screen.getByRole('tab', { name: '统计' }))
     expect(await screen.findByText('还没有记录到段位分')).toBeTruthy()
-    expect(screen.getByText('役种从记录它的版本起开始累计')).toBeTruthy()
+    expect(screen.getByText('暂无和了记录')).toBeTruthy()
     expect(screen.getByText('和了率').closest('.mfact')!.querySelector('dd')!.textContent).toBe('—')
+  })
+
+  it('shows missing yaku coverage as missing data instead of zero wins', async () => {
+    fixture.history = [game(1, 80, 9, { round: 8, agari: 2 })]
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('已和了，但役种数据未记录')).toBeTruthy()
+    expect(screen.getByText('0/2 次和了')).toBeTruthy()
+    expect(screen.queryByText('0 次和了')).toBeNull()
+  })
+
+  it('names native Tenhou yaku and exposes incomplete detailed sample coverage', async () => {
+    fixture.options = { platform: 'Tenhou' }
+    const native = { ...game(1, null, 0, { round: 4, agari: 1 }, { 0: 1, 1: 1 }), platform: 'tenhou', match_info: { platform: 'tenhou', go_type: 1, lobby: 0, dan: 8 } }
+    fixture.history = [native, { ...native, id: 'partial', stats_complete: false }]
+    render(<Monitor />)
+    fireEvent.click(screen.getByRole('tab', { name: '统计' }))
+    expect(await screen.findByText('规则pt · 2 场')).toBeTruthy()
+    expect(screen.getByText('4 局 · 1/2 场').title).toBe('详细统计仅使用 1/2 场完整记录')
+    expect(screen.getByText('2 次和了')).toBeTruthy()
+    const tsumo = screen.getByText('门前清自摸和').closest('li')!
+    expect(tsumo.textContent).toBe('门前清自摸和2100.0%')
+    expect(screen.getByText('立直').closest('li')!.textContent).toBe('立直2100.0%')
   })
 })
 
@@ -815,7 +838,7 @@ describe('another language', () => {
   beforeEach(() => {
     fixture.snapshot = state(); fixture.options = {}; fixture.calls = []; fixture.handEvents = []
     fixture.history = [{ id: 'G', ended_at: '2026-01-01T00:00:00Z', platform: 'majsoul', num_players: 4, our_seat: 0, final_scores: [25000, 25000, 25000, 25000],
-      our_rank: 1, our_rank_points: 80, stats: { round: 10, agari: 3, houjuu: 1, riichi: 2 }, yaku: { 2: 2, 12: 1, 99: 1 }, match_info: { platform: 'majsoul', mode_id: 9 } }]
+      our_rank: 1, our_rank_points: 80, stats_complete: true, stats_version: 1, yaku_wins: 3, stats: { round: 10, agari: 3, houjuu: 1, riichi: 2 }, yaku: { 2: 2, 12: 1, 99: 1 }, match_info: { platform: 'majsoul', mode_id: 9 } }]
     const draw = { kind: 'yao9', hands: [{ seat: 1, tiles: ['1m', '9m', 'E'], winning_tile: null, target: null, ura_markers: [] }], scores: [25000, 25000, 25000, 25000], deltas: [0, 0, 0, 0] }
     fixture.snapshot.hands = [
       { round: 1, bakaze: 'E', kyoku: 1, honba: 0, result: draw, events: 12 },

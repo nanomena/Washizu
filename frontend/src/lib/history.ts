@@ -25,6 +25,9 @@ export type GameRecord = {
   our_rank_points?: number | null
   /** Yaku id → how many of our winning hands this game had it. */
   yaku?: Record<string, number>
+  yaku_wins: number | null
+  stats_complete: boolean
+  stats_version: number
 }
 
 // ----------------------------------------------------------------- rooms ----
@@ -131,12 +134,26 @@ const YAKU_NAME: Record<number, string> = localized({
   35: '天和', 36: '地和', 37: '大三元', 38: '四暗刻', 39: '字一色', 40: '绿一色', 41: '清老头', 42: '国士无双', 43: '小四喜',
   44: '四杠子', 45: '九莲宝灯', 46: '八连庄', 47: '纯正九莲宝灯', 48: '四暗刻单骑', 49: '国士无双十三面', 50: '大四喜',
 })
-export const yakuName = (id: number): string => YAKU_NAME[id] ?? tr('役 #{0}', id)
+// Tenhou's ids are a different native namespace, including id 0 for tsumo.
+const TENHOU_YAKU_NAME: Record<number, string> = localized({
+  0: '门前清自摸和', 1: '立直', 2: '一发', 3: '抢杠', 4: '岭上开花', 5: '海底摸月', 6: '河底捞鱼',
+  7: '平和', 8: '断幺九', 9: '一杯口', 10: '自风 东', 11: '自风 南', 12: '自风 西', 13: '自风 北',
+  14: '场风 东', 15: '场风 南', 16: '场风 西', 17: '场风 北', 18: '役牌 白', 19: '役牌 发', 20: '役牌 中',
+  21: '两立直', 22: '七对子', 23: '混全带幺九', 24: '一气通贯', 25: '三色同顺', 26: '三色同刻',
+  27: '三杠子', 28: '对对和', 29: '三暗刻', 30: '小三元', 31: '混老头', 32: '二杯口', 33: '纯全带幺九',
+  34: '混一色', 35: '清一色', 36: '人和', 37: '天和', 38: '地和', 39: '大三元', 40: '四暗刻',
+  41: '四暗刻单骑', 42: '字一色', 43: '绿一色', 44: '清老头', 45: '九莲宝灯', 46: '纯正九莲宝灯',
+  47: '国士无双', 48: '国士无双十三面', 49: '大四喜', 50: '小四喜', 51: '四杠子', 52: '宝牌', 53: '里宝牌', 54: '红宝牌',
+})
+export const yakuName = (id: number, platform: string): string =>
+  (platform === 'tenhou' ? TENHOU_YAKU_NAME : platform === 'majsoul' ? YAKU_NAME : {})[id] ?? tr('役 #{0}', id)
 
 // ----------------------------------------------------------------- totals ----
 
 export type Totals = {
   games: number
+  placementGames: number
+  detailGames: number
   /** Hands played. */
   hands: number
   /** Games finished in each place, first to last. */
@@ -149,9 +166,10 @@ export type Totals = {
   /** The counters of every game added up. */
   sum: Record<string, number>
   /** Yaku by how many of our wins had it, most first. */
-  yaku: Array<{ id: number; wins: number }>
+  yaku: Array<{ platform: string; id: number; wins: number }>
   /** Our wins in the games that say how a hand was scored. */
   scoredWins: number
+  wins: number
 }
 
 /** Add up `records`, which are taken in the order given (oldest first, as the core lists them). */
@@ -159,23 +177,35 @@ export function totalsOf(records: GameRecord[]): Totals {
   const players = records.some(r => r.num_players === 4) || records.length === 0 ? 4 : 3
   const places = new Array<number>(players).fill(0)
   const sum: Record<string, number> = {}
-  const yaku = new Map<number, number>()
+  const yaku = new Map<string, { platform: string; id: number; wins: number }>()
   const points: number[] = []
-  let placed = 0, placeSum = 0, scoredWins = 0
+  let placed = 0, placeSum = 0, scoredWins = 0, detailGames = 0, wins = 0
   for (const r of records) {
-    for (const [key, value] of Object.entries(r.stats)) sum[key] = (sum[key] ?? 0) + value
-    if (r.our_rank != null && r.our_rank >= 1 && r.our_rank <= players) { places[r.our_rank - 1] += 1; placed += 1; placeSum += r.our_rank }
+    if (r.our_rank != null && Number.isInteger(r.our_rank) && r.our_rank >= 1 && r.our_rank <= r.num_players) { places[r.our_rank - 1] += 1; placed += 1; placeSum += r.our_rank }
     const change = rankPointChange(r)
     if (change != null) points.push((points.at(-1) ?? 0) + change)
+    if (r.stats_complete) {
+      detailGames++
+      for (const [key, value] of Object.entries(r.stats)) sum[key] = (sum[key] ?? 0) + value
+    }
+    // A known winning result can retain its yaku even if another hand in
+    // that game is missing. The detailed rate sample is independently gated.
+    wins += r.stats.agari ?? 0
     const had = Object.entries(r.yaku ?? {})
-    if (had.length > 0) scoredWins += r.stats.agari ?? 0
-    for (const [id, wins] of had) yaku.set(Number(id), (yaku.get(Number(id)) ?? 0) + wins)
+    // Legacy aggregates with unknown sample coverage stay on disk but cannot
+    // be mixed into a frequency denominator for verified winning hands.
+    if (r.yaku_wins == null) continue
+    scoredWins += r.yaku_wins
+    for (const [id, wins] of had) {
+      const key = `${r.platform}:${id}`, old = yaku.get(key)
+      yaku.set(key, { platform: r.platform, id: Number(id), wins: (old?.wins ?? 0) + wins })
+    }
   }
   return {
-    games: records.length, hands: sum.round ?? 0, places, averagePlace: placed ? placeSum / placed : null,
+    games: records.length, placementGames: placed, detailGames, hands: sum.round ?? 0, places, averagePlace: placed ? placeSum / placed : null,
     points, pointGames: points.length, sum,
-    yaku: [...yaku].map(([id, wins]) => ({ id, wins })).sort((a, b) => b.wins - a.wins || a.id - b.id),
-    scoredWins,
+    yaku: [...yaku.values()].sort((a, b) => b.wins - a.wins || a.platform.localeCompare(b.platform) || a.id - b.id),
+    scoredWins, wins,
   }
 }
 
@@ -189,14 +219,14 @@ const average = (total: number, count: number, digits = 0): string =>
 /** The figures a riichi player looks for first, in the order they are usually read. */
 export function figuresOf(t: Totals): Figure[] {
   const s = (key: string) => t.sum[key] ?? 0
-  return [
+  const figures = [
     { name: tr('和了率'), value: percent(s('agari'), t.hands), note: tr('和了的局数 ÷ 总局数') },
     { name: tr('放铳率'), value: percent(s('houjuu'), t.hands), note: tr('放铳的局数 ÷ 总局数') },
     { name: tr('立直率'), value: percent(s('riichi'), t.hands) },
     { name: tr('副露率'), value: percent(s('fuuro'), t.hands) },
     { name: tr('流局率'), value: percent(s('ryukyoku'), t.hands) },
     { name: tr('平均和了点'), value: average(s('agari_point_oya') + s('agari_point_ko'), s('agari')) },
-    { name: tr('平均放铳点'), value: average(s('houjuu_point_to_oya') + s('houjuu_point_to_ko'), s('houjuu')) },
+    { name: tr('平均放铳点'), value: average(-(s('houjuu_point_to_oya') + s('houjuu_point_to_ko') + s('houjuu_point_unattributed')), s('houjuu')) },
     { name: tr('和了巡数'), value: average(s('agari_jun'), s('agari'), 1) },
     { name: tr('立直巡数'), value: average(s('riichi_jun'), s('riichi'), 1) },
     { name: tr('立直和了率'), value: percent(s('riichi_agari'), s('riichi')), note: tr('立直后和了 ÷ 立直次数') },
@@ -205,7 +235,8 @@ export function figuresOf(t: Totals): Figure[] {
     { name: tr('副露放铳率'), value: percent(s('fuuro_houjuu'), s('fuuro')), note: tr('副露后放铳 ÷ 副露的局数') },
     { name: tr('默听和了'), value: percent(s('dama_agari'), s('agari')), note: tr('门前不立直的和了 ÷ 和了次数') },
     { name: tr('追立'), value: tr('{0} 次', s('chasing_riichi')), note: tr('在别家立直之后宣告的立直') },
-    { name: tr('役满'), value: tr('{0} 次', s('yakuman')) },
+    { name: tr('役满'), value: t.scoredWins === t.wins ? tr('{0} 次', s('yakuman')) : '—' },
     { name: tr('总局数'), value: tr('{0} 局', t.hands) },
   ]
+  return t.detailGames > 0 ? figures : figures.map(figure => ({ ...figure, value: '—' }))
 }

@@ -29,12 +29,13 @@ A `RecorderState` machine buffers events between `StartGame` and a confirmed
 `EndGame`. On a Mahjong Soul reconnect to the same table it retains completed
 rounds and replaces the server-restored copy of the current round. A different
 next game, explicit server termination, or shutdown drops the incomplete
-buffer, so the History tab still contains only complete games.
+buffer. A confirmed final standing can survive an earlier capture gap, so a
+finished game is not automatically a complete detailed-statistics sample.
 
 ## Modules
 
 - **`aggregator.rs`** — Pure function `aggregate(events, ...) -> Option<GameRecord>`.
-  Ports the `Stat::from_game` aggregator from Mortal's `libriichi`. It walks
+  Based on the `Stat::from_game` aggregator from Mortal's `libriichi`. It walks
   `Reach`/`ReachAccepted`/`Hora`/`Ryukyoku` deltas for statistics, prefers a
   platform's authoritative final standings when supplied, and otherwise
   normalises totals to 100k (4p) / 105k (3p). Stat counts mirror `Stat`'s field
@@ -44,15 +45,44 @@ buffer, so the History tab still contains only complete games.
 - **`recorder.rs`** — `drive_loop(store, history_bus, platform, mjai_rx)`. The
   long-running task spawned in `lib.rs::run`.
 
-## Adding a new platform
+## Platform and coverage contracts
 
-When a non-Majsoul bridge lands (Tenhou, RiichiCity, ...):
+Each account has its own history store and recorder. `SharedPlatform` follows
+the selected bridge. Room identity and yaku ids retain their native platform;
+Tenhou id 0 is tsumo, not a missing id, and its ids are not Majsoul's ids.
 
-1. Add the variant to `crate::schema::Platform`.
-2. Pass that variant when spawning a *per-bridge* recorder. The current code
-   spawns one global recorder tagged `Platform::Majsoul` because that's the
-   only bridge in v3 — for multiple bridges, mux by source via per-bridge
-   `tokio::sync::broadcast` channels or a wrapped event type.
+`stats_version: 1` counts declaration and tsumo turns from one, counts a
+multi-ron deal-in once per hand, and applies each distinct payment vector once.
+Repeated combined Majsoul payments cannot safely be split between winners;
+their loss amount is stored in `houjuu_point_unattributed`. Yakuman uses explicit
+score metadata, never a payment threshold. Abortive draws count without a
+payment vector.
+
+`stats_complete` requires closed hands with results, own payment data, and a
+known player seat. Detailed figures use only these records. Final placement
+and pt remain usable independently. `yaku_wins: Some(n)` is the exact number
+of captured own wins with nonempty score metadata; `None` means legacy sample
+coverage is unknown. Yaku frequencies use only known samples and show captured
+wins versus available wins. Unknown metadata must not be presented as zero.
+
+`Hora.score` is private in-process metadata (`serde(skip)`); the index stores
+the aggregated yaku. A public mjai export deliberately does not contain it.
+
+## Repairing existing finalized records
+
+`node scripts/repair-history-stats.mjs --home=ACCOUNT --out=NEW_PROPOSAL.json`
+prepares a dry run. It recomputes the corrected counters from each existing
+record's own saved history events and matches raw result metadata by native
+game id, round, honba and winning seat. Reconnect round identity comes from
+the recorded public restore. Contradictory metadata is excluded; legacy yaku
+aggregates without exact sample coverage are preserved without a guessed count.
+No missing outcomes or new game records are synthesized.
+
+After all application processes have exited normally, apply with
+`--apply=PROPOSAL.json --backup=NEW_DIRECTORY`. The Windows process guard,
+original-byte SHA256, immutable game-field comparison and byte-identical backup
+must pass before atomic replacement. A newly appended game requires a fresh
+proposal. This maintenance migration is not part of live capture or inference.
 
 ## Adding a new GameStats field
 

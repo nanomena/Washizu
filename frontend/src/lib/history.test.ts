@@ -1,12 +1,47 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { rankPointChange, roomName, roomOf, totalsOf, type GameRecord } from './history'
+import { figuresOf, rankPointChange, roomName, roomOf, totalsOf, yakuName, type GameRecord } from './history'
 import { setLang } from './i18n'
 
 const game = (go_type: number, lobby = 0, num_players = 4): GameRecord => ({
   id: 'record', ended_at: '2026-10-27T00:00:00Z', platform: 'tenhou', num_players, our_seat: 0,
   final_scores: [], our_rank: 1, stats: {}, match_info: { platform: 'tenhou', go_type, lobby },
+  stats_complete: true, stats_version: 1, yaku_wins: 0,
 })
 beforeEach(() => setLang('zh-CN'))
+
+describe('statistics sample coverage', () => {
+  it('keeps the two providers yaku ids separate, including Tenhou id zero', () => {
+    const native = { ...game(1), stats: { round: 4, agari: 2 }, yaku: { 0: 1, 1: 2 }, yaku_wins: 2 }
+    const soul = { ...native, platform: 'majsoul', yaku: { 1: 1 }, yaku_wins: 1 }
+    const totals = totalsOf([native, soul])
+    expect(totals.yaku).toContainEqual({ platform: 'tenhou', id: 0, wins: 1 })
+    expect(totals.yaku).toContainEqual({ platform: 'majsoul', id: 1, wins: 1 })
+    expect(yakuName(0, 'tenhou')).toBe('门前清自摸和')
+    expect(yakuName(1, 'tenhou')).toBe('立直')
+    expect(yakuName(1, 'majsoul')).toBe('门前清自摸和')
+    expect(yakuName(999, 'tenhou')).toContain('999')
+    expect([totals.scoredWins, totals.wins]).toEqual([3, 4])
+  })
+  it('does not invent sample coverage from legacy aggregate yaku', () => {
+    const unknown = { ...game(1), stats: { round: 4, agari: 2 }, yaku: { 1: 2 }, yaku_wins: null }
+    const known = { ...game(1), stats: { round: 4, agari: 1 }, yaku: { 1: 1 }, yaku_wins: 1 }
+    const totals = totalsOf([unknown, known])
+    expect([totals.scoredWins, totals.wins]).toEqual([1, 3])
+    expect(totals.yaku).toEqual([{ platform: 'tenhou', id: 1, wins: 1 }])
+    expect(figuresOf(totals).find(f => f.name === '役满')?.value).toBe('—')
+  })
+  it('excludes unfinished hands only from detailed samples, preserving final placement and pt', () => {
+    const complete = { ...game(1), stats: { round: 4, agari: 1, houjuu: 1, houjuu_point_to_oya: -8000 }, our_rank_points: 20 }
+    const broken = { ...complete, stats_complete: false, stats: { round: 10, agari: 9 }, our_rank: 4 }
+    const totals = totalsOf([complete, broken, { ...broken, our_rank: null }])
+    expect([totals.games, totals.detailGames, totals.placementGames, totals.hands]).toEqual([3, 1, 2, 4])
+    expect(totals.places).toEqual([1, 0, 0, 1])
+    expect(totals.averagePlace).toBe(2.5)
+    expect(figuresOf(totals).find(f => f.name === '和了率')?.value).toBe('25.0%')
+    expect(figuresOf(totals).find(f => f.name === '平均放铳点')?.value).toBe('8,000')
+    expect(figuresOf(totalsOf([broken])).every(f => f.value === '—')).toBe(true)
+  })
+})
 
 describe('the platform room on a stored game', () => {
   it('keeps Tenhou general East distinct from Mahjong Soul mode 1', () => {

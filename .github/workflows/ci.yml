@@ -111,6 +111,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Historical statistics repair regression
+        run: node --test ../scripts/repair-history-stats.test.mjs
+
       # `npm run build` is `tsc -b && vite build` — type-checks too.
       - name: Build
         run: npm run build
