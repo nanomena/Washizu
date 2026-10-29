@@ -31,13 +31,14 @@ impl LocalStandby {
                     )
                 })
             })
+            .or_else(|| legal.iter().find(|e| matches!(e, MjaiEvent::Dahai { .. })))
             .or_else(|| legal.iter().find(|e| matches!(e, MjaiEvent::None)))?
             .clone();
         Some(BotResponse {
             request: None,
             action,
             meta: Some(
-                serde_json::json!({"recovery_policy":"Observed win / drawn-tile discard / decline only; ordered hand history is unavailable."}),
+                serde_json::json!({"recovery_policy":"Observed win / actual draw / independently validated hand discard / legal decline; missing temporal history remains unavailable."}),
             ),
         })
     }
@@ -95,6 +96,22 @@ impl LocalStandby {
             *pai = Some(self.engine.winning_tile(*target)?);
         }
         Some(event)
+    }
+}
+
+#[cfg(test)]
+mod observed_tests {
+    use super::*;
+    #[test]
+    fn a_restored_post_call_window_can_use_its_proved_hand_discard_without_inventing_one() {
+        let action = MjaiEvent::Dahai {
+            actor: 0,
+            pai: "9m".into(),
+            tsumogiri: false,
+        };
+        let reply = LocalStandby::observed_reply(std::slice::from_ref(&action)).unwrap();
+        assert_eq!(reply.action, action);
+        assert!(LocalStandby::observed_reply(&[]).is_none());
     }
 }
 
