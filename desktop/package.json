@@ -14,6 +14,7 @@
     "test:tenhou": "node --test ../src/autoplay/tenhou/web3.test.mjs",
     "smoke": "node tests/smoke.mjs",
     "smoke:profiles": "node tests/profiles-smoke.mjs",
+    "smoke:proxy": "node tests/proxy-smoke.mjs",
     "smoke:tenhou-ui": "electron tests/tenhou-ui-mouse.mjs --no-sandbox",
     "smoke:window": "node tests/native-presentation.mjs",
     "package": "node scripts/package.mjs"

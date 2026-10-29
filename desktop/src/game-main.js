@@ -35,6 +35,7 @@ import { keepWorkersRunning } from './workers.js'
 import { contentSize, holdRatio } from './window-frame.js'
 import { ProfileStore, PLATFORMS, homePlatform } from './profiles.js'
 import { readObsPreference, saveObsPreference, spoutSenderName } from './view-preferences.js'
+import { applyGameProxy } from './profile-proxy.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** The interface's address. A scheme of its own, so the page has an origin and absolute paths. */
@@ -297,7 +298,7 @@ function guardGame(page) {
   // share the game's session to hand the sign-in back. It is an ordinary
   // window, even when the game is drawn offscreen.
   page.setWindowOpenHandler(({ url }) => web(url)
-    ? { action: 'allow', overrideBrowserWindowOptions: { width: 960, height: 720, autoHideMenuBar: true, show: true, webPreferences: { sandbox: true, contextIsolation: true, offscreen: false } } }
+    ? { action: 'allow', overrideBrowserWindowOptions: { width: 960, height: 720, autoHideMenuBar: true, show: true, webPreferences: { session: page.session, sandbox: true, contextIsolation: true, offscreen: false } } }
     : { action: 'deny' })
   page.on('render-process-gone', (_event, details) => {
     note(`game: its renderer went (${details.reason}, exit ${details.exitCode}); loading it again`)
@@ -568,6 +569,7 @@ const commands = {
     const page = offscreenGame.webContents
     placeGame(bounds)
     try {
+      await applyGameProxy(page.session, PROFILE.proxy)
       // The view starts blank; the core sends it to the game once it is listening.
       await page.loadURL('about:blank')
       await running().call('open_game', { port: cdpPort, target: await targetOf(page) })

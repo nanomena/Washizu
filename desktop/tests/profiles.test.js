@@ -7,6 +7,44 @@ import { test } from 'node:test'
 import { ProfileStore, defaultProfileRoot, homePlatform } from '../src/profiles.js'
 import { spoutSenderName } from '../src/view-preferences.js'
 
+test('v1 profiles migrate once to explicit system routing without touching account homes', t => {
+  const root = temporary(t), file = path.join(root, 'profiles.json')
+  const old = { id: 'existing', name: 'Original', platform: 'Majsoul', lastOpened: null }
+  fs.writeFileSync(file, JSON.stringify({ version: 1, profiles: [old] }))
+  fs.writeFileSync(path.join(root, 'config.toml'), '[platform]\nkind="Majsoul"\n')
+  const store = new ProfileStore(root).load()
+  assert.deepEqual(store.get('existing').proxy, { mode: 'system', server: '' })
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 2)
+  const canonical = fs.readFileSync(file, 'utf8')
+  new ProfileStore(root).load()
+  assert.equal(fs.readFileSync(file, 'utf8'), canonical)
+  const broken = JSON.parse(canonical); delete broken.profiles[0].proxy
+  fs.writeFileSync(file, JSON.stringify(broken))
+  assert.throws(() => new ProfileStore(root).load(), /代理设置无效/)
+  assert.equal(fs.readFileSync(file, 'utf8'), JSON.stringify(broken))
+})
+
+test('each profile saves its proxy and name atomically while a running copy stays unchanged', t => {
+  const store = new ProfileStore(temporary(t)).load(), a = store.create('A', 'Majsoul'), b = store.create('B', 'Tenhou')
+  const running = store.get(a.id)
+  store.update(a.id, 'Renamed', { mode: 'custom', server: ' socks5://127.0.0.1:1080 ' })
+  const saved = new ProfileStore(store.root).load()
+  assert.deepEqual(saved.get(a.id).proxy, { mode: 'custom', server: 'socks5://127.0.0.1:1080' })
+  assert.equal(saved.get(a.id).name, 'Renamed')
+  assert.deepEqual(saved.get(b.id), b)
+  assert.deepEqual(running.proxy, { mode: 'system', server: '' })
+  saved.list()[0].proxy.mode = 'direct'
+  assert.equal(saved.get(a.id).proxy.mode, 'custom')
+  const before = fs.readFileSync(store.file, 'utf8')
+  assert.throws(() => store.update(a.id, 'Do not save', { mode: 'custom', server: 'http://secret:password@host:99' }), /账号密码/)
+  assert.equal(fs.readFileSync(store.file, 'utf8'), before)
+  const fault = t.mock.method(store, 'save', () => { throw new Error('disk write refused') })
+  assert.throws(() => store.update(a.id, 'Do not save', { mode: 'direct', server: '' }), /disk write refused/)
+  assert.equal(store.get(a.id).name, 'Renamed')
+  assert.equal(store.get(a.id).proxy.mode, 'custom')
+  fault.mock.restore()
+})
+
 /** @param {import('node:test').TestContext} t */
 function temporary(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'washizu-profiles-test-'))
@@ -29,10 +67,10 @@ test('adopting and reopening the existing account preserves every original file 
     const file = path.join(root, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value)
   }
   const store = new ProfileStore(root).load()
-  assert.deepEqual(store.list(), [{ id: 'existing', name: '雀魂 · 原有账号', platform: 'Majsoul', lastOpened: null }])
+  assert.deepEqual(store.list(), [{ id: 'existing', name: '雀魂 · 原有账号', platform: 'Majsoul', lastOpened: null, proxy: { mode: 'system', server: '' } }])
   assert.equal(store.home('existing'), root)
   const tenhou = store.create('天凤主号', 'Tenhou')
-  store.rename('existing', '雀魂主号')
+  store.update('existing', '雀魂主号', store.get('existing').proxy)
   store.opened('existing')
   const again = new ProfileStore(root).load()
   assert.equal(again.list().length, 2)
@@ -58,7 +96,7 @@ test('each platform and each account own a stable independent home', t => {
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(store.home(profile.id), 'obs.json'), 'utf8')), { enabled: true })
   }
   const firstHome = store.home(first.id)
-  store.rename(first.id, '改过名字的主号')
+  store.update(first.id, '改过名字的主号', first.proxy)
   assert.equal(store.home(first.id), firstHome)
   assert.throws(() => store.create('主号', 'Tenhou'), /同名/)
   assert.throws(() => store.create(' ', 'Majsoul'), /名称/)
@@ -87,14 +125,14 @@ test('new profiles inherit only current original Mahjong Soul OBS preference', t
   assert.equal(spoutSenderName(store.get('existing')), 'Washizu')
   assert.notEqual(spoutSenderName(first), spoutSenderName(second))
   const sender = spoutSenderName(first)
-  store.rename(first.id, 'renamed')
+  store.update(first.id, 'renamed', first.proxy)
   assert.equal(spoutSenderName(store.get(first.id)), sender)
 })
 
 test('a damaged registry is reported without replacing it or adopting the home again', t => {
   const root = temporary(t)
   const file = path.join(root, 'profiles.json')
-  for (const data of ['not json', '{"version":2,"profiles":[]}', '{"version":1,"profiles":[{"id":"../browser"}]}']) {
+  for (const data of ['not json', '{"version":3,"profiles":[]}', '{"version":1,"profiles":[{"id":"../browser"}]}']) {
     fs.writeFileSync(file, data)
     assert.throws(() => new ProfileStore(root).load())
     assert.equal(fs.readFileSync(file, 'utf8'), data)

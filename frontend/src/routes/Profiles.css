@@ -41,12 +41,15 @@
 .accounts-footer { color: var(--m-dim); font-size: 11px; gap: 16px; padding-inline: var(--account-inset); }.accounts-footer > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .accounts-editor select, .accounts-editor input { font: inherit; color: var(--m-ink); border: 1px solid var(--m-line); border-radius: 6px; padding: 6px 8px; background: var(--m-panel); }
 .accounts :is(input, select):focus-visible { outline: 2px solid var(--m-live); outline-offset: 2px; }
-.accounts-editor { color: var(--m-ink); background: var(--m-panel); border: 1px solid var(--m-line); border-radius: 10px; box-shadow: var(--m-shadow); width: 384px; max-height: calc(100% - 24px); padding: 20px; margin: auto; }
+.accounts-editor { --editor-padding: 20px; color: var(--m-ink); background: var(--m-panel); border: 1px solid var(--m-line); border-radius: 10px; box-shadow: var(--m-shadow); width: 384px; max-height: calc(100dvh - 24px); overflow: hidden; padding: var(--editor-padding); margin: auto; }
 .accounts-editor::backdrop { background: hsl(35 20% 14% / 0.25); }
-.accounts-editor h2 { font: 500 20px/24px var(--m-display); margin-bottom: 16px; }
+.accounts-editor form { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 12px; max-height: calc(100dvh - 24px - 2 * var(--editor-padding) - 2px); }
+.accounts-editor h2 { font: 500 20px/24px var(--m-display); margin: 0; }
+.accounts-editor-fields { min-height: 0; overflow: auto; scrollbar-gutter: stable; }
 .accounts-editor label { display: block; font-size: 12px; line-height: 16px; color: var(--m-ink2); margin-bottom: 12px; }
 .accounts-editor :is(input, select) { display: block; width: 100%; height: 32px; margin-top: 8px; }
-.accounts-platform-field[hidden] { visibility: hidden; display: block; }
+.accounts-proxy { border: 0; padding: 0; margin: 0; min-width: 0; }
+.accounts-proxy legend { font-size: 13px; color: var(--m-ink); margin-bottom: 12px; }
 .accounts-form-status { height: 24px; color: var(--m-bad); font-size: 12px; overflow: auto; }
 .accounts-editor-actions { justify-content: flex-end; gap: 16px; }
 .accounts-editor-actions .mbtn { width: 96px; height: 32px; font-size: 13px; }

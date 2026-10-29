@@ -1,5 +1,12 @@
 /** 繁體中文. Keys are the page's own Simplified Chinese text. */
 export const zhTW: Record<string, string> = {
+  "游戏代理": "遊戲代理",
+  "连接方式": "連線方式",
+  "跟随系统": "跟隨系統",
+  "直连": "直接連線",
+  "指定代理": "指定代理",
+  "代理地址": "代理位址",
+  "支持 HTTP、HTTPS、SOCKS5；仅用于游戏连接，下次打开此账号时生效。": "支援 HTTP、HTTPS、SOCKS5；僅用於遊戲連線，下次開啟此帳號時生效。",
   '显示账号选择器': '顯示帳號選擇器',
   '关于': '關於',
   '许可证': '授權條款',

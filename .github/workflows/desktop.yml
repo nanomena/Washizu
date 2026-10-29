@@ -108,6 +108,7 @@ jobs:
         run: |
           xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke
           xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:profiles
+          xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:proxy
           xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:tenhou-ui
 
       - name: Restore bundled runtime cache
