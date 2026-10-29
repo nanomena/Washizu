@@ -228,6 +228,94 @@ fn disconnected(identity: &str, account: &str) -> Web3Observation {
     observation
 }
 
+fn welcome(identity: &str, account: &str) -> Web3Observation {
+    let mut observation = popup(identity, PopupTag::Welcome, 0);
+    observation.account = Some(account.into());
+    observation
+}
+
+#[test]
+fn reconnect_welcome_precedes_title_under_the_same_account_deadline_and_mouse_owner() {
+    let mut h = authenticated();
+    h.env.settings.quick_confirm = false;
+    h.env.settings.auto_continue = false;
+    let Effect::ObserveWeb(ticket) = h.next().unwrap() else {
+        panic!("read expected")
+    };
+    h.ui.web_observed(ticket, None, h.now, &mut h.rng);
+    let original_deadline = h.now + RESULT_LIMIT;
+    h.env.generation.session += 1;
+    h.sync();
+    let splash = welcome("native-splash", "ID1234ABCD");
+    assert!(matches!(
+        h.press(&splash),
+        Control::Popup {
+            tag: PopupTag::Welcome,
+            ..
+        }
+    ));
+    h.observe_only(&splash, 3);
+    assert_eq!(h.sent.len(), 1);
+    h.press(&title("native-title", "ID1234ABCD"));
+    h.now = original_deadline + Duration::from_secs(1);
+    h.sync();
+    assert_eq!(h.ui.waiting_reason(), Some(WaitingReason::ReconnectTimeout));
+}
+
+#[test]
+fn reconnect_welcome_cannot_authorize_fresh_login_changed_account_or_manual_takeover() {
+    let splash = welcome("native-splash", "ID1234ABCD");
+    let mut fresh = Harness::new(Some(target()));
+    fresh.observe_only(&splash, 6);
+    assert!(fresh.sent.is_empty());
+    let mut finished = authenticated();
+    finished.ui.game_ended(finished.now);
+    finished.observe_only(&splash, 5);
+    assert!(finished.sent.is_empty());
+    let mut changed = authenticated();
+    changed.observe_only(&welcome("other", "ID87654321"), 1);
+    assert_eq!(
+        changed.ui.waiting_reason(),
+        Some(WaitingReason::OwnershipChanged)
+    );
+    let mut manual = authenticated();
+    let (ticket, control) = manual.ready(&splash);
+    manual.env.manual = true;
+    assert!(!manual.invoke(ticket, &control, &splash, Dispatch::Sent));
+    let mut replaced = authenticated();
+    let (ticket, control) = replaced.ready(&splash);
+    let mut current = splash.clone();
+    current.account = Some("ID87654321".into());
+    assert!(!replaced.invoke(ticket, &control, &current, Dispatch::Sent));
+    for case in 0..3 {
+        let mut invalid = splash.clone();
+        let popup = invalid.popup.as_mut().unwrap();
+        match case {
+            0 => popup.enabled = false,
+            1 => popup.closing = true,
+            _ => popup.queued = 1,
+        }
+        let mut h = authenticated();
+        h.observe_only(&invalid, 3);
+        assert!(h.sent.is_empty());
+    }
+}
+
+#[test]
+fn welcome_restore_returns_to_primary_table_without_starting_a_new_match() {
+    let mut h = authenticated();
+    h.env.generation.session += 1;
+    h.sync();
+    h.press(&welcome("native-splash", "ID1234ABCD"));
+    h.ui.web_game_started(Some(0), Some(target()), h.now);
+    h.ui.table_started(None);
+    h.now += RESULT_LIMIT + Duration::from_secs(1);
+    h.sync();
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Table));
+    h.press(&popup("restored-round-result", PopupTag::Draw, 0));
+    assert!(h.sent.iter().all(|c| !matches!(c, Control::Reserve { .. })));
+}
+
 #[test]
 fn disconnect_confirmation_and_title_resume_share_one_deadline_across_reload() {
     let mut h = authenticated();

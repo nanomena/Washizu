@@ -59,7 +59,7 @@ async function main() {
     // as the FSM does after a refused effect; never reuse the stale witness.
     await click(await target('join'))
     assert.equal(await read('api.readUi().lobby.reservationRequested'), true)
-    for (const tag of ['TAIKYOKU', 'AGARI', 'RYUUKYOKU', 'OWARI', 'NINTEI']) {
+    for (const tag of ['SPLASH', 'TAIKYOKU', 'AGARI', 'RYUUKYOKU', 'OWARI', 'NINTEI']) {
       await read(`fixture.tag=${JSON.stringify(tag)};fixture.epoch++`)
       await click(await target('popup'))
     }
@@ -82,11 +82,11 @@ async function main() {
     await click(await target('resume'))
     assert.equal(await read('api.readUi().title'), null)
     const effects = await read('fixture.effects'), mouse = await read('fixture.mouse')
-    assert.deepEqual(effects.map((/** @type {any} */ event) => event.tag), ['JOIN','TAIKYOKU','AGARI','RYUUKYOKU','OWARI','NINTEI','DISCONNECT','RESUME'])
+    assert.deepEqual(effects.map((/** @type {any} */ event) => event.tag), ['JOIN','SPLASH','TAIKYOKU','AGARI','RYUUKYOKU','OWARI','NINTEI','DISCONNECT','RESUME'])
     assert.ok(effects.every((/** @type {any} */ event) => event.trusted))
-    assert.equal(mouse.length, 24)
+    assert.equal(mouse.length, 27)
     assert.ok(mouse.every((/** @type {any} */ event) => event.trusted))
-    console.log('ok read-only Tenhou UI probes; eight trusted Chromium mouse presses including disconnect confirmation and title resume')
+    console.log('ok read-only Tenhou UI probes; nine trusted Chromium mouse presses including welcome, disconnect confirmation and title resume')
     win.webContents.debugger.detach()
   } catch (error) { console.error(error); process.exitCode = 1 }
   finally { window?.destroy(); app.exit(Number(process.exitCode) || 0) }
