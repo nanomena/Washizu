@@ -32,7 +32,7 @@ function fixture() {
   state.target = state.cards[13];
   const native = {
     epoch: () => state.epoch, uiEpoch: () => state.uiEpoch, modal: () => state.modal,
-    title: { read: () => ({ element: state.titleElement || null, account: state.account || null }) },
+    title: { read: () => ({ account: state.account || null }) },
     input: { mode: () => state.live, phaseReady: () => state.ready, hand: () => state.hand, actor: () => state.actor,
       drawn: () => state.drawn, riichi: () => state.riichi, isCard: value => value instanceof Card, targetSlot: value => value.slot,
       slot: i => state.cards[i] && { ...state.cards[i], target: state.cards[i] } },
@@ -68,8 +68,8 @@ function fixture() {
 test('title resume exposes only the saved-account control with a fresh physical witness', () => {
   const f = fixture(), root = new Element(), button = new Element('BUTTON', { x: 80, y: 80, width: 120, height: 40 });
   root.append(button);
-  root.querySelector = selector => selector === '.idcont > button[name="c6"]' ? button : null;
-  Object.assign(f.state, { live: 0, titleElement: root, titleButton: button, account: 'ID1234ABCD' });
+  root.querySelector = selector => selector === '#pane0 > button[name="ok"]' ? button : null;
+  Object.assign(f.state, { live: 0, popup: { element: root, tag: 'LOGIN', closing: false }, titleButton: button, account: 'ID1234ABCD' });
   const first = f.api.readUi(), request = { kind: 'resume', identity: first.title.identity };
   assert.equal(first.title.enabled, true);
   assert.equal(first.popup, null); assert.equal(first.lobby, null);

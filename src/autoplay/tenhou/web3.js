@@ -266,18 +266,18 @@
 
   function uiSnapshot() {
     const session = native.title.read();
+    const current = native.popup.read();
     const account = typeof session.account === 'string' && /^ID[0-9A-F]{8}$/.test(session.account) ? session.account : null;
     const dto = { client: 'web3', account, title: null, popup: null, lobby: null };
     // Only the registered-account title control. No guest/register/ID entry.
-    if (native.input.mode() === 0 && connected(session.element) && visible(session.element)) {
-      const element = session.element;
-      const button = element.querySelector('.idcont > button[name="c6"]');
-      const enabled = !!account && !native.modal() && visible(button) && !button.disabled;
+    if (native.input.mode() === 0 && current.tag === 'LOGIN' && connected(current.element) && visible(current.element)) {
+      const element = current.element;
+      const button = element.querySelector('#pane0 > button[name="ok"]');
+      const enabled = !!account && !current.closing && !native.modal() && visible(button) && !button.disabled;
       dto.title = { identity: documentId + ':title:' + nodeId(element) + ':' + (button ? nodeId(button) : 'missing') + ':' + account + ':' + Number(enabled), enabled };
       return { dto, element, button };
     }
     if (!live()) return { dto };
-    const current = native.popup.read();
     const element = current.element;
     if (!connected(element)) return { dto };
     const base = documentId + ':ui:' + native.uiEpoch() + ':' + nodeId(element);

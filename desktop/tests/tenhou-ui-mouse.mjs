@@ -27,8 +27,8 @@ async function main() {
       for(const type of ['mousedown','mouseup','click'])document.addEventListener(type,event=>state.mouse.push({type,trusted:event.isTrusted}));
       join.addEventListener('click',event=>{state.effects.push({tag:'JOIN',trusted:event.isTrusted});state.reserved=true;state.epoch++;});
       ok.addEventListener('click',event=>{state.effects.push({tag:state.tag,trusted:event.isTrusted});state.epoch++;});
-      window.api=(${source})({input:{mode:()=>state.mode},title:{read:()=>({element:state.title,account:'ID1234ABCD'})},uiEpoch:()=>state.epoch,modal:()=>false,
-        popup:{read:()=>({element:panel,tag:state.tag,queued:0,closing:false})},
+      window.api=(${source})({input:{mode:()=>state.mode},title:{read:()=>({account:'ID1234ABCD'})},uiEpoch:()=>state.epoch,modal:()=>false,
+        popup:{read:()=>({element:state.title||panel,tag:state.tag,queued:0,closing:false})},
         lobby:{read:()=>({lobby:0,selected:['1'],loaded:true,reservationRequested:state.reserved})}}); true;
     }`)
     win.webContents.debugger.attach('1.3')
@@ -63,10 +63,10 @@ async function main() {
       await click(await target('popup'))
     }
     await read(`{
-      document.querySelector('#panel').remove();fixture.mode=0;
-      const title=document.createElement('main');title.innerHTML='<div class="guest"><button name="guestok">Guest</button></div><div class="idcont"><button name="c6" style="left:80px">OK</button></div>';
+      document.querySelector('#panel').remove();fixture.mode=0;fixture.tag='LOGIN';
+      const title=document.createElement('main');title.innerHTML='<div id="pane1"><button name="ok">Guest</button></div><div id="pane0"><button name="ok" style="left:80px">OK</button></div>';
       document.body.append(title);fixture.title=title;
-      title.querySelector('[name=c6]').addEventListener('click',event=>{fixture.effects.push({tag:'RESUME',trusted:event.isTrusted});fixture.mode=1;title.remove();});
+      title.querySelector('#pane0 > [name=ok]').addEventListener('click',event=>{fixture.effects.push({tag:'RESUME',trusted:event.isTrusted});fixture.mode=1;title.remove();});
     }`)
     await click(await target('resume'))
     assert.equal(await read('api.readUi().title'), null)

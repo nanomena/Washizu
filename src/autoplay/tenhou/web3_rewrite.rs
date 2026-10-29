@@ -483,8 +483,7 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
     let modal_scope = s.enclosing_function(modal)?;
     let modal_owner = s.assigned_owner(modal_scope)?;
     let modal_object = s.return_object(modal_scope, modal)?;
-    let title = s.unique("registered title resume control", r#"__titleElement.querySelector("BUTTON[name=guestok]").onclick=function(){__titleStorage.removeItem(__titleKeys.__titleLoginKey);__titleOwner.__titleHide(!0);__titleRouter.__titleResume()};__titleElement.querySelector("BUTTON[name=c6]").onclick=function(){__titleOwner.__titleHide(!0);__titleRouter.__titleResume()};"#)?;
-    let title_scope = s.enclosing_function(title)?;
+    s.unique("registered title session", r##"__titleElement.innerHTML=__titleHtml;__bindTitle(__titleElement);__showTitle(-1);__titleNodes["pane"+(__titleRemote?2:__titleStorage[__titleKeys.__titleLoginKey]?0:1)].style.display="";__popup["#sx"]();if("AUTOLOGIN"==__titleEvent.tag||__titleStorage[__titleKeys.__titleAutoLogin])__popup.__element.style.display="none",__popup.ok()"##)?;
     if !s
         .methods(modal_object)?
         .iter()
@@ -541,11 +540,7 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
     {
         return Err(contract("outer IIFE boundary changed"));
     }
-    edits.push((s.tokens[outer_open].end, format!("var {EPOCH}=0,{UI_EPOCH}=0,__washizuWeb3PhaseReady=false,__washizuWeb3Closing=false,__washizuWeb3ClockStarted=null,__washizuWeb3ClockFixed=null,__washizuWeb3ClockBank=null,__washizuWeb3TitleElement=null,__washizuWeb3Clock,__washizuWeb3Input,__washizuWeb3Menu,__washizuWeb3Popup,__washizuWeb3Lobby,__washizuWeb3Geometry;")));
-    edits.push((
-        s.tokens[title_scope.open].end,
-        s.expand("__washizuWeb3TitleElement=__titleElement;"),
-    ));
+    edits.push((s.tokens[outer_open].end, format!("var {EPOCH}=0,{UI_EPOCH}=0,__washizuWeb3PhaseReady=false,__washizuWeb3Closing=false,__washizuWeb3ClockStarted=null,__washizuWeb3ClockFixed=null,__washizuWeb3ClockBank=null,__washizuWeb3Clock,__washizuWeb3Input,__washizuWeb3Menu,__washizuWeb3Popup,__washizuWeb3Lobby,__washizuWeb3Geometry;")));
     edits.push((s.tokens[clock_started + 5].start, s.expand("__washizuWeb3ClockStarted=performance.now(),__washizuWeb3ClockFixed=__duration||__fixedMs,__washizuWeb3ClockBank=__bankMs,")));
     edits.push(s.assignment(clock_object, s.expand("__washizuWeb3Clock={facts:function(){return{startedAt:__washizuWeb3ClockStarted,now:performance.now(),fixedMs:__washizuWeb3ClockFixed,bankMs:__washizuWeb3ClockBank,remainingMs:Math.max(0,__countdown-1000)}}};")));
 
@@ -633,7 +628,7 @@ pub fn rewrite_client(src: &str) -> Result<String, RewriteError> {
         edits.push((s.tokens[method.body.open].end, bump));
     }
     // Only the public ID prefix leaves the page; never its secret suffix.
-    let native = s.expand(&format!("{{epoch:function(){{return {EPOCH}}},uiEpoch:function(){{return {UI_EPOCH}}},input:__washizuWeb3Input,menu:__washizuWeb3Menu,popup:__washizuWeb3Popup,lobby:__washizuWeb3Lobby,title:{{read:function(){{var id=__titleStorage[__titleKeys.__titleLoginKey];return{{element:__washizuWeb3TitleElement,account:typeof id==='string'&&/^ID[0-9A-F]{{8}}-[0-9A-Za-z]{{8}}$/.test(id)?id.substr(0,10):null}}}}}},geometry:__washizuWeb3Geometry,clock:{{mounted:function(){{return __clock.__mounted()}},target:function(){{return __clock.{target_getter}()}},facts:function(){{return __washizuWeb3Clock.facts()}}}},modal:function(){{return {modal_owner}.__hasModal()}}}}"));
+    let native = s.expand(&format!("{{epoch:function(){{return {EPOCH}}},uiEpoch:function(){{return {UI_EPOCH}}},input:__washizuWeb3Input,menu:__washizuWeb3Menu,popup:__washizuWeb3Popup,lobby:__washizuWeb3Lobby,title:{{read:function(){{var id=__titleStorage[__titleKeys.__titleLoginKey];return{{account:typeof id==='string'&&/^ID[0-9A-F]{{8}}-[0-9A-Za-z]{{8}}$/.test(id)?id.substr(0,10):null}}}}}},geometry:__washizuWeb3Geometry,clock:{{mounted:function(){{return __clock.__mounted()}},target:function(){{return __clock.{target_getter}()}},facts:function(){{return __washizuWeb3Clock.facts()}}}},modal:function(){{return {modal_owner}.__hasModal()}}}}"));
     edits.push((
         s.tokens[outer_close].start,
         format!(";{MARKER}window.__akagiTenhou=({PRODUCER})({native});\n"),

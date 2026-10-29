@@ -441,7 +441,9 @@ impl Machine {
         run.expire(now);
         self.suspension = why;
         self.env = Some(env);
-        if why.is_none() && !matches!(run.stage, Stage::Stopped(_)) && self.effects.idle() {
+        if matches!(run.stage, Stage::Stopped(_)) {
+            self.effects.cancel();
+        } else if why.is_none() && self.effects.idle() {
             self.effects.schedule(now + LOOK, Input::WebObserve);
         }
     }
