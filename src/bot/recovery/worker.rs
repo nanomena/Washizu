@@ -129,7 +129,8 @@ impl PrimaryWorker {
                             .react(work.event.as_slice())
                             .await
                             .map_err(|e| format!("{e:#}"))
-                            .and_then(|reply| validate_delivery(reply, work.through));
+                            .and_then(|reply| validate_delivery(reply, work.through))
+                            .and_then(|reply| validate_restoration(reply, work.event.as_slice()));
                         let needs_restart = match &result {
                             Err(_) => true,
                             Ok(reply) => {
@@ -270,6 +271,36 @@ async fn replay(
         .await
         .map_err(|e| format!("replay real game prefix: {e:#}"))
         .and_then(|reply| validate_delivery(reply, through))
+        .and_then(|reply| validate_restoration(reply, &prefix))
+}
+
+fn validate_restoration(reply: BotResponse, events: &[MjaiEvent]) -> Result<BotResponse, String> {
+    if reply.unavailable_reason().is_some()
+        || !events.iter().any(|e| {
+            matches!(
+                e,
+                MjaiEvent::RestoreKyoku { .. } | MjaiEvent::ObservedDecision { .. }
+            )
+        })
+    {
+        return Ok(reply);
+    }
+    let meta = reply.meta.as_ref().and_then(|m| m.get("restoration"));
+    if !meta.is_some_and(|m| {
+        m["origin"] == "public_snapshot"
+            && m["temporal_prefix"] == "reset"
+            && m["missing_history"] == "unknown_fields"
+    }) {
+        return Err("Primary did not acknowledge the public-position restore contract; no incomplete or ignored snapshot can become ready.".into());
+    }
+    for event in events {
+        if let MjaiEvent::RestoreKyoku { snapshot } = event {
+            if meta.unwrap()["seat"].as_u64() != Some(u64::from(snapshot.seat)) {
+                return Err("Primary restore acknowledged a different viewer.".into());
+            }
+        }
+    }
+    Ok(reply)
 }
 
 fn validate_delivery(reply: BotResponse, expected: u64) -> Result<BotResponse, String> {

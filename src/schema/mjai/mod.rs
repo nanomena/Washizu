@@ -82,7 +82,7 @@ fn default_num_players() -> u8 {
 pub enum MjaiEvent {
     /// Validated public board with an explicit new temporal-cache origin.
     RestoreKyoku {
-        snapshot: crate::schema::restore::KyokuRestore,
+        snapshot: Box<crate::schema::restore::KyokuRestore>,
     },
     /// One real event and its independently computed, provider-constrained
     /// legal actions, captured atomically at that event's original window.

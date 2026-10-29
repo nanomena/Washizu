@@ -17,12 +17,14 @@ struct Primary {
     fail_at: Option<u64>,
     calls: Arc<Mutex<Vec<Vec<MjaiEvent>>>>,
     last: BotResponse,
+    restored: bool,
 }
 
 impl Primary {
     fn new(gate: Option<Arc<Notify>>) -> Self {
         Self {
             through: 0,
+            restored: false,
             gate,
             first: true,
             bare_reach: false,
@@ -43,6 +45,9 @@ impl BotRunner for Primary {
     async fn react(&mut self, events: &[MjaiEvent]) -> Result<BotResponse> {
         self.calls.lock().unwrap().push(events.to_vec());
         self.through += events.len() as u64;
+        self.restored |= events
+            .iter()
+            .any(|e| matches!(e, MjaiEvent::RestoreKyoku { .. }));
         if self.fail_at == Some(self.through) && !self.failed {
             self.failed = true;
             bail!("injected broken primary pipe");
@@ -94,6 +99,9 @@ impl BotRunner for Primary {
             };
         }
         self.last.meta = Some(json!({"delivery":{"through":self.through}}));
+        if self.restored {
+            self.last.meta.as_mut().unwrap()["restoration"] = json!({"origin":"public_snapshot", "temporal_prefix":"reset", "missing_history":"unknown_fields", "seat":0});
+        }
         Ok(self.last.clone())
     }
     async fn reset(&mut self) -> Result<()> {

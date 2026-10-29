@@ -759,7 +759,9 @@ impl TenhouBridge {
                 self.notify(Notification::warn("Tenhou: restoring the main model")
                     .body("按服务器局面快照恢复本手主模型；缺失的历史特征明确置为未知，下一次真实决策经合法动作校验后接续。")
                     .id("tenhou-reinit"));
-                MjaiEvent::RestoreKyoku { snapshot }
+                MjaiEvent::RestoreKyoku {
+                    snapshot: Box::new(snapshot),
+                }
             }
             Err(error) => MjaiEvent::InterruptedKyoku {
                 reason: format!("REINIT position rejected: {error:#}"),
@@ -2620,7 +2622,7 @@ mod tests {
         );
         let restored = parse_one(&mut b, &reinit);
         assert_eq!(restored.len(), 2);
-        assert!(matches!(restored[1], MjaiEvent::InterruptedKyoku { .. }));
+        assert!(matches!(restored[1], MjaiEvent::RestoreKyoku { .. }));
         assert!(!restored
             .iter()
             .any(|e| matches!(e, MjaiEvent::StartKyoku { .. })));
@@ -2798,7 +2800,7 @@ mod tests {
         );
         assert!(matches!(
             parse_one(&mut b, &reinit).last(),
-            Some(MjaiEvent::InterruptedKyoku { .. })
+            Some(MjaiEvent::RestoreKyoku { .. })
         ));
         assert_eq!(b.state.seat, 2);
         let init = format!(
@@ -3165,7 +3167,7 @@ mod tests {
         let reinit = r#"{"tag":"REINIT","seed":"0,0,1,3,0,23","ten":"240,250,250,250","oya":"2","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96","m3":"48203","kawa0":"1,106,74,8,255,40","kawa1":"79,122,3,6,41","kawa2":"72,100,9,21,98","kawa3":"107,78,67,43,113,73"}"#;
         assert!(matches!(
             parse_one(&mut b, reinit).last(),
-            Some(MjaiEvent::InterruptedKyoku { .. })
+            Some(MjaiEvent::RestoreKyoku { .. })
         ));
         assert_eq!(b.state.seat, 2, "E1 dealer at rel 2 → we sit at wire-abs 2");
         assert!(b.state.seat_resolved);
