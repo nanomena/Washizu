@@ -10,11 +10,11 @@ type Editor = { id: string | null; name: string; platform: AccountProfile['platf
 
 // Profile-runtime words stay with this view; the monitor's policy/health
 // vocabulary and its independent state are unchanged.
-const CLIENT_TEXT: Record<Lang, Record<'starting' | 'active' | 'closing' | 'failed' | 'locked' | 'show' | 'multiple', string>> = {
-  'zh-CN': { starting: '正在打开…', active: '已打开', closing: '正在清理并关闭…', failed: '运行失败', locked: '清理未确认，此档案已锁定', show: '切换到窗口', multiple: '可同时打开多个账号；运行时关闭此窗仅最小化' },
-  'zh-TW': { starting: '正在開啟…', active: '已開啟', closing: '正在清理並關閉…', failed: '執行失敗', locked: '清理未確認，此檔案已鎖定', show: '切換至視窗', multiple: '可同時開啟多個帳號；執行時關閉此窗僅最小化' },
-  en: { starting: 'Opening…', active: 'Open', closing: 'Cleaning up…', failed: 'Client failed', locked: 'Cleanup unconfirmed; profile locked', show: 'Switch to window', multiple: 'Multiple clients; close minimizes while clients run' },
-  ja: { starting: '起動中…', active: '起動済み', closing: '終了処理中…', failed: '動作失敗', locked: '終了未確認・このプロファイルはロック中', show: 'ウィンドウへ', multiple: '複数起動可・クライアント起動中は閉じると最小化' },
+const CLIENT_TEXT: Record<Lang, Record<'starting' | 'active' | 'closing' | 'failed' | 'locked' | 'show', string>> = {
+  'zh-CN': { starting: '正在打开…', active: '已打开', closing: '正在清理并关闭…', failed: '运行失败', locked: '清理未确认，此档案已锁定', show: '切换到窗口' },
+  'zh-TW': { starting: '正在開啟…', active: '已開啟', closing: '正在清理並關閉…', failed: '執行失敗', locked: '清理未確認，此檔案已鎖定', show: '切換至視窗' },
+  en: { starting: 'Opening…', active: 'Open', closing: 'Cleaning up…', failed: 'Client failed', locked: 'Cleanup unconfirmed; profile locked', show: 'Switch to window' },
+  ja: { starting: '起動中…', active: '起動済み', closing: '終了処理中…', failed: '動作失敗', locked: '終了未確認・このプロファイルはロック中', show: 'ウィンドウへ' },
 }
 
 const locked = (client: ProfileClient | undefined) => client?.state === 'closing' || client?.state === 'failed' && client.cleanup === 'unconfirmed'
@@ -105,7 +105,7 @@ export function Profiles() {
       </table>
       {state?.profiles.length === 0 && <p className="accounts-empty">{tr('新建一份档案，选择平台后登录账号。')}</p>}
     </section>}
-    <footer className="accounts-footer">{preferences ? <span>{tr('仅用于以后新建的档案，已有档案保持各自设置。')}</span> : <><span>{state ? tr('共 {0} 份档案', state.profiles.length) : ''}</span><span title={words.multiple}>{words.multiple}</span></>}</footer>
+    <footer className="accounts-footer">{preferences ? <span>{tr('仅用于以后新建的档案，已有档案保持各自设置。')}</span> : <span>{state ? tr('共 {0} 份档案', state.profiles.length) : ''}</span>}</footer>
     <dialog className="accounts-editor" id="editor" ref={dialog} aria-labelledby="editor-title" onCancel={event => { if (busy) event.preventDefault(); else setEditor(null) }}>
       <form id="form" onSubmit={save}>
         <h2 id="editor-title">{editor?.id ? tr('管理档案') : tr('新建档案')}</h2>
