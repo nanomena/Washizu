@@ -245,3 +245,17 @@ episode. A lobby return cannot authorize a new match. Only authentic
 `StartKyoku` or `RestoreKyoku` returns the UI to `Table` and clears the deadline;
 a click or a disappearing title is not proof of a restored table. The model
 source coordinator separately validates and restores Primary context.
+
+## Native disconnect confirmation
+
+The native socket-close callback is marked by function identity. The observer
+reads only the modal currently owning that same confirmation callback; neither
+message text nor a generic OK button grants permission. The callback is returned
+unchanged and is never invoked by instrumentation. Unknown/error/login modals
+remain unavailable. The Web3 DTO requires an explicit nullable disconnect field.
+
+The same FSM and public saved-account authority permit this modal confirmation
+and the following title resume through the shared pointer. Each control is
+spent once. A same-game reload retains the original reconnect deadline and
+spent-control evidence while revoking all pending targets and tickets. Only a
+real round start/restore clears the reconnect episode.
