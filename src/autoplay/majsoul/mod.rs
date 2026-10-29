@@ -959,7 +959,7 @@ fn is_dealer_opening(ctx: &ActionContext) -> bool {
         && player.kita_tiles.is_empty()
 }
 
-/// Bind every meld, including a single choice, to the rendered action button.
+/// Bind chi/pon, including a single choice, to the rendered action button.
 /// A multi-choice row is read only after it appears; the common controller
 /// owns reveal/commit rather than advancing on an unconfirmed first click.
 fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx: &ActionContext) {
@@ -970,6 +970,12 @@ fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx:
         x_norm: button.0,
         y_norm: button.1,
     });
+
+    // The measured active colours are qualified for chi/pon. A daiminkan
+    // has a unique consumed set and keeps the existing kan button path.
+    if op == MajsoulOpType::Daiminkan {
+        return;
+    }
 
     let consumed: Vec<String> = match ctx.action {
         MjaiEvent::Chi { consumed, .. } => consumed.to_vec(),
@@ -2367,7 +2373,7 @@ mod tests {
     }
 
     #[test]
-    fn single_pon_and_daiminkan_also_require_rendered_button_geometry() {
+    fn single_pon_requires_geometry_and_kan_keeps_its_qualified_button_path() {
         let snap = snapshot_with_hand(0, vec!["1m"]);
         for (action, at, consume) in [
             (
@@ -2395,7 +2401,10 @@ mod tests {
             let ctx = ctx_for(&action, &snap, &legal, Some("5p"), None, false);
             let mapping = mapped_targets(&ctx);
             assert_eq!(mapping.targets.len(), 1);
-            assert_eq!(mapping.choice, Some(MeldChoice { index: 0, count: 1 }));
+            assert_eq!(
+                mapping.choice,
+                (at == ActionType::Pon).then_some(MeldChoice { index: 0, count: 1 })
+            );
         }
     }
 
