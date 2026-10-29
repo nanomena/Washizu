@@ -32,6 +32,7 @@ function fixture() {
   state.target = state.cards[13];
   const native = {
     epoch: () => state.epoch, uiEpoch: () => state.uiEpoch, modal: () => state.modal,
+    title: { read: () => ({ element: state.titleElement || null, account: state.account || null }) },
     input: { mode: () => state.live, phaseReady: () => state.ready, hand: () => state.hand, actor: () => state.actor,
       drawn: () => state.drawn, riichi: () => state.riichi, isCard: value => value instanceof Card, targetSlot: value => value.slot,
       slot: i => state.cards[i] && { ...state.cards[i], target: state.cards[i] } },
@@ -47,6 +48,7 @@ function fixture() {
     pageXOffset: 0, pageYOffset: 0, getComputedStyle: node => node.style,
     document: { elementFromPoint(x, y) {
       if (state.overlay && contains(state.overlay.rect, { x, y })) return state.overlay;
+      if (state.titleButton && contains(state.titleButton.rect, { x, y })) return state.titleButton;
       for (const button of state.popup.element?.children || []) if (button.style.display !== 'none' && contains(button.rect, { x, y })) return button;
       for (const outer of menuRoot.children) if (outer.style.display !== 'none' && outer.style.visibility !== 'hidden' && contains(outer.rect, { x, y })) return outer;
       return canvas;
@@ -62,6 +64,37 @@ function fixture() {
   };
   return { state, api, context, native, canvas, menuRoot, handPanel, control, probeDiscard };
 }
+
+test('title resume exposes only the saved-account control with a fresh physical witness', () => {
+  const f = fixture(), root = new Element(), button = new Element('BUTTON', { x: 80, y: 80, width: 120, height: 40 });
+  root.append(button);
+  root.querySelector = selector => selector === '.idcont > button[name="c6"]' ? button : null;
+  Object.assign(f.state, { live: 0, titleElement: root, titleButton: button, account: 'ID1234ABCD' });
+  const first = f.api.readUi(), request = { kind: 'resume', identity: first.title.identity };
+  assert.equal(first.title.enabled, true);
+  assert.equal(first.popup, null); assert.equal(first.lobby, null);
+  const target = f.api.probeUi(request).target;
+  assert.ok(target);
+  assert.equal(f.api.probeUi({ ...request, targetIdentity: target.identity, point: middle(target.bounds) }).status, 'ready');
+  f.state.overlay = new Element();
+  assert.equal(f.api.probeUi(request).status, 'changed');
+  f.state.overlay = null;
+  f.state.modal = true;
+  assert.equal(f.api.readUi().title.enabled, false);
+  f.state.modal = false;
+  f.state.account = 'ID87654321';
+  assert.equal(f.api.probeUi(request).status, 'changed');
+  f.state.account = null;
+  assert.equal(f.api.readUi().title.enabled, false, 'guest/register is never a resume target');
+  f.state.account = 'ID1234ABCD';button.disabled = true;
+  assert.equal(f.api.readUi().title.enabled, false);
+  button.disabled = false;root.style.display = 'none';
+  assert.equal(f.api.readUi().title, null);
+  root.style.display = '';f.state.live = 1;
+  assert.equal(f.api.readUi().title, null, 'an underlying title cannot cover a live table');
+  assert.equal(f.api.pressUi, undefined);
+  assert.deepEqual(f.state.effects, []);
+});
 
 test('playing API is read-only, exact physical red/plain geometry uses native scale and offsets', () => {
   const { state, api, probeDiscard } = fixture();

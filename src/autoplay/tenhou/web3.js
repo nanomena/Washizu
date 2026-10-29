@@ -265,7 +265,17 @@
   }
 
   function uiSnapshot() {
-    const dto = { client: 'web3', popup: null, lobby: null };
+    const session = native.title.read();
+    const account = typeof session.account === 'string' && /^ID[0-9A-F]{8}$/.test(session.account) ? session.account : null;
+    const dto = { client: 'web3', account, title: null, popup: null, lobby: null };
+    // Only the registered-account title control. No guest/register/ID entry.
+    if (native.input.mode() === 0 && connected(session.element) && visible(session.element)) {
+      const element = session.element;
+      const button = element.querySelector('.idcont > button[name="c6"]');
+      const enabled = !!account && !native.modal() && visible(button) && !button.disabled;
+      dto.title = { identity: documentId + ':title:' + nodeId(element) + ':' + (button ? nodeId(button) : 'missing') + ':' + account + ':' + Number(enabled), enabled };
+      return { dto, element, button };
+    }
     if (!live()) return { dto };
     const current = native.popup.read();
     const element = current.element;
@@ -316,10 +326,13 @@
 
   function probeUi(request) {
     const response = (status, target = null) => ({ client: 'web3', status, target });
-    if (!request || !['popup', 'join'].includes(request.kind) || typeof request.identity !== 'string' || !live()) return response('unavailable');
+    if (!request || !['popup', 'join', 'resume'].includes(request.kind) || typeof request.identity !== 'string') return response('unavailable');
     const current = uiSnapshot();
     let button;
-    if (request.kind === 'popup') {
+    if (request.kind === 'resume') {
+      if (!current.dto.title || current.dto.title.identity !== request.identity || !current.dto.title.enabled) return response('changed');
+      button = current.button;
+    } else if (request.kind === 'popup') {
       if (!current.dto.popup || current.dto.popup.identity !== request.identity || !current.dto.popup.enabled) return response('changed');
       button = current.button;
     } else {

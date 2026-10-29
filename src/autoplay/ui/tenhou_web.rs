@@ -65,12 +65,23 @@ pub struct Lobby {
     pub reservation_requested: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Title {
+    pub identity: String,
+    pub enabled: bool,
+}
+
 /// Required fields have no guessed defaults. A missing/invalid producer is
 /// reported as unavailable by the executor, never as a convenient lobby.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Web3Observation {
     pub client: ClientTag,
+    #[serde(deserialize_with = "required_nullable")]
+    pub account: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub title: Option<Title>,
     #[serde(deserialize_with = "required_nullable")]
     pub popup: Option<Popup>,
     #[serde(deserialize_with = "required_nullable")]
@@ -87,6 +98,10 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
+    Resume {
+        identity: String,
+        account: String,
+    },
     Popup {
         identity: String,
         tag: PopupTag,
@@ -103,6 +118,7 @@ pub enum Control {
 impl Control {
     pub fn dispatch_key(&self) -> (&'static str, &str) {
         match self {
+            Self::Resume { identity, .. } => ("resume", identity),
             Self::Popup { identity, .. } => ("popup", identity),
             Self::Reserve { identity, .. } => ("join", identity),
         }
@@ -110,7 +126,9 @@ impl Control {
 
     fn identity(&self) -> &str {
         match self {
-            Self::Popup { identity, .. } | Self::Reserve { identity, .. } => identity,
+            Self::Resume { identity, .. }
+            | Self::Popup { identity, .. }
+            | Self::Reserve { identity, .. } => identity,
         }
     }
 }
@@ -127,6 +145,7 @@ pub enum Stage {
     WaitingStart,
     Starting,
     Table,
+    Reconnecting,
     RoundResult,
     FinalResult,
     WaitingLobby,
@@ -146,6 +165,8 @@ struct Candidate {
 pub(super) struct Run {
     pub stage: Stage,
     player: Option<u8>,
+    /// Learned at our authenticated table, never from the title page itself.
+    resume_account: Option<String>,
     target: Option<TableSpec>,
     candidate: Option<Candidate>,
     spent: HashSet<String>,
@@ -158,6 +179,7 @@ impl Default for Run {
         Self {
             stage: Stage::WaitingStart,
             player: None,
+            resume_account: None,
             target: None,
             candidate: None,
             spent: HashSet::new(),
@@ -168,6 +190,10 @@ impl Default for Run {
 }
 
 impl Run {
+    pub(super) fn end_resume(&mut self) {
+        self.resume_account = None;
+    }
+
     fn stop(&mut self, reason: WaitingReason) {
         self.stage = Stage::Stopped(reason);
         self.candidate = None;
@@ -176,11 +202,20 @@ impl Run {
 
     fn expire(&mut self, now: Instant) {
         if self.until.is_some_and(|until| now >= until) {
-            self.stop(WaitingReason::EndTimeout);
+            self.stop(if self.stage == Stage::Reconnecting {
+                WaitingReason::ReconnectTimeout
+            } else {
+                WaitingReason::EndTimeout
+            });
         }
     }
 
     fn allowed(&self, control: &Control, env: Environment) -> bool {
+        if let Control::Resume { account, .. } = control {
+            return env.settings.enabled
+                && self.stage == Stage::Reconnecting
+                && self.resume_account.as_ref() == Some(account);
+        }
         if self.player.is_none() {
             return false;
         }
@@ -219,6 +254,29 @@ impl Run {
     }
 
     fn control(&mut self, observation: &Web3Observation, now: Instant) -> Option<Control> {
+        if let Some(title) = &observation.title {
+            if observation.popup.is_some() || observation.lobby.is_some() {
+                return None;
+            }
+            let account = self.resume_account.as_ref()?;
+            if observation.account.as_ref() != Some(account) {
+                self.resume_account = None;
+                self.stop(WaitingReason::OwnershipChanged);
+                return None;
+            }
+            if self.stage != Stage::Reconnecting {
+                self.stage = Stage::Reconnecting;
+                self.until = Some(now + RESULT_LIMIT);
+                self.attempts = 0;
+            }
+            if !title.enabled || title.identity.is_empty() || self.spent.contains(&title.identity) {
+                return None;
+            }
+            return Some(Control::Resume {
+                identity: title.identity.clone(),
+                account: account.clone(),
+            });
+        }
         if let Some(popup) = &observation.popup {
             // A popup plus a usable lobby is contradictory, not permission
             // to prefer one observer or choose whichever button is enabled.
@@ -250,6 +308,7 @@ impl Run {
                             | Stage::FinalResult
                     ) =>
                 {
+                    self.resume_account = None;
                     Stage::FinalResult
                 }
                 // The real client can queue a rank certificate after OWARI.
@@ -292,7 +351,7 @@ impl Run {
         if self.stage != Stage::WaitingLobby {
             if matches!(
                 self.stage,
-                Stage::Table | Stage::RoundResult | Stage::FinalResult
+                Stage::Table | Stage::RoundResult | Stage::FinalResult | Stage::Reconnecting
             ) {
                 self.stop(WaitingReason::Lobby);
             }
@@ -348,7 +407,24 @@ impl Machine {
             self.revoke();
         }
         if session_changed || !matches!(self.state, State::Web(_)) {
-            self.state = State::Web(Run::default());
+            // A reload of the same active game may retain only the public
+            // account authorization. All DOM targets/tickets are retired.
+            let resume_account = match &self.state {
+                State::Web(run)
+                    if self.env.is_some_and(|old| {
+                        old.client == env.client
+                            && old.context.is_some()
+                            && old.context.map(|c| c.game) == env.context.map(|c| c.game)
+                    }) =>
+                {
+                    run.resume_account.clone()
+                }
+                _ => None,
+            };
+            self.state = State::Web(Run {
+                resume_account,
+                ..Run::default()
+            });
         }
         let State::Web(run) = &mut self.state else {
             unreachable!()
@@ -442,9 +518,41 @@ impl Machine {
             return;
         }
         let Some(observation) = observation else {
-            run.stop(WaitingReason::ObservationUnavailable);
+            // The document may be between execution contexts. Only a known
+            // own game gets a bounded reconnect episode; no second retry owner.
+            if run.resume_account.is_some() {
+                run.candidate = None;
+                if run.stage != Stage::Reconnecting {
+                    run.stage = Stage::Reconnecting;
+                    run.until = Some(now + RESULT_LIMIT);
+                    run.attempts = 0;
+                }
+                self.effects.schedule(now + LOOK, Input::WebObserve);
+            } else {
+                run.stop(WaitingReason::ObservationUnavailable);
+            }
             return;
         };
+        if run.player.is_some()
+            && env.context.is_some()
+            && run.stage == Stage::Table
+            && observation.title.is_none()
+        {
+            if let Some(account) = observation.account.as_ref().filter(|s| {
+                s.len() == 10
+                    && s.starts_with("ID")
+                    && s.as_bytes()[2..].iter().all(u8::is_ascii_hexdigit)
+            }) {
+                match &run.resume_account {
+                    Some(old) if old != account => {
+                        run.resume_account = None;
+                        run.stop(WaitingReason::OwnershipChanged);
+                        return;
+                    }
+                    _ => run.resume_account = Some(account.clone()),
+                }
+            }
+        }
         let control = run
             .control(&observation, now)
             .filter(|control| run.allowed(control, env));

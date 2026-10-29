@@ -72,7 +72,10 @@ impl AutoplayManager {
             | MjaiEvent::EndKyoku
             | MjaiEvent::InterruptedKyoku { .. }
             | MjaiEvent::RestoreKyoku { .. } => {
-                if matches!(ev, MjaiEvent::StartKyoku { .. }) {
+                if matches!(
+                    ev,
+                    MjaiEvent::StartKyoku { .. } | MjaiEvent::RestoreKyoku { .. }
+                ) {
                     self.toggles.reset();
                     let window = self
                         .ctx
@@ -81,7 +84,12 @@ impl AutoplayManager {
                         .ok()
                         .and_then(|g| *g)
                         .map(Into::into);
-                    self.ui_transition("start_kyoku", |ui| ui.table_started(window));
+                    let event = if matches!(ev, MjaiEvent::RestoreKyoku { .. }) {
+                        "restore_kyoku"
+                    } else {
+                        "start_kyoku"
+                    };
+                    self.ui_transition(event, |ui| ui.table_started(window));
                 }
                 // Per-kyoku reset: keep last seen rect cache and cached seat,
                 // drop everything else. Keep last_kawa_tile as None so
