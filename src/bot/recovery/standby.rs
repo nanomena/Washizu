@@ -99,22 +99,6 @@ impl LocalStandby {
     }
 }
 
-#[cfg(test)]
-mod observed_tests {
-    use super::*;
-    #[test]
-    fn a_restored_post_call_window_can_use_its_proved_hand_discard_without_inventing_one() {
-        let action = MjaiEvent::Dahai {
-            actor: 0,
-            pai: "9m".into(),
-            tsumogiri: false,
-        };
-        let reply = LocalStandby::observed_reply(std::slice::from_ref(&action)).unwrap();
-        assert_eq!(reply.action, action);
-        assert!(LocalStandby::observed_reply(&[]).is_none());
-    }
-}
-
 /// Physical-copy distinctions, red identity, claim source and exact consumed
 /// tiles all matter. Ordering of a consume multiset does not.
 pub fn legal_response(response: &BotResponse, legal: &[MjaiEvent]) -> bool {
@@ -130,4 +114,20 @@ pub fn legal_response(response: &BotResponse, legal: &[MjaiEvent]) -> bool {
     };
     let candidate = canonical(&response.action);
     legal.iter().any(|event| canonical(event) == candidate)
+}
+
+#[cfg(test)]
+mod observed_tests {
+    use super::*;
+    #[test]
+    fn a_restored_post_call_window_can_use_its_proved_hand_discard_without_inventing_one() {
+        let action = MjaiEvent::Dahai {
+            actor: 0,
+            pai: "9m".into(),
+            tsumogiri: false,
+        };
+        let reply = LocalStandby::observed_reply(std::slice::from_ref(&action)).unwrap();
+        assert_eq!(reply.action, action);
+        assert!(LocalStandby::observed_reply(&[]).is_none());
+    }
 }
