@@ -1,7 +1,7 @@
 //! Majsoul implementation of [`SiteAdapter`].
 //!
-//! Coordinate tables in `coords.rs` are the only Majsoul-specific data;
-//! target matching uses:
+//! Target matching combines protocol identity with the current rendered
+//! controls. Coordinate tables only delimit where a control may appear:
 //!
 //! - The current `legal_actions` from the riichi engine (which buttons
 //!   are visible, plus chi/pon/kan candidate enumeration).
@@ -346,8 +346,12 @@ impl SiteAdapter for MajsoulAutoplay {
                     };
                     (
                         face,
-                        format!("meld:reveal:{:?}", ctx.action),
-                        TargetKind::Reveal,
+                        format!("meld:button:{:?}", ctx.action),
+                        if choice.count > 1 {
+                            TargetKind::Reveal
+                        } else {
+                            TargetKind::Commit
+                        },
                     )
                 };
             if *self
@@ -955,8 +959,9 @@ fn is_dealer_opening(ctx: &ActionContext) -> bool {
         && player.kita_tiles.is_empty()
 }
 
-/// Bind the semantic combination. Its physical candidate geometry is read
-/// only after the real row appears; the common controller owns reveal/commit.
+/// Bind every meld, including a single choice, to the rendered action button.
+/// A multi-choice row is read only after it appears; the common controller
+/// owns reveal/commit rather than advancing on an unconfirmed first click.
 fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx: &ActionContext) {
     let Some(button) = action_button_for(op, ctx) else {
         return;
@@ -974,9 +979,6 @@ fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx:
     };
 
     let candidates = collect_candidate_consumes(ctx.legal_actions, at);
-    if candidates.len() <= 1 {
-        return; // single option → Majsoul auto-confirms
-    }
     let mut sorted_consumed = consumed;
     sorted_consumed.sort_by(|a, b| compare_pai(a, b));
     if let Some(idx) = candidates
@@ -2361,10 +2363,40 @@ mod tests {
         ];
         let mapping = candidate_mapping(&legal, ["4s", "6s"], "5s");
         assert_eq!(mapping.targets.len(), 1);
-        assert_eq!(
-            mapping.choice, None,
-            "single combination needs no candidate row"
-        );
+        assert_eq!(mapping.choice, Some(MeldChoice { index: 0, count: 1 }));
+    }
+
+    #[test]
+    fn single_pon_and_daiminkan_also_require_rendered_button_geometry() {
+        let snap = snapshot_with_hand(0, vec!["1m"]);
+        for (action, at, consume) in [
+            (
+                MjaiEvent::Pon {
+                    actor: 0,
+                    target: 3,
+                    pai: "5p".into(),
+                    consumed: ["5p".into(), "5p".into()],
+                },
+                ActionType::Pon,
+                vec![53, 54],
+            ),
+            (
+                MjaiEvent::Daiminkan {
+                    actor: 0,
+                    target: 3,
+                    pai: "5p".into(),
+                    consumed: ["5pr".into(), "5p".into(), "5p".into()],
+                },
+                ActionType::Daiminkan,
+                vec![52, 53, 54],
+            ),
+        ] {
+            let legal = [Action::new(at, Some(55), consume, Some(3))];
+            let ctx = ctx_for(&action, &snap, &legal, Some("5p"), None, false);
+            let mapping = mapped_targets(&ctx);
+            assert_eq!(mapping.targets.len(), 1);
+            assert_eq!(mapping.choice, Some(MeldChoice { index: 0, count: 1 }));
+        }
     }
 
     #[test]

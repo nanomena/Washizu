@@ -220,6 +220,46 @@ mod tests {
     }
 
     #[test]
+    fn actual_button_geometry_tracks_canvas_offset_and_device_scale() {
+        for png in [
+            include_bytes!("../fixtures/melds/action-chi.png").as_slice(),
+            include_bytes!("../fixtures/melds/action-pon.png").as_slice(),
+        ] {
+            let (source, original) = native(png);
+            let baseline = action(&source, 1., original, coords::ACTIONS[1]).unwrap();
+            for downsample in [1, 2] {
+                let (w, h) = (source.width / downsample, source.height / downsample);
+                let (left, top) = (31, 19);
+                let mut image = Image {
+                    width: w + left + 7,
+                    height: h + top + 11,
+                    pixels: vec![[0, 0, 0]; (w + left + 7) * (h + top + 11)],
+                };
+                for y in 0..h {
+                    for x in 0..w {
+                        image.pixels[(y + top) * image.width + x + left] =
+                            source.pixels[y * downsample * source.width + x * downsample];
+                    }
+                }
+                for dpr in [1., 2.] {
+                    let viewport = CanvasRect {
+                        x: left as f64 / dpr,
+                        y: top as f64 / dpr,
+                        width: w as f64 / dpr,
+                        height: h as f64 / dpr,
+                    };
+                    let face = action(&image, dpr, viewport, coords::ACTIONS[1]).unwrap();
+                    let factor = downsample as f64 * dpr;
+                    assert!(((face.x - viewport.x) * factor - baseline.x).abs() <= 2.);
+                    assert!(((face.y - viewport.y) * factor - baseline.y).abs() <= 2.);
+                    assert!((face.width * factor - baseline.width).abs() <= 2.);
+                    assert!((face.height * factor - baseline.height).abs() <= 2.);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn native_active_meld_buttons_supply_geometry_but_never_a_candidate_row() {
         for png in [
             include_bytes!("../fixtures/melds/action-chi.png").as_slice(),
