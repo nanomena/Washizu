@@ -168,7 +168,7 @@ pub(super) struct Run {
     /// Learned at our authenticated table, never from the title page itself.
     resume_account: Option<String>,
     target: Option<TableSpec>,
-    candidate: Option<Candidate>,
+    candidate: Option<Box<Candidate>>,
     spent: HashSet<String>,
     until: Option<Instant>,
     attempts: u32,
@@ -572,11 +572,11 @@ impl Machine {
                     now + Duration::from_millis(u64::from(delay))
                 }
             };
-            run.candidate = Some(Candidate {
+            run.candidate = Some(Box::new(Candidate {
                 control,
                 observation,
                 ready_at,
-            });
+            }));
             if now >= ready_at {
                 self.effects.schedule(now, Input::WebControl);
             } else {
