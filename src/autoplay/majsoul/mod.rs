@@ -1,7 +1,7 @@
 //! Majsoul implementation of [`SiteAdapter`].
 //!
-//! Coordinate tables in `coords.rs` are the only Majsoul-specific data;
-//! target matching uses:
+//! Target matching combines protocol identity with the current rendered
+//! controls. Coordinate tables only delimit where a control may appear:
 //!
 //! - The current `legal_actions` from the riichi engine (which buttons
 //!   are visible, plus chi/pon/kan candidate enumeration).
@@ -9,6 +9,7 @@
 //! - The dispatch flow from the original Akagi Python autoplay
 //!   (`autoplay_majsoul.py`, the main action handler).
 
+mod candidates;
 pub mod coords;
 
 use crate::autoplay::context::{AutoplayContext, CanvasRect};
@@ -25,17 +26,19 @@ use chromiumoxide::page::Page;
 #[cfg(test)]
 use coords::TSUMO_SPACE;
 use coords::{
-    action_button_pos, candidate_pos, get_pai_coord, kan_candidate_pos, MajsoulOpType,
-    ACTION_PRIORITY, TILES,
+    action_button_pos, get_pai_coord, kan_candidate_pos, MajsoulOpType, ACTION_PRIORITY, TILES,
 };
 use rand::Rng;
 use riichienv_core::action::{Action, ActionType};
 use riichienv_core::parser::tid_to_mjai;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub struct MajsoulAutoplay {
     context: Arc<AutoplayContext>,
+    /// A measured safe region for the current physical control. Every reuse
+    /// still requires fresh pixels to contain it; this owns no UI phase.
+    meld_geometry: Mutex<Option<InputTarget>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,11 +51,63 @@ struct MappedClick {
 struct TargetMapping {
     targets: Vec<MappedClick>,
     dealt: bool,
+    choice: Option<MeldChoice>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MeldChoice {
+    index: usize,
+    count: usize,
 }
 
 impl MajsoulAutoplay {
     pub fn new(context: Arc<AutoplayContext>) -> Self {
-        Self { context }
+        Self {
+            context,
+            meld_geometry: Mutex::new(None),
+        }
+    }
+
+    fn measured_meld_target(
+        &self,
+        identity: TargetIdentity,
+        viewport: CanvasRect,
+        face: CanvasRect,
+        actual: Option<(f64, f64)>,
+    ) -> Option<InputTarget> {
+        let contains = |outer: CanvasRect, inner: CanvasRect| {
+            outer.contains(inner.x, inner.y)
+                && outer.contains(inner.x + inner.width, inner.y + inner.height)
+        };
+        let mut cache = self.meld_geometry.lock().ok()?;
+        if let Some(saved) = cache
+            .as_ref()
+            .filter(|saved| saved.identity == identity && saved.viewport == viewport)
+        {
+            if contains(face, saved.bounds) {
+                return actual
+                    .is_none_or(|point| saved.bounds.contains(point.0, point.1))
+                    .then(|| saved.clone());
+            }
+        }
+        // The final probe may validate an already bound region, never invent
+        // a replacement after the pointer has reached an old location.
+        if actual.is_some() {
+            return None;
+        }
+        let target = InputTarget {
+            identity,
+            viewport,
+            bounds: CanvasRect {
+                x: face.x + face.width * 0.22,
+                y: face.y + face.height * 0.28,
+                width: face.width * 0.56,
+                height: face.height * 0.38,
+            },
+        };
+        tracing::info!(control=%target.identity.control, bounds=?target.bounds, "autoplay: bound rendered meld target");
+        *cache = Some(target.clone());
+        Some(target)
     }
 }
 
@@ -265,6 +320,63 @@ impl SiteAdapter for MajsoulAutoplay {
             ..*ctx
         };
         let mapping = mapped_targets(&normalized);
+        if let Some(choice) = mapping.choice {
+            let (image, scale) = crate::autoplay::pixels::shot(page).await?;
+            let (face, control, kind) =
+                if let Some(row) = candidates::read(&image, scale, view.viewport, choice.count) {
+                    let Some(face) = row.target(choice.index) else {
+                        return Ok(observation);
+                    };
+                    (
+                        face,
+                        format!("meld:candidate:{}:{}", choice.index, choice.count),
+                        TargetKind::Commit,
+                    )
+                } else {
+                    let Some(button) = mapping.targets.first() else {
+                        return Ok(observation);
+                    };
+                    let Some(face) = candidates::action(
+                        &image,
+                        scale,
+                        view.viewport,
+                        (button.x_norm, button.y_norm),
+                    ) else {
+                        return Ok(observation);
+                    };
+                    (
+                        face,
+                        format!("meld:button:{:?}", ctx.action),
+                        if choice.count > 1 {
+                            TargetKind::Reveal
+                        } else {
+                            TargetKind::Commit
+                        },
+                    )
+                };
+            if *self
+                .context
+                .time_budget
+                .read()
+                .map_err(|_| anyhow!("Majsoul window lock poisoned"))?
+                != Some(budget)
+            {
+                return Ok(observation);
+            }
+            let identity = TargetIdentity {
+                window: window_identity(crate::bot::control::InputWindow::Majsoul(budget).proof()),
+                hand: protocol_tiles(ctx)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(tile, drawn)| format!("{tile}:{drawn}"))
+                    .collect(),
+                control,
+            };
+            observation.target_kind = kind;
+            observation.target = self.measured_meld_target(identity, view.viewport, face, actual);
+            observation.ready = observation.target.is_some();
+            return Ok(observation);
+        }
         let selected = match intent.role {
             PressRole::Candidate => mapping.targets.get(1),
             PressRole::Discard if matches!(ctx.action, MjaiEvent::Reach { .. }) => {
@@ -847,8 +959,9 @@ fn is_dealer_opening(ctx: &ActionContext) -> bool {
         && player.kita_tiles.is_empty()
 }
 
-/// Plan a chi/pon/daiminkan: action button click + optional candidate
-/// disambiguation when multiple consume-tile combinations are legal.
+/// Bind chi/pon, including a single choice, to the rendered action button.
+/// A multi-choice row is read only after it appears; the common controller
+/// owns reveal/commit rather than advancing on an unconfirmed first click.
 fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx: &ActionContext) {
     let Some(button) = action_button_for(op, ctx) else {
         return;
@@ -858,6 +971,12 @@ fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx:
         y_norm: button.1,
     });
 
+    // The measured active colours are qualified for chi/pon. A daiminkan
+    // has a unique consumed set and keeps the existing kan button path.
+    if op == MajsoulOpType::Daiminkan {
+        return;
+    }
+
     let consumed: Vec<String> = match ctx.action {
         MjaiEvent::Chi { consumed, .. } => consumed.to_vec(),
         MjaiEvent::Pon { consumed, .. } => consumed.to_vec(),
@@ -866,21 +985,18 @@ fn plan_meld(op: MajsoulOpType, at: ActionType, result: &mut TargetMapping, ctx:
     };
 
     let candidates = collect_candidate_consumes(ctx.legal_actions, at);
-    if candidates.len() <= 1 {
-        return; // single option → Majsoul auto-confirms
-    }
     let mut sorted_consumed = consumed;
     sorted_consumed.sort_by(|a, b| compare_pai(a, b));
     if let Some(idx) = candidates
         .iter()
         .position(|c| same_consumed(c, &sorted_consumed))
     {
-        if let Some(p) = candidate_pos(idx, candidates.len()) {
-            result.targets.push(MappedClick {
-                x_norm: p.0,
-                y_norm: p.1,
-            });
-        }
+        result.choice = Some(MeldChoice {
+            index: idx,
+            count: candidates.len(),
+        });
+    } else {
+        result.targets.clear();
     }
 }
 
@@ -1159,6 +1275,60 @@ mod tests {
         );
     }
     #[test]
+    fn measured_meld_geometry_requires_fresh_containment_and_preserves_random_aim() {
+        let adapter = MajsoulAutoplay::new(Arc::new(AutoplayContext::new()));
+        let identity = TargetIdentity {
+            window: "current".into(),
+            hand: vec!["4m".into(), "5mr".into()],
+            control: "candidate:0:3".into(),
+        };
+        let viewport = CanvasRect {
+            x: 0.,
+            y: 0.,
+            width: 1280.,
+            height: 720.,
+        };
+        let face = CanvasRect {
+            x: 400.,
+            y: 460.,
+            width: 55.,
+            height: 85.,
+        };
+        let bound = adapter
+            .measured_meld_target(identity.clone(), viewport, face, None)
+            .unwrap();
+        let mut rng = rand::rng();
+        let points: Vec<_> = (0..200)
+            .map(|_| crate::autoplay::pointer::aim::target(bound.bounds, None, &mut rng))
+            .collect();
+        assert!(points.iter().all(|p| face.contains(p.0, p.1)));
+        assert!(points.windows(2).any(|p| (p[0].0 - p[1].0).abs() > 1.));
+        let hover_face = CanvasRect {
+            y: face.y - 10.,
+            ..face
+        };
+        for point in points {
+            assert_eq!(
+                adapter.measured_meld_target(identity.clone(), viewport, hover_face, Some(point)),
+                Some(bound.clone())
+            );
+        }
+        let gone = CanvasRect {
+            x: face.x + 100.,
+            ..face
+        };
+        assert!(adapter
+            .measured_meld_target(identity.clone(), viewport, gone, Some((420., 490.)))
+            .is_none());
+        let replaced = TargetIdentity {
+            window: "replaced".into(),
+            ..identity
+        };
+        assert!(adapter
+            .measured_meld_target(replaced, viewport, face, Some((420., 490.)))
+            .is_none());
+    }
+    #[test]
     fn actual_hand_layout_keeps_red_and_drawn_identity_in_viewport_css_pixels() {
         let mut snapshot = snapshot_with_oya(0, 1, vec!["5mr", "5m"]);
         snapshot.players[0].drawn_tile = Some("5m".into());
@@ -1223,7 +1393,7 @@ mod tests {
     use crate::autoplay::context::CanvasRect;
 
     use crate::game_state::snapshot::{GameStateSnapshot, Phase, PlayerSnapshot};
-    use coords::{ACTIONS, CANDIDATES};
+    use coords::ACTIONS;
 
     fn snapshot_with_oya(seat: u8, oya: u8, tehai: Vec<&str>) -> GameStateSnapshot {
         let mut s = snapshot_with_hand(seat, tehai);
@@ -2140,7 +2310,7 @@ mod tests {
         Action::new(ActionType::Chi, Some(tile), vec![c1, c2], Some(0))
     }
 
-    fn candidate_clicks(legal: &[Action], consumed: [&str; 2], pai: &str) -> Vec<(f64, f64)> {
+    fn candidate_mapping(legal: &[Action], consumed: [&str; 2], pai: &str) -> TargetMapping {
         let snap = snapshot_with_hand(0, vec!["1m"]);
         let act = MjaiEvent::Chi {
             actor: 0,
@@ -2150,12 +2320,7 @@ mod tests {
         };
 
         let ctx = ctx_for(&act, &snap, legal, Some(pai), None, false);
-        let result = mapped_targets(&ctx);
-        result
-            .targets
-            .iter()
-            .map(|MappedClick { x_norm, y_norm }| (*x_norm, *y_norm))
-            .collect()
+        mapped_targets(&ctx)
     }
 
     #[test]
@@ -2172,9 +2337,9 @@ mod tests {
             chi_action(89, 92, 96), // [6s,7s] (first 6s)
             chi_action(89, 93, 96), // [6s,7s] (second 6s)
         ];
-        let clicks = candidate_clicks(&legal, ["3s", "4s"], "5s");
-        assert_eq!(clicks.len(), 2, "button click + candidate click");
-        assert_eq!(clicks[1], CANDIDATES[3], "idx 0 of 3 → slot 3");
+        let mapping = candidate_mapping(&legal, ["3s", "4s"], "5s");
+        assert_eq!(mapping.targets.len(), 1, "no guessed candidate coordinate");
+        assert_eq!(mapping.choice, Some(MeldChoice { index: 0, count: 3 }));
     }
 
     #[test]
@@ -2187,9 +2352,8 @@ mod tests {
             chi_action(88, 84, 92), // [4s,6s] (first 6s)
             chi_action(88, 84, 93), // [4s,6s] (second 6s)
         ];
-        let clicks = candidate_clicks(&legal, ["4s", "6s"], "5sr");
-        assert_eq!(clicks.len(), 2);
-        assert_eq!(clicks[1], CANDIDATES[6], "idx 1 of 2 → slot 6");
+        let mapping = candidate_mapping(&legal, ["4s", "6s"], "5sr");
+        assert_eq!(mapping.choice, Some(MeldChoice { index: 1, count: 2 }));
     }
 
     #[test]
@@ -2203,8 +2367,45 @@ mod tests {
             chi_action(89, 84, 92), // [4s,6s] (first 6s)
             chi_action(89, 84, 93), // [4s,6s] (second 6s)
         ];
-        let clicks = candidate_clicks(&legal, ["4s", "6s"], "5s");
-        assert_eq!(clicks.len(), 1, "button click only, no candidate row");
+        let mapping = candidate_mapping(&legal, ["4s", "6s"], "5s");
+        assert_eq!(mapping.targets.len(), 1);
+        assert_eq!(mapping.choice, Some(MeldChoice { index: 0, count: 1 }));
+    }
+
+    #[test]
+    fn single_pon_requires_geometry_and_kan_keeps_its_qualified_button_path() {
+        let snap = snapshot_with_hand(0, vec!["1m"]);
+        for (action, at, consume) in [
+            (
+                MjaiEvent::Pon {
+                    actor: 0,
+                    target: 3,
+                    pai: "5p".into(),
+                    consumed: ["5p".into(), "5p".into()],
+                },
+                ActionType::Pon,
+                vec![53, 54],
+            ),
+            (
+                MjaiEvent::Daiminkan {
+                    actor: 0,
+                    target: 3,
+                    pai: "5p".into(),
+                    consumed: ["5pr".into(), "5p".into(), "5p".into()],
+                },
+                ActionType::Daiminkan,
+                vec![52, 53, 54],
+            ),
+        ] {
+            let legal = [Action::new(at, Some(55), consume, Some(3))];
+            let ctx = ctx_for(&action, &snap, &legal, Some("5p"), None, false);
+            let mapping = mapped_targets(&ctx);
+            assert_eq!(mapping.targets.len(), 1);
+            assert_eq!(
+                mapping.choice,
+                (at == ActionType::Pon).then_some(MeldChoice { index: 0, count: 1 })
+            );
+        }
     }
 
     #[test]
@@ -2221,10 +2422,10 @@ mod tests {
             chi_action(85, 88, 92), // [5sr,6s]
             chi_action(85, 89, 92), // [5s,6s]
         ];
-        let with_normal = candidate_clicks(&legal, ["3s", "5s"], "4s");
-        assert_eq!(with_normal[1], CANDIDATES[5], "idx 2 of 5 → slot 5");
-        let with_red = candidate_clicks(&legal, ["3s", "5sr"], "4s");
-        assert_eq!(with_red[1], CANDIDATES[3], "idx 1 of 5 → slot 3");
+        let with_normal = candidate_mapping(&legal, ["3s", "5s"], "4s");
+        assert_eq!(with_normal.choice, Some(MeldChoice { index: 2, count: 5 }));
+        let with_red = candidate_mapping(&legal, ["3s", "5sr"], "4s");
+        assert_eq!(with_red.choice, Some(MeldChoice { index: 1, count: 5 }));
     }
 
     #[test]
@@ -2248,12 +2449,7 @@ mod tests {
 
         let ctx = ctx_for(&act, &snap, &legal, Some("5p"), None, false);
         let result = mapped_targets(&ctx);
-        let clicks: Vec<(f64, f64)> = result
-            .targets
-            .iter()
-            .map(|MappedClick { x_norm, y_norm }| (*x_norm, *y_norm))
-            .collect();
-        assert_eq!(clicks.len(), 2);
-        assert_eq!(clicks[1], CANDIDATES[6], "idx 1 of 2 → slot 6");
+        assert_eq!(result.targets.len(), 1);
+        assert_eq!(result.choice, Some(MeldChoice { index: 1, count: 2 }));
     }
 }
