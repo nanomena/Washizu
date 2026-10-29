@@ -645,7 +645,7 @@ fn wrong_or_skipped_declaration_echo_cannot_rebind_context_window_or_hand() {
         }
         if matches!(change, 2 | 3) {
             assert!(matches!(h.next(), Effect::Observe));
-            h.now += Duration::from_millis(101);
+            h.now = h.controller.run.as_ref().unwrap().deadline;
         }
         assert!(matches!(h.outcome(), Outcome::Cancelled(_)));
     }
@@ -687,7 +687,10 @@ fn declaration_echo_before_browser_probe_waits_without_spending_the_discard_or_r
             h.observation.ready = false;
             h.observation.target = None;
             assert!(matches!(h.next(), Effect::Observe));
-            assert_eq!(h.controller.phase(), Some(Phase::WaitingDeclaration));
+            assert_eq!(
+                h.controller.phase(),
+                Some(Phase::WaitingDeclarationContinuation)
+            );
             assert!(!h.controller.consume(
                 old_permit,
                 &h.facts,
@@ -709,7 +712,12 @@ fn declaration_echo_before_browser_probe_waits_without_spending_the_discard_or_r
             } else {
                 assert!(matches!(h.next(), Effect::Observe));
                 h.now += Duration::from_millis(41);
-                assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Unconfirmed));
+                assert!(
+                    matches!(h.next(), Effect::Observe),
+                    "the real declaration receipt outlives the click-only verification timeout"
+                );
+                h.now = h.controller.run.as_ref().unwrap().deadline;
+                assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Expired));
             }
         }
     }
@@ -752,10 +760,144 @@ fn a_discard_or_other_command_during_declaration_can_never_be_consumed_as_the_fo
             window: "declaring-discard".into(),
             hand: h.observation.target.as_ref().unwrap().identity.hand.clone(),
         });
+        assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Context));
+    }
+}
+
+fn receipt_turn(site: &str) -> Harness {
+    let action = reach();
+    let mut h = Harness::new(
+        site,
+        action.clone(),
+        vec![
+            press(
+                PressRole::Declaration,
+                &action,
+                Confirmation::DeclarationEcho,
+            ),
+            press(PressRole::Discard, &action, Confirmation::ClientCommand),
+        ],
+    );
+    h.controller.run.as_mut().unwrap().settings.verify_ms = 300;
+    h.observation.clock.as_mut().unwrap().fixed_ms = 3000;
+    h.observation.clock.as_mut().unwrap().bank_at_start_ms = Some(5000);
+    h
+}
+
+fn own_declaration_echo(h: &mut Harness) {
+    let context = DecisionContext {
+        event_seq: 11,
+        ..h.binding.context
+    };
+    h.facts.context = Some(context);
+    h.facts.window = Some("echoed-discard-window".into());
+    h.facts.latest = Some((
+        context,
+        MjaiEvent::Reach {
+            actor: 0,
+            pai: None,
+            tsumogiri: None,
+        },
+    ));
+    h.observation.continuation = Some(DeclarationFacts {
+        window: "echoed-discard-window".into(),
+        hand: h.observation.target.as_ref().unwrap().identity.hand.clone(),
+    });
+    h.observation.target.as_mut().unwrap().identity.window = "echoed-discard-native-window".into();
+    h.observation.target.as_mut().unwrap().identity.control = "actual-riichi-discard-tile".into();
+}
+
+#[test]
+fn captured_339ms_and_342ms_server_echoes_outlive_300ms_click_verification_and_still_discard() {
+    // 20261028-195936: actual declaration uplink was received, but the old
+    // owner cancelled at +310ms before the +339/+342ms server echoes.
+    for site in ["dom", "canvas"] {
+        for echo_ms in [339, 342] {
+            let mut h = receipt_turn(site);
+            let old_permit = h.dispatch();
+            let original_deadline = h.controller.run.as_ref().unwrap().deadline;
+            h.command(InputKind::Reach);
+            assert!(matches!(h.next(), Effect::Observe));
+            assert_eq!(
+                h.controller.phase(),
+                Some(Phase::WaitingDeclarationContinuation)
+            );
+            h.now += Duration::from_millis(310);
+            assert!(
+                matches!(h.next(), Effect::Observe),
+                "accepted declaration must not become Unconfirmed while its echo is in flight"
+            );
+            assert_eq!(h.controller.intent().unwrap().role, PressRole::Declaration);
+            h.now += Duration::from_millis(echo_ms - 310);
+            own_declaration_echo(&mut h);
+            assert!(matches!(h.next(), Effect::Observe));
+            assert_eq!(h.controller.phase(), Some(Phase::WaitingReady));
+            assert_eq!(
+                h.controller.run.as_ref().unwrap().deadline,
+                original_deadline
+            );
+            assert_eq!(h.controller.intent().unwrap().role, PressRole::Discard);
+            assert_eq!(h.controller.input_ticket(), Some(h.facts.input));
+            assert!(!h.controller.consume(
+                old_permit,
+                &h.facts,
+                &h.observation,
+                (125., 530.),
+                100,
+                h.now
+            ));
+            h.facts.command = false; // the already-consumed REACH is not a discard receipt
+            h.dispatch();
+            assert!(matches!(h.next(), Effect::Observe));
+            h.command(InputKind::Discard);
+            assert_eq!(h.outcome(), Outcome::ClientAccepted);
+        }
+    }
+}
+
+#[test]
+fn missing_declaration_receipt_keeps_click_timeout_but_a_real_receipt_keeps_only_original_turn_deadline(
+) {
+    for received in [false, true] {
+        let mut h = receipt_turn("either");
+        h.dispatch();
+        let original_deadline = h.controller.run.as_ref().unwrap().deadline;
+        if received {
+            h.command(InputKind::Reach);
+            assert!(matches!(h.next(), Effect::Observe));
+        }
+        h.now += Duration::from_millis(310);
+        if received {
+            assert!(matches!(h.next(), Effect::Observe));
+            assert_eq!(
+                h.controller.run.as_ref().unwrap().deadline,
+                original_deadline
+            );
+            h.now = original_deadline;
+            assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Expired));
+        } else {
+            assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Unconfirmed));
+        }
+    }
+}
+
+#[test]
+fn waiting_for_a_declaration_echo_never_survives_replacement_ownership_input_or_unrelated_context()
+{
+    for change in 0..5 {
+        let mut h = receipt_turn("either");
+        h.dispatch();
+        h.command(InputKind::Reach);
         assert!(matches!(h.next(), Effect::Observe));
-        assert_eq!(h.controller.phase(), Some(Phase::WaitingDeclaration));
-        h.now += Duration::from_millis(101);
-        assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Unconfirmed));
+        h.now += Duration::from_millis(400);
+        match change {
+            0 => h.command(InputKind::Discard),
+            1 => h.facts.owner.table += 1,
+            2 => h.facts.context.as_mut().unwrap().event_seq += 1,
+            3 => h.facts.enabled = false,
+            _ => h.controller.cancel(CancelReason::Replaced),
+        }
+        assert!(matches!(h.outcome(), Outcome::Cancelled(_)));
     }
 }
 

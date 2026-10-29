@@ -102,7 +102,11 @@ pub enum Phase {
     Permitted,
     Dispatching,
     WaitingCommand,
+    /// The mouse sequence has not yet produced a declaration receipt.
     WaitingDeclaration,
+    /// The client sent the declaration (or its exact server echo arrived).
+    /// Wait for the echoed continuation within the original turn deadline.
+    WaitingDeclarationContinuation,
     Finished(Outcome),
 }
 
@@ -323,7 +327,14 @@ impl TurnController {
             run.finish(Outcome::Cancelled(CancelReason::Expired));
             return run.effect();
         }
-        if run.phase == Phase::WaitingDeclaration {
+        if matches!(
+            run.phase,
+            Phase::WaitingDeclaration | Phase::WaitingDeclarationContinuation
+        ) {
+            if !facts.input.declaration_compatible(run.binding.input) {
+                run.finish(Outcome::Cancelled(CancelReason::Context));
+                return run.effect();
+            }
             if run.accept_declaration(facts, observation) {
                 run.advance(now);
                 // This observation answered the declaration intent. Resolve
@@ -333,15 +344,17 @@ impl TurnController {
                 // Capture, tracker and the read-only browser probe advance
                 // independently. The exact own echo can arrive after this
                 // iteration's probe. Keep waiting for its fresh hand/window
-                // proof within the original verification budget; never press
-                // the old target or restart the clock.
-                if facts.input != run.binding.input && !facts.command {
-                    run.finish(Outcome::Cancelled(CancelReason::Context));
-                    return run.effect();
-                }
-                if now >= run.verify_at {
-                    run.finish(Outcome::Cancelled(CancelReason::Unconfirmed));
-                    return run.effect();
+                // proof. The click verification timeout applies only before
+                // a real declaration receipt: it is not a server RTT limit.
+                // Never press the old target or restart the turn clock.
+                if run.phase == Phase::WaitingDeclaration {
+                    if facts.input.reach_since(run.binding.input) || run.declaration_echo(facts) {
+                        run.phase = Phase::WaitingDeclarationContinuation;
+                        tracing::info!(context=?run.binding.context, "autoplay: declaration receipt observed; awaiting exact echoed discard continuation within original turn deadline");
+                    } else if now >= run.verify_at {
+                        run.finish(Outcome::Cancelled(CancelReason::Unconfirmed));
+                        return run.effect();
+                    }
                 }
                 return Effect::Observe;
             } else {
