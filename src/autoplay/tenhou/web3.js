@@ -270,10 +270,10 @@
     const account = typeof session.account === 'string' && /^ID[0-9A-F]{8}$/.test(session.account) ? session.account : null;
     const dto = { client: 'web3', account, title: null, popup: null, lobby: null };
     // Only the registered-account title control. No guest/register/ID entry.
-    if (native.input.mode() === 0 && current.tag === 'LOGIN' && connected(current.element) && visible(current.element)) {
+    if (native.input.mode() === 0 && ['LOGIN', 'AUTOLOGIN'].includes(current.tag) && connected(current.element)) {
       const element = current.element;
       const button = element.querySelector('#pane0 > button[name="ok"]');
-      const enabled = !!account && !current.closing && !native.modal() && visible(button) && !button.disabled;
+      const enabled = !!account && !current.closing && !native.modal() && visible(element) && visible(button) && !button.disabled;
       dto.title = { identity: documentId + ':title:' + nodeId(element) + ':' + (button ? nodeId(button) : 'missing') + ':' + account + ':' + Number(enabled), enabled };
       return { dto, element, button };
     }
