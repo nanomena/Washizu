@@ -1,5 +1,12 @@
 /** English. Keys are the page's own Simplified Chinese text. */
 export const en: Record<string, string> = {
+  "游戏代理": "Game proxy",
+  "连接方式": "Connection",
+  "跟随系统": "Use system settings",
+  "直连": "Direct",
+  "指定代理": "Custom proxy",
+  "代理地址": "Proxy address",
+  "支持 HTTP、HTTPS、SOCKS5；仅用于游戏连接，下次打开此账号时生效。": "HTTP, HTTPS or SOCKS5. Used for game connections when this account is next opened.",
   '显示账号选择器': 'Show account chooser',
   '关于': 'About',
   '许可证': 'License',

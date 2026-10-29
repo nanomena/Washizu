@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { invoke, listen } from '@/lib/host'
 import { tr, useLang, type Lang } from '@/lib/i18n'
-import type { AccountProfile, ProfileClient, ProfileDefaults, ProfileState } from '@/lib/profiles'
+import type { AccountProfile, GameProxy, ProfileClient, ProfileDefaults, ProfileState } from '@/lib/profiles'
 import { ProfileSettings } from '@/components/monitor/ProfileSettings'
 import './Monitor.css'
 import './Profiles.css'
 
-type Editor = { id: string | null; name: string; platform: AccountProfile['platform'] }
+type Editor = { id: string | null; name: string; platform: AccountProfile['platform']; proxy: GameProxy }
 
 // Profile-runtime words stay with this view; the monitor's policy/health
 // vocabulary and its independent state are unchanged.
@@ -55,7 +55,7 @@ export function Profiles() {
   const openEditor = (profile: AccountProfile | null) => {
     setFormError('')
     setConfirmDelete(false)
-    setEditor({ id: profile?.id ?? null, name: profile?.name ?? '', platform: profile?.platform ?? 'Majsoul' })
+    setEditor({ id: profile?.id ?? null, name: profile?.name ?? '', platform: profile?.platform ?? 'Majsoul', proxy: profile ? { ...profile.proxy } : { mode: 'system', server: '' } })
   }
   const request = async (method: string, args: Record<string, unknown>) => {
     const key = method === 'open_profile' ? `open:${String(args.id)}` : 'editor'
@@ -72,7 +72,7 @@ export function Profiles() {
   const save = (event: FormEvent) => {
     event.preventDefault()
     if (!editor || busy || !editor.name.trim()) return
-    void request(editor.id ? 'rename_profile' : 'create_profile', editor.id ? { id: editor.id, name: editor.name } : { name: editor.name, platform: editor.platform })
+    void request(editor.id ? 'save_profile' : 'create_profile', editor.id ? { id: editor.id, name: editor.name, proxy: editor.proxy } : { name: editor.name, platform: editor.platform })
   }
   const status = (preferences ? formError : '') || error || state?.error || (!state ? tr('正在读取账号档案…') : '')
   const editClient = state?.clients.find(client => client.id === editor?.id)
@@ -109,13 +109,23 @@ export function Profiles() {
     <dialog className="accounts-editor" id="editor" ref={dialog} aria-labelledby="editor-title" onCancel={event => { if (busy) event.preventDefault(); else setEditor(null) }}>
       <form id="form" onSubmit={save}>
         <h2 id="editor-title">{editor?.id ? tr('管理档案') : tr('新建档案')}</h2>
+        <div className="accounts-editor-fields">
         <label>{tr('档案名称')}<input id="name" ref={nameInput} value={editor?.name ?? ''} onChange={event => setEditor(current => current && { ...current, name: event.target.value })} required maxLength={48} autoComplete="off" /></label>
-        <label className="accounts-platform-field" hidden={!!editor?.id}>{tr('平台')}<select id="platform" disabled={!!editor?.id} value={editor?.platform ?? 'Majsoul'} onChange={event => setEditor(current => current && { ...current, platform: event.target.value as AccountProfile['platform'] })}><option value="Majsoul">{tr('雀魂')}</option><option value="Tenhou">{tr('天凤')}</option></select></label>
+        {!editor?.id && <label>{tr('平台')}<select id="platform" value={editor?.platform ?? 'Majsoul'} onChange={event => setEditor(current => current && { ...current, platform: event.target.value as AccountProfile['platform'] })}><option value="Majsoul">{tr('雀魂')}</option><option value="Tenhou">{tr('天凤')}</option></select></label>}
+        {editor?.id && <fieldset className="accounts-proxy" disabled={busy}>
+          <legend>{tr('游戏代理')}</legend>
+          <label>{tr('连接方式')}<select value={editor.proxy.mode} onChange={event => setEditor(current => current && { ...current, proxy: { ...current.proxy, mode: event.target.value as GameProxy['mode'] } })}>
+            <option value="system">{tr('跟随系统')}</option><option value="direct">{tr('直连')}</option><option value="custom">{tr('指定代理')}</option>
+          </select></label>
+          <label>{tr('代理地址')}<input value={editor.proxy.server} disabled={editor.proxy.mode !== 'custom'} required={editor.proxy.mode === 'custom'} placeholder="socks5://127.0.0.1:1080" autoComplete="off" spellCheck={false} onChange={event => setEditor(current => current && { ...current, proxy: { ...current.proxy, server: event.target.value } })} /></label>
+          <p>{tr('支持 HTTP、HTTPS、SOCKS5；仅用于游戏连接，下次打开此账号时生效。')}</p>
+        </fieldset>}
         <div className="accounts-form-status" role="alert">{formError}</div>
         {editor?.id && <div className="accounts-delete">
           {confirmDelete ? <><p>{tr('删除后将从列表移除，本地登录资料和记录保留。确定删除「{0}」？', state?.profiles.find(p => p.id === editor.id)?.name ?? editor.name)}</p><button className="mbtn" type="button" disabled={busy} onClick={() => setConfirmDelete(false)}>{tr('取消')}</button><button className="mbtn accounts-danger" type="button" disabled={busy || deleteBlocked} onClick={() => void request('delete_profile', { id: editor.id })}>{tr('确认删除')}</button></> : <button className="mbtn accounts-danger" type="button" disabled={busy || deleteBlocked} onClick={() => setConfirmDelete(true)}>{tr('删除档案')}</button>}
           {deleteBlocked && <p>{tr('请先关闭此档案窗口，等待清理完成后再删除。')}</p>}
         </div>}
+        </div>
         <div className="accounts-editor-actions"><button className="mbtn" type="button" disabled={busy} onClick={() => setEditor(null)}>{tr('取消')}</button><button className="mbtn mbtn--primary" id="save" type="submit" disabled={busy || !editor?.name.trim() || confirmDelete}>{tr('保存')}</button></div>
       </form>
     </dialog>

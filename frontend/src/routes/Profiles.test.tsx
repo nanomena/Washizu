@@ -13,8 +13,8 @@ vi.mock('@/lib/host', () => ({
     if (fixture.failure) throw fixture.failure
     const next = structuredClone(fixture.state!)
     next.revision++
-    if (method === 'create_profile') next.profiles.push({ id: 'new-id', name: String(args!.name), platform: args!.platform as 'Tenhou', lastOpened: null })
-    if (method === 'rename_profile') next.profiles = next.profiles.map(p => p.id === args!.id ? { ...p, name: String(args!.name) } : p)
+    if (method === 'create_profile') next.profiles.push({ id: 'new-id', name: String(args!.name), platform: args!.platform as 'Tenhou', lastOpened: null, proxy: { mode: 'system', server: '' } })
+    if (method === 'save_profile') next.profiles = next.profiles.map(p => p.id === args!.id ? { ...p, name: String(args!.name), proxy: args!.proxy as typeof p.proxy } : p)
     if (method === 'open_profile' && !next.clients.some(c => c.id === args!.id)) next.clients.push({ id: String(args!.id), state: 'starting', cleanup: 'unconfirmed', error: '' })
     if (method === 'delete_profile') next.profiles = next.profiles.filter(p => p.id !== args!.id)
     if (method === 'save_profile_defaults') next.defaults = args!.defaults as ProfileState['defaults']
@@ -26,7 +26,7 @@ import { Profiles } from './Profiles'
 
 beforeEach(() => {
   setLang('zh-CN')
-  fixture.state = { revision: 1, profiles: [{ id: 'existing', name: 'Main', platform: 'Majsoul', lastOpened: null }], clients: [], error: '', defaults: { Majsoul: { autoplay: 'play', quick_confirm: true, pointer_lean: true, pointer_trail: true, auto_win: true, obs_output: true }, Tenhou: { autoplay: 'continue', quick_confirm: true, pointer_lean: true, pointer_trail: true, auto_win: false, obs_output: true } } }
+  fixture.state = { revision: 1, profiles: [{ id: 'existing', name: 'Main', platform: 'Majsoul', lastOpened: null, proxy: { mode: 'system', server: '' } }], clients: [], error: '', defaults: { Majsoul: { autoplay: 'play', quick_confirm: true, pointer_lean: true, pointer_trail: true, auto_win: true, obs_output: true }, Tenhou: { autoplay: 'continue', quick_confirm: true, pointer_lean: true, pointer_trail: true, auto_win: false, obs_output: true } } }
   fixture.initial = null; fixture.calls = []; fixture.failure = ''
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', '') } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open') } })
@@ -88,15 +88,15 @@ describe('account profiles', () => {
     render(<Profiles />); await ready()
     fireEvent.click(screen.getByRole('button', { name: '管理 Main' }))
     const form = within(screen.getByRole('dialog'))
-    expect((form.getByLabelText('平台') as HTMLSelectElement).disabled).toBe(true)
+    expect(form.queryByLabelText('平台')).toBeNull()
     fireEvent.change(form.getByLabelText('档案名称'), { target: { value: 'Renamed' } })
     fireEvent.click(form.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(screen.getByText('Renamed')).toBeTruthy())
-    expect(fixture.calls).toContainEqual(['rename_profile', { id: 'existing', name: 'Renamed' }])
+    expect(fixture.calls).toContainEqual(['save_profile', { id: 'existing', name: 'Renamed', proxy: { mode: 'system', server: '' } }])
     expect(fixture.state!.profiles[0].platform).toBe('Majsoul')
   })
   it('opens different accounts independently and keeps create/rename available while one starts', async () => {
-    fixture.state!.profiles.push({ id: 'second', name: 'Second', platform: 'Tenhou', lastOpened: null })
+    fixture.state!.profiles.push({ id: 'second', name: 'Second', platform: 'Tenhou', lastOpened: null, proxy: { mode: 'system', server: '' } })
     render(<Profiles />); await ready()
     fireEvent.click(screen.getByRole('button', { name: '打开 Main' }))
     await waitFor(() => expect(screen.getByText('正在打开…')).toBeTruthy())
@@ -106,8 +106,26 @@ describe('account profiles', () => {
     fireEvent.click(screen.getByRole('button', { name: '打开 Second' }))
     await waitFor(() => expect(fixture.state!.clients).toHaveLength(2))
   })
+  it('saves only the managed account proxy without reopening or changing a running account', async () => {
+    fixture.state!.profiles.push({ id: 'second', name: 'Second', platform: 'Tenhou', lastOpened: null, proxy: { mode: 'direct', server: '' } })
+    fixture.state!.clients = [{ id: 'existing', state: 'active', cleanup: 'unconfirmed', error: '' }]
+    render(<Profiles />); await ready()
+    fireEvent.click(screen.getByRole('button', { name: '管理 Main' }))
+    const form = within(screen.getByRole('dialog'))
+    expect((form.getByLabelText('代理地址') as HTMLInputElement).disabled).toBe(true)
+    fireEvent.change(form.getByLabelText('连接方式'), { target: { value: 'custom' } })
+    fireEvent.change(form.getByLabelText('代理地址'), { target: { value: 'socks5://127.0.0.1:1080' } })
+    fireEvent.click(form.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fixture.state!.profiles[0].proxy.mode).toBe('custom'))
+    expect(fixture.calls).toContainEqual(['save_profile', { id: 'existing', name: 'Main', proxy: { mode: 'custom', server: 'socks5://127.0.0.1:1080' } }])
+    expect(fixture.state!.profiles[1].proxy).toEqual({ mode: 'direct', server: '' })
+    expect(fixture.state!.clients[0].state).toBe('active')
+    expect(fixture.calls.some(([method]) => method === 'open_profile')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: '管理 Main' }))
+    expect((within(screen.getByRole('dialog')).getByLabelText('代理地址') as HTMLInputElement).value).toBe('socks5://127.0.0.1:1080')
+  })
   it('shows active clients, locks only the failed/closing profile, and focuses through the same open command', async () => {
-    fixture.state!.profiles.push({ id: 'second', name: 'Second', platform: 'Tenhou', lastOpened: null })
+    fixture.state!.profiles.push({ id: 'second', name: 'Second', platform: 'Tenhou', lastOpened: null, proxy: { mode: 'system', server: '' } })
     fixture.state!.clients = [{ id: 'existing', state: 'failed', cleanup: 'unconfirmed', error: 'Cleanup ACK missing' }, { id: 'second', state: 'active', cleanup: 'unconfirmed', error: '' }]
     render(<Profiles />); await ready()
     expect(screen.getByRole('alert').textContent).toContain('Cleanup ACK missing')

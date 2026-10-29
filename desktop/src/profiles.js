@@ -6,14 +6,15 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { saveObsPreference } from './view-preferences.js'
 import { importDefaults, validateDefaults } from './profile-defaults.js'
+import { SYSTEM_PROXY, validateProxy } from './profile-proxy.js'
 
 export const PLATFORMS = Object.freeze({
   Majsoul: { name: '雀魂', url: 'https://game.maj-soul.com/1/' },
   Tenhou: { name: '天凤', url: 'https://tenhou.net/3/' },
 })
 /** @typedef {keyof typeof PLATFORMS} Platform */
-/** @typedef {{ id: string, name: string, platform: Platform, lastOpened: string | null }} AccountProfile */
-/** @typedef {{ version: 1, profiles: AccountProfile[], deleted?: AccountProfile[] }} Registry */
+/** @typedef {{ id: string, name: string, platform: Platform, lastOpened: string | null, proxy: import('./profile-proxy.js').GameProxy }} AccountProfile */
+/** @typedef {{ version: 2, profiles: AccountProfile[], deleted?: AccountProfile[] }} Registry */
 
 /** @param {unknown} value @returns {Platform} */
 export function platformKind(value) {
@@ -66,7 +67,7 @@ export class ProfileStore {
     this.root = path.resolve(root)
     this.file = path.join(this.root, 'profiles.json')
     /** @type {Registry} */
-    this.registry = { version: 1, profiles: [] }
+    this.registry = { version: 2, profiles: [] }
   }
 
   /** Called after the launcher's single-instance lock is held. */
@@ -74,28 +75,40 @@ export class ProfileStore {
     fs.mkdirSync(this.root, { recursive: true })
     if (fs.existsSync(this.file)) {
       const document = JSON.parse(fs.readFileSync(this.file, 'utf8'))
-      if (document?.version !== 1 || !Array.isArray(document.profiles)) throw new Error('账号档案索引无法识别，资料未作更改。')
+      if (![1, 2].includes(document?.version) || !Array.isArray(document.profiles)
+        || document.deleted !== undefined && !Array.isArray(document.deleted)) throw new Error('账号档案索引无法识别，资料未作更改。')
       const ids = new Set()
-      for (const entry of document.profiles) {
+      for (const entry of [...document.profiles, ...(document.deleted ?? [])]) {
         if (!entry || typeof entry.id !== 'string' || !validId(entry.id) || ids.has(entry.id)
           || profileName(entry.name) !== entry.name || platformKind(entry.platform) !== entry.platform
           || !(entry.lastOpened === null || (typeof entry.lastOpened === 'string' && Number.isFinite(Date.parse(entry.lastOpened))))) {
           throw new Error('账号档案索引有无效内容，资料未作更改。')
         }
         ids.add(entry.id)
+        if (document.version === 2) {
+          const proxy = validateProxy(entry.proxy)
+          if (proxy.server !== entry.proxy.server) throw new Error('账号档案的代理地址未规范化，资料未作更改。')
+        }
       }
-      this.registry = document
+      if (document.version === 1) {
+        // Explicit one-time migration: preserve the former system routing and
+        // every stable identity/home, including recoverable deleted profiles.
+        const migrate = (/** @type {Omit<AccountProfile, 'proxy'>} */ profile) => ({ ...profile, proxy: { ...SYSTEM_PROXY } })
+        this.registry = { ...document, version: 2, profiles: document.profiles.map(migrate),
+          ...(document.deleted && { deleted: document.deleted.map(migrate) }) }
+        this.save()
+      } else this.registry = document
     } else {
       if (hasExistingHome(this.root)) {
         const platform = homePlatform(this.root)
-        this.registry.profiles.push({ id: 'existing', name: `${PLATFORMS[platform].name} · 原有账号`, platform, lastOpened: null })
+        this.registry.profiles.push({ id: 'existing', name: `${PLATFORMS[platform].name} · 原有账号`, platform, lastOpened: null, proxy: { ...SYSTEM_PROXY } })
       }
       this.save()
     }
     return this
   }
 
-  list() { return this.registry.profiles.map(profile => ({ ...profile })) }
+  list() { return structuredClone(this.registry.profiles) }
 
   defaults() {
     const file = path.join(this.root, 'launcher', 'defaults.json')
@@ -136,7 +149,7 @@ export class ProfileStore {
     if (typeof id !== 'string' || !validId(id)) throw new Error('账号档案不存在。')
     const found = this.registry.profiles.find(profile => profile.id === id)
     if (!found) throw new Error('账号档案不存在。')
-    return { ...found }
+    return structuredClone(found)
   }
 
   /** A stable id, never the editable display name, owns the directory.
@@ -152,7 +165,7 @@ export class ProfileStore {
     const label = profileName(name)
     this.checkName(label, platform)
     const defaults = this.defaults()[platform]
-    const profile = { id: randomUUID(), name: label, platform, lastOpened: null }
+    const profile = { id: randomUUID(), name: label, platform, lastOpened: null, proxy: { ...SYSTEM_PROXY } }
     const home = path.join(this.root, 'profiles', profile.id)
     fs.mkdirSync(path.dirname(home), { recursive: true })
     fs.mkdirSync(home)
@@ -161,15 +174,16 @@ export class ProfileStore {
     const before = this.registry.profiles
     this.registry.profiles = [...before, profile]
     try { this.save() } catch (error) { this.registry.profiles = before; throw error }
-    return { ...profile }
+    return structuredClone(profile)
   }
 
-  /** @param {unknown} id @param {unknown} name */
-  rename(id, name) {
+  /** Name and network settings commit as one atomic profile revision.
+   * @param {unknown} id @param {unknown} name @param {unknown} proxy */
+  update(id, name, proxy) {
     const old = this.get(id)
     const label = profileName(name)
     this.checkName(label, old.platform, old.id)
-    this.replace({ ...old, name: label })
+    this.replace({ ...old, name: label, proxy: validateProxy(proxy) })
     return this.get(id)
   }
 

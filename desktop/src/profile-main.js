@@ -64,7 +64,7 @@ export async function startProfiles(root) {
       if (!window || event.sender !== window.webContents) throw new Error('只有账号档案页可以执行此操作。')
       const values = args && typeof args === 'object' ? args : {}
       if (method === 'create_profile') { store.create(values.name, values.platform); fitGuide() }
-      else if (method === 'rename_profile') store.rename(values.id, values.name)
+      else if (method === 'save_profile') store.update(values.id, values.name, values.proxy)
       else if (method === 'delete_profile') { const profile = store.get(values.id); sessions.remove(profile.id, () => store.delete(profile.id)); fitGuide() }
       else if (method === 'save_profile_defaults') store.saveDefaults(values.defaults)
       else if (method === 'open_profile') { const profile = store.get(values.id); error = ''; sessions.open(profile.id) }

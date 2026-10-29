@@ -14,6 +14,7 @@ import * as layout from '../src/layout.js'
 import * as input from '../src/input.js'
 import * as physicalPointer from '../src/physical-pointer.js'
 import * as preferences from '../src/view-preferences.js'
+import * as profileProxy from '../src/profile-proxy.js'
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'washizu-obs-test-'))
 const sender = path.join(home, 'sender.exe')
@@ -36,7 +37,7 @@ const screen = Object.assign(new EventEmitter(), {
   getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }),
 })
 class Page extends EventEmitter {
-  session = { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} }
+  session = { async setProxy() {}, setPermissionRequestHandler() {}, setPermissionCheckHandler() {} }
   debugger = { attach() {}, detach() {}, sendCommand: async () => ({ targetInfo: { targetId: 'offscreen-game' } }) }
   mainFrame = {}
   reloads = 0
@@ -114,9 +115,10 @@ const namespaces = {
     HUNG_MS: 1000, RELOAD_QUIET_MS: 1000, WATCH_MS: 1000, WEBGL_CONTEXTS: 16, processLine() {}, worthKeeping() {} },
   './workers.js': { keepWorkersRunning: async () => {} },
   './window-frame.js': { contentSize: () => ({ width: 1000, height: 750 }), holdRatio() {} },
-  './profiles.js': { ProfileStore: class { load() { return this } get() { return { id: 'existing', name: 'Original', platform: 'Majsoul' } } home() { return home } },
+  './profiles.js': { ProfileStore: class { load() { return this } get() { return { id: 'existing', name: 'Original', platform: 'Majsoul', proxy: { mode: 'system', server: '' } } } home() { return home } },
     PLATFORMS: { Majsoul: { name: 'Mahjong Soul' } }, homePlatform: () => 'Majsoul' },
   './view-preferences.js': preferences,
+  './profile-proxy.js': profileProxy,
 }
 const accountProcess = Object.assign(new EventEmitter(), {
   platform: 'win32', env: {}, argv: [], pid: 1234, connected: true, versions: {},

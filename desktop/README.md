@@ -14,6 +14,15 @@ simultaneously. Opening a starting or active profile again focuses its existing
 client. The first **Open** shows and focuses the account as soon as its dock
 loads; no second **Show** click is needed. First opening, repeated Open and
 second-instance requests use the same restore/show/focus path.
+The **Manage** dialog also saves that account's game proxy: system routing,
+direct routing, or one HTTP/HTTPS/SOCKS5 endpoint. The change takes effect the
+next time that account opens; saving never closes a current game connection.
+HTTP and WebSocket requests, including login popups, use the account's Chromium
+session. Loopback is bypassed and core/model/CDP connections retain their own
+normal interfaces. Proxy URLs with authentication, paths or parameters are
+rejected; authenticated upstreams can be exposed through a local proxy port.
+A custom proxy has no direct fallback.
+
 Settings → App holds the account chooser button and the application's
 About/license details. The game window has no application menu bar. Showing
 the chooser during a game does not stop that client. Closing the chooser while
@@ -30,7 +39,7 @@ even when a failed profile remains locked.
 The chooser itself starts no core, model, game page or network connection.
 
 `--data` names the account library root. Its `profiles.json` stores stable ids,
-display names, platforms and the last opening time. Fresh profiles live under
+display names, platforms, per-account proxy settings and the last opening time. Registry v2 requires an explicit proxy on every profile; v1 is migrated once to system routing without moving account data. Fresh profiles live under
 `profiles/<id>/`, each with its own configuration, `browser/`, history, logs,
 window state and bot settings. Renaming a profile never changes its directory.
 `ProfileSessions` owns a map keyed by profile id, with explicit `starting`,

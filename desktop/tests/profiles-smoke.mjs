@@ -99,7 +99,7 @@ try {
   assert.equal((await state()).profiles[0].id, 'existing')
   const created = /** @type {State} */ (await evaluate('window.akagi.invoke("create_profile", {name:"Tenhou",platform:"Tenhou"})'))
   const b = created.profiles.find(p => p.platform === 'Tenhou'); assert.ok(b)
-  await evaluate('window.akagi.invoke("rename_profile", {id:"existing",name:"Main"})')
+  await evaluate('window.akagi.invoke("save_profile", {id:"existing",name:"Main",proxy:{mode:"system",server:""}})')
   const a = 'existing'
   const home = (/** @type {string} */ id) => id === 'existing' ? root : path.join(root, 'profiles', id)
   const marker = (/** @type {string} */ id) => path.join(home(id), 'fake-core-released')
