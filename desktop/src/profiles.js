@@ -187,6 +187,18 @@ export class ProfileStore {
     return this.get(id)
   }
 
+  /** Only registry order changes; account data and client lifecycles stay put.
+   * @param {unknown} ids */
+  reorder(ids) {
+    const before = this.registry.profiles
+    if (!Array.isArray(ids) || ids.length !== before.length || new Set(ids).size !== ids.length
+      || ids.some(id => typeof id !== 'string' || !before.some(profile => profile.id === id))) {
+      throw new Error('账号列表已变化，请重新排序。')
+    }
+    this.registry.profiles = ids.map(id => this.get(id))
+    try { this.save() } catch (error) { this.registry.profiles = before; throw error }
+  }
+
   /** @param {unknown} id */
   opened(id) {
     this.replace({ ...this.get(id), lastOpened: new Date().toISOString() })

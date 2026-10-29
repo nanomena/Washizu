@@ -1,5 +1,6 @@
 /** English. Keys are the page's own Simplified Chinese text. */
 export const en: Record<string, string> = {
+  '账号列表已变化，请重新排序。': 'The account list changed. Please reorder it again.',
   "游戏代理": "Game proxy",
   "连接方式": "Connection",
   "跟随系统": "Use system settings",

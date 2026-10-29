@@ -29,6 +29,10 @@
 .accounts th, .accounts td { border-bottom: 1px solid var(--m-line); padding: 0 var(--account-inset); }
 .accounts td { height: 64px; vertical-align: middle; }
 .accounts tbody tr:last-child td { border-bottom: 0; }
+.accounts tbody tr[draggable="true"] { cursor: grab; }
+.accounts tbody tr[data-dragging="true"] { opacity: 0.5; }
+.accounts tbody tr[data-drop="before"] td { box-shadow: inset 0 2px var(--m-live); }
+.accounts tbody tr[data-drop="after"] td { box-shadow: inset 0 -2px var(--m-live); }
 .accounts-name { display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .accounts-meta { display: flex; gap: 8px; color: var(--m-dim); font-size: 11px; line-height: 18px; white-space: nowrap; overflow: hidden; }
 .accounts-meta > span { overflow: hidden; text-overflow: ellipsis; }

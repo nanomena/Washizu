@@ -1,5 +1,6 @@
 /** 繁體中文. Keys are the page's own Simplified Chinese text. */
 export const zhTW: Record<string, string> = {
+  '账号列表已变化，请重新排序。': '帳號清單已變更，請重新排序。',
   "游戏代理": "遊戲代理",
   "连接方式": "連線方式",
   "跟随系统": "跟隨系統",

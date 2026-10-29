@@ -15,6 +15,7 @@ vi.mock('@/lib/host', () => ({
     next.revision++
     if (method === 'create_profile') next.profiles.push({ id: 'new-id', name: String(args!.name), platform: args!.platform as 'Tenhou', lastOpened: null, proxy: { mode: 'system', server: '' } })
     if (method === 'save_profile') next.profiles = next.profiles.map(p => p.id === args!.id ? { ...p, name: String(args!.name), proxy: args!.proxy as typeof p.proxy } : p)
+    if (method === 'reorder_profiles') next.profiles = (args!.ids as string[]).map(id => next.profiles.find(p => p.id === id)!)
     if (method === 'open_profile' && !next.clients.some(c => c.id === args!.id)) next.clients.push({ id: String(args!.id), state: 'starting', cleanup: 'unconfirmed', error: '' })
     if (method === 'delete_profile') next.profiles = next.profiles.filter(p => p.id !== args!.id)
     if (method === 'save_profile_defaults') next.defaults = args!.defaults as ProfileState['defaults']
@@ -123,6 +124,26 @@ describe('account profiles', () => {
     expect(fixture.calls.some(([method]) => method === 'open_profile')).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: '管理 Main' }))
     expect((within(screen.getByRole('dialog')).getByLabelText('代理地址') as HTMLInputElement).value).toBe('socks5://127.0.0.1:1080')
+  })
+  it('moves an entire running account row and saves stable ids while its buttons remain clickable', async () => {
+    fixture.state!.profiles.push({ id: 'second', name: 'Second', platform: 'Tenhou', lastOpened: null, proxy: { mode: 'direct', server: '' } })
+    fixture.state!.clients = [{ id: 'existing', state: 'active', cleanup: 'unconfirmed', error: '' }]
+    render(<Profiles />); await ready()
+    const main = screen.getByText('Main').closest('tr')!, second = screen.getByText('Second').closest('tr')!
+    const transfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() }
+    fireEvent.mouseDown(screen.getByText('Main'))
+    fireEvent.dragStart(main, { dataTransfer: transfer })
+    fireEvent.dragOver(second, { dataTransfer: transfer, clientY: 10 })
+    fireEvent.drop(second, { dataTransfer: transfer, clientY: 10 })
+    await waitFor(() => expect(fixture.calls).toContainEqual(['reorder_profiles', { ids: ['second', 'existing'] }]))
+    expect(fixture.state!.clients[0].state).toBe('active')
+    expect(fixture.state!.profiles[0].proxy).toEqual({ mode: 'direct', server: '' })
+    const button = screen.getByRole('button', { name: '管理 Main' })
+    fireEvent.mouseDown(button)
+    expect(fireEvent.dragStart(button.closest('tr')!, { dataTransfer: transfer })).toBe(false)
+    fireEvent.click(button)
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(fixture.calls.filter(([method]) => method === 'reorder_profiles')).toHaveLength(1)
   })
   it('shows active clients, locks only the failed/closing profile, and focuses through the same open command', async () => {
     fixture.state!.profiles.push({ id: 'second', name: 'Second', platform: 'Tenhou', lastOpened: null, proxy: { mode: 'system', server: '' } })

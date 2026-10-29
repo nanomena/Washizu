@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type DragEvent, type FormEvent } from 'react'
 import { invoke, listen } from '@/lib/host'
 import { tr, useLang, type Lang } from '@/lib/i18n'
 import type { AccountProfile, GameProxy, ProfileClient, ProfileDefaults, ProfileState } from '@/lib/profiles'
@@ -28,6 +28,10 @@ export function Profiles() {
   const [formError, setFormError] = useState('')
   const [preferences, setPreferences] = useState<ProfileDefaults | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [dragging, setDragging] = useState<string | null>(null)
+  const [dropTarget, setDropTarget] = useState<{ id: string; side: 'before' | 'after' } | null>(null)
+  const drag = useRef<{ id: string; ids: string[] } | null>(null)
+  const dragAllowed = useRef(true)
   const revision = useRef(-1)
   const dialog = useRef<HTMLDialogElement>(null)
   const nameInput = useRef<HTMLInputElement>(null)
@@ -50,7 +54,7 @@ export function Profiles() {
   }, [editor])
 
   const busy = pending.has('editor')
-  const blocked = busy || !state
+  const blocked = busy || pending.has('order') || !state
   const words = CLIENT_TEXT[lang]
   const openEditor = (profile: AccountProfile | null) => {
     setFormError('')
@@ -58,7 +62,7 @@ export function Profiles() {
     setEditor({ id: profile?.id ?? null, name: profile?.name ?? '', platform: profile?.platform ?? 'Majsoul', proxy: profile ? { ...profile.proxy } : { mode: 'system', server: '' } })
   }
   const request = async (method: string, args: Record<string, unknown>) => {
-    const key = method === 'open_profile' ? `open:${String(args.id)}` : 'editor'
+    const key = method === 'open_profile' ? `open:${String(args.id)}` : method === 'reorder_profiles' ? 'order' : 'editor'
     setPending(current => new Set(current).add(key)); setError(''); setFormError('')
     try {
       const next = await invoke<ProfileState>(method, args)
@@ -68,6 +72,22 @@ export function Profiles() {
       if (key === 'editor') setFormError(String(cause))
       else setError(String(cause))
     } finally { setPending(current => { const next = new Set(current); next.delete(key); return next }) }
+  }
+  const endDrag = () => { drag.current = null; dragAllowed.current = true; setDragging(null); setDropTarget(null) }
+  const sideAt = (event: DragEvent<HTMLTableRowElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    return event.clientY < rect.top + rect.height / 2 ? 'before' as const : 'after' as const
+  }
+  const drop = (event: DragEvent<HTMLTableRowElement>, target: string) => {
+    const moving = drag.current
+    event.preventDefault(); endDrag()
+    if (!moving || blocked || moving.id === target || !state) return
+    const current = state.profiles.map(profile => profile.id)
+    if (current.length !== moving.ids.length || current.some(id => !moving.ids.includes(id))) { setError(tr('账号列表已变化，请重新排序。')); return }
+    const ids = current.filter(id => id !== moving.id), at = ids.indexOf(target)
+    if (at < 0) return
+    ids.splice(at + (sideAt(event) === 'after' ? 1 : 0), 0, moving.id)
+    if (ids.some((id, i) => id !== current[i])) void request('reorder_profiles', { ids })
   }
   const save = (event: FormEvent) => {
     event.preventDefault()
@@ -94,7 +114,16 @@ export function Profiles() {
         <tbody>{state?.profiles.map(profile => {
           const client = state.clients.find(client => client.id === profile.id)
           const label = client ? locked(client) && client.state === 'failed' ? words.locked : words[client.state] : ''
-          return <tr key={profile.id} data-client-state={client?.state ?? 'closed'}>
+          return <tr key={profile.id} data-client-state={client?.state ?? 'closed'} draggable={!blocked}
+            data-dragging={dragging === profile.id || undefined} data-drop={dropTarget?.id === profile.id ? dropTarget.side : undefined}
+            onMouseDownCapture={event => { dragAllowed.current = !(event.target as HTMLElement).closest('button, input, select, textarea, a') }}
+            onDragStart={event => {
+              if (blocked || !dragAllowed.current || (event.target as HTMLElement).closest('button, input, select, textarea, a')) { event.preventDefault(); return }
+              drag.current = { id: profile.id, ids: state!.profiles.map(p => p.id) }; setDragging(profile.id)
+              event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', profile.id)
+            }}
+            onDragOver={event => { if (drag.current && !blocked) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDropTarget(drag.current.id === profile.id ? null : { id: profile.id, side: sideAt(event) }) } }}
+            onDrop={event => drop(event, profile.id)} onDragEnd={endDrag}>
           <td><span className="accounts-name" title={profile.name}>{profile.name}</span><span className="accounts-meta">{client && <span className="accounts-client" data-error={client.state === 'failed'} role={client.state === 'failed' ? 'alert' : undefined} title={client.error || label}>{label}{client.error ? ` · ${client.error}` : ''}</span>}{profile.id === 'existing' && <span className="accounts-original">{tr('原有资料')}</span>}{profile.lastOpened && <span title={new Date(profile.lastOpened).toLocaleString(lang)}>{tr('最近打开')} {new Date(profile.lastOpened).toLocaleDateString(lang)}</span>}</span></td>
           <td>{profile.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')}</td>
           <td><div className="accounts-row-tools">

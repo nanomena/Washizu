@@ -22,6 +22,7 @@ export async function renderProxySettings(root) {
   ipcMain.handle('washizu:profiles', (event, method, args) => {
     assert.equal(event.sender, window.webContents)
     if (method === 'save_profile') { store.update(args.id, args.name, args.proxy); revision++ }
+    else if (method === 'reorder_profiles') { store.reorder(args.ids); revision++ }
     else assert.equal(method, 'list_profiles', 'The settings fixture never opens a game')
     return { ok: true, value: state() }
   })
@@ -47,6 +48,27 @@ export async function renderProxySettings(root) {
       assert.equal(geometry.mode, 'system')
       if (lang === 'zh-CN' && width === 640) fs.writeFileSync(path.join(root, 'management.png'), (await window.webContents.capturePage()).toPNG())
     }
+    await window.loadURL('app://dock/index.html?view=profiles')
+    await ready('document.querySelectorAll("tbody tr").length === 3')
+    const points = await evaluate(`(()=>{const rows=document.querySelectorAll('tbody tr'),a=rows[0].children[1].getBoundingClientRect(),b=rows[2].children[0].getBoundingClientRect();return {sx:a.left+a.width/2,sy:a.top+a.height/2,tx:b.left+30,ty:b.bottom-8}})()`)
+    const debug = window.webContents.debugger
+    debug.attach('1.3')
+    let dragData
+    const intercepted = new Promise(done => {
+      debug.on('message', (_event, method, params) => { if (method === 'Input.dragIntercepted') { dragData = params.data; done(undefined) } })
+    })
+    try {
+      await debug.sendCommand('Input.setInterceptDrags', { enabled: true })
+      await debug.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x: points.sx, y: points.sy })
+      await debug.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', x: points.sx, y: points.sy, button: 'left', buttons: 1, clickCount: 1 })
+      await debug.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x: points.sx + 10, y: points.sy + 10, button: 'left', buttons: 1 })
+      await debug.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x: points.tx, y: points.ty, button: 'left', buttons: 1 })
+      await Promise.race([intercepted, new Promise((_, reject) => setTimeout(() => reject(new Error('Actual row drag did not start')), 2000))])
+      for (const type of ['dragEnter', 'dragOver', 'drop']) await debug.sendCommand('Input.dispatchDragEvent', { type, x: points.tx, y: points.ty, data: dragData })
+      await ready('document.querySelectorAll("tbody tr .accounts-name")[2]?.textContent === "Main"')
+      assert.equal(new ProfileStore(store.root).load().list()[2].id, main.id)
+      console.log('PASS actual Chromium whole-row drag from platform cell persists account order without opening a game')
+    } finally { await debug.sendCommand('Input.setInterceptDrags', { enabled: false }); debug.detach() }
     assert.deepEqual(store.get(main.id).proxy, { mode: 'system', server: '' })
     console.log('PASS actual management UI geometry: 4 languages x 2 guide sizes; no game opened')
   } finally { ipcMain.removeHandler('washizu:profiles'); window.destroy() }
