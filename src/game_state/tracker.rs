@@ -181,11 +181,42 @@ impl GameTracker {
             match tg {
                 TrackedGame::Four(s) => {
                     if self.restored {
+                        let included_draw = if self.restore_anchor {
+                            if let AkagiEvent::Tsumo { actor, pai } = ev {
+                                if Some(*actor) == self.our_seat
+                                    && s.players[*actor as usize].hand.len()
+                                        + 3 * s.players[*actor as usize].melds.len()
+                                        == 14
+                                {
+                                    let tile = riichienv_core::parser::mjai_to_tid(pai)
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("Invalid restored live draw")
+                                        })?;
+                                    let p = &mut s.players[*actor as usize];
+                                    let pos = p.hand.iter().position(|t| *t == tile).ok_or_else(
+                                        || {
+                                            anyhow::anyhow!(
+                                                "Restored pending draw contradicts live tile"
+                                            )
+                                        },
+                                    )?;
+                                    p.hand.remove(pos);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
                         // No wall tile identities were imported. Reconcile
                         // the first real phase, then count only real draws.
-                        if matches!(ev, AkagiEvent::Tsumo { .. })
-                            || (self.restore_anchor
-                                && matches!(ev, AkagiEvent::Dahai { actor, .. } if Some(*actor) != self.our_seat))
+                        if !included_draw
+                            && (matches!(ev, AkagiEvent::Tsumo { .. })
+                                || (self.restore_anchor
+                                    && matches!(ev, AkagiEvent::Dahai { actor, .. } if Some(*actor) != self.our_seat)))
                         {
                             s.wall.drawable_count = s.wall.drawable_count.saturating_sub(1);
                         }

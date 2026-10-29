@@ -50,7 +50,7 @@ pub fn build(snapshot: &KyokuRestore) -> Result<GameState> {
         p.hand.clear(); // Never allocate an opponent's concealed tiles.
         p.score = snapshot.scores[seat];
         ensure!(
-            p.score % 100 == 0 && observed.melds.len() <= 4,
+            p.score % 100 == 0 && observed.melds.len() <= 4 && observed.river.len() <= 40,
             "Invalid restore score/meld count"
         );
         p.riichi_declared = observed.riichi;

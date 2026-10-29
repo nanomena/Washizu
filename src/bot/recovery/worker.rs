@@ -413,6 +413,22 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
 
+    #[test]
+    fn positioned_receipt_alone_cannot_acknowledge_an_ignored_snapshot() {
+        let event = MjaiEvent::ObservedDecision {
+            event: Box::new(MjaiEvent::None),
+            legal: vec![],
+        };
+        let mut reply = BotResponse {
+            request: None,
+            action: MjaiEvent::None,
+            meta: Some(json!({"delivery":{"through":3}})),
+        };
+        assert!(validate_restoration(reply.clone(), std::slice::from_ref(&event)).is_err());
+        reply.meta.as_mut().unwrap()["restoration"] = json!({"origin":"public_snapshot", "temporal_prefix":"reset", "missing_history":"unknown_fields", "seat":0});
+        assert!(validate_restoration(reply, &[event]).is_ok());
+    }
+
     #[tokio::test]
     async fn semantic_failure_rebuilds_the_complete_real_prefix_after_backoff() {
         use std::sync::{Arc, Mutex};

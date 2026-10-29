@@ -714,6 +714,7 @@ impl TenhouBridge {
         // 1 per nukidora.
         self.state.is_tsumo =
             (self.state.hand.len() + 3 * self.state.melds.len() + nukidora) % 3 == 2;
+        self.state.restored_pending_draw = self.state.is_tsumo;
         // Every discard followed a draw or a call; close enough for a
         // counter nothing downstream reads precisely.
         let discarded: u32 = (0..4).map(|rel| kawa(rel).len() as u32).sum();
@@ -786,6 +787,19 @@ impl TenhouBridge {
         if actor == self.state.seat {
             if let Some(idx) = parse_tail_u32(tag, 1) {
                 pai = tenhou_to_mjai_one(idx);
+                if self.state.restored_pending_draw {
+                    self.state.restored_pending_draw = false;
+                    if let Some(pos) = self.state.hand.iter().position(|t| *t == idx) {
+                        self.state.hand.remove(pos);
+                        self.state.live_wall += 1; // The pending tile was already counted.
+                    } else {
+                        return vec![MjaiEvent::InterruptedKyoku {
+                            reason:
+                                "The restored pending draw contradicts the server's real T frame."
+                                    .into(),
+                        }];
+                    }
+                }
                 self.state.hand.push(idx);
                 self.state.is_tsumo = true;
             }
@@ -853,6 +867,7 @@ impl TenhouBridge {
         self.state.last_revealed_tile_actor = Some(actor);
         self.state.is_tsumo = false;
         if actor == self.state.seat {
+            self.state.restored_pending_draw = false;
             if let Some(pos) = self.state.hand.iter().rposition(|&i| i == idx) {
                 self.state.hand.remove(pos);
             }
@@ -1335,6 +1350,33 @@ mod tests {
 
     fn parse_one(b: &mut TenhouBridge, json: &str) -> Vec<MjaiEvent> {
         b.parse(Direction::Down, json.as_bytes()).events
+    }
+
+    #[test]
+    fn restored_pending_draw_is_identified_without_adding_a_fifteenth_tile() {
+        let mut bridge = TenhouBridge::new(None, None);
+        parse_one(&mut bridge, r#"{"tag":"GO","type":"1","lobby":"0"}"#);
+        let restored = parse_one(
+            &mut bridge,
+            r#"{"tag":"REINIT","seed":"0,0,0,3,0,23","ten":"250,250,250,250","oya":"0","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96,120","kawa0":"1,106,74","kawa1":"79,122,3","kawa2":"72,100,9","kawa3":"107,78,67"}"#,
+        );
+        let mut tracker = crate::game_state::GameTracker::new();
+        for event in &restored {
+            tracker.handle(event).unwrap();
+        }
+        assert!(matches!(
+            restored.last(),
+            Some(MjaiEvent::RestoreKyoku { .. })
+        ));
+        let remaining = tracker.state().unwrap().wall.drawable_count;
+        let events = parse_one(&mut bridge, r#"{"tag":"T120"}"#);
+        for event in &events {
+            tracker.handle(event).unwrap();
+        }
+        assert_eq!(bridge.state.hand.len(), 14);
+        assert_eq!(bridge.state.hand.last(), Some(&120));
+        assert_eq!(tracker.state().unwrap().players[0].hand.len(), 14);
+        assert_eq!(tracker.state().unwrap().wall.drawable_count, remaining);
     }
 
     #[test]
