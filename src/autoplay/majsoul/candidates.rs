@@ -220,6 +220,45 @@ mod tests {
     }
 
     #[test]
+    fn native_two_choice_row_binds_the_selected_pair_and_rejects_partial_rows() {
+        let (mut image, viewport) = native(include_bytes!("../fixtures/melds/candidate-two.png"));
+        let row = read(&image, 1., viewport, 2).expect("actual revealed two-choice row");
+        assert_eq!(row.per_choice, 2);
+        assert_eq!(row.faces.len(), 4);
+        let left = row.target(0).unwrap();
+        let right = row.target(1).unwrap();
+        assert!(left.x + left.width < right.x);
+        assert_eq!(right, row.faces[2]);
+        assert!(row.target(2).is_none());
+        assert!(action(&image, 1., viewport, coords::ACTIONS[1]).is_none());
+        for choices in 3..=6 {
+            assert!(read(&image, 1., viewport, choices).is_none());
+        }
+        // Hover lifts one real pair but keeps each measured face selectable.
+        for face in &row.faces[2..] {
+            for y in face.y as usize..(face.y + face.height) as usize {
+                for x in face.x as usize..(face.x + face.width) as usize {
+                    image.pixels[(y - 16) * image.width + x] = image.pixels[y * image.width + x];
+                }
+            }
+            for y in (face.y + face.height) as usize - 16..(face.y + face.height) as usize {
+                for x in face.x as usize..(face.x + face.width) as usize {
+                    image.pixels[y * image.width + x] = [0, 0, 0];
+                }
+            }
+        }
+        let hovered = read(&image, 1., viewport, 2).expect("hovered pair stays visible");
+        assert!(hovered.target(1).unwrap().y < right.y);
+        // A covered/missing face must not turn into another valid grouping.
+        for y in left.y as usize..(left.y + left.height) as usize {
+            for x in left.x as usize..(left.x + left.width) as usize {
+                image.pixels[y * image.width + x] = [0, 0, 0];
+            }
+        }
+        assert!(read(&image, 1., viewport, 2).is_none());
+    }
+
+    #[test]
     fn actual_button_geometry_tracks_canvas_offset_and_device_scale() {
         for png in [
             include_bytes!("../fixtures/melds/action-chi.png").as_slice(),
