@@ -15,6 +15,7 @@ import * as input from '../src/input.js'
 import * as physicalPointer from '../src/physical-pointer.js'
 import * as preferences from '../src/view-preferences.js'
 import * as profileProxy from '../src/profile-proxy.js'
+import { presentWindow } from '../src/window-frame.js'
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'washizu-obs-test-'))
 const sender = path.join(home, 'sender.exe')
@@ -65,6 +66,7 @@ class Window extends EventEmitter {
   isMinimized() { return this.minimized }
   restore() { presentation.push('restore'); this.minimized = false }
   show() { presentation.push('show'); this.visible = true }
+  moveTop() { assert.equal(this.visible, true); presentation.push('raise') }
   focus() { assert.equal(this.visible, true); presentation.push('focus'); this.focused = true }
 }
 class Browser extends Window {
@@ -114,7 +116,7 @@ const namespaces = {
   './watch.js': { COLLECT_AFTER_MS: 1000, FrameMeter: class { paint() {} }, GL_STATE: '', GlWatch: class {},
     HUNG_MS: 1000, RELOAD_QUIET_MS: 1000, WATCH_MS: 1000, WEBGL_CONTEXTS: 16, processLine() {}, worthKeeping() {} },
   './workers.js': { keepWorkersRunning: async () => {} },
-  './window-frame.js': { contentSize: () => ({ width: 1000, height: 750 }), holdRatio() {} },
+  './window-frame.js': { contentSize: () => ({ width: 1000, height: 750 }), holdRatio() {}, presentWindow },
   './profiles.js': { ProfileStore: class { load() { return this } get() { return { id: 'existing', name: 'Original', platform: 'Majsoul', proxy: { mode: 'system', server: '' } } } home() { return home } },
     PLATFORMS: { Majsoul: { name: 'Mahjong Soul' } }, homePlatform: () => 'Majsoul' },
   './view-preferences.js': preferences,
@@ -149,7 +151,7 @@ try {
   assert.equal(account.visible, false)
   assert.deepEqual(messages, [])
   views[0].webContents.emit('did-finish-load')
-  assert.deepEqual(presentation, ['show', 'focus', 'profile-ready'], 'the first Open presents and focuses before acknowledging readiness')
+  assert.deepEqual(presentation, ['show', 'raise', 'focus', 'profile-ready'], 'the first Open raises and focuses before acknowledging readiness')
   assert.equal(account.visible, true)
   assert.equal(account.focused, true)
   views[0].webContents.emit('did-finish-load')
@@ -158,12 +160,12 @@ try {
   account.visible = account.focused = false
   account.minimized = true
   accountProcess.emit('message', { type: 'focus' })
-  assert.deepEqual(presentation, ['restore', 'show', 'focus'])
+  assert.deepEqual(presentation, ['restore', 'show', 'raise', 'focus'])
   assert.equal(account.minimized, false)
   presentation.length = 0
   account.visible = account.focused = false
   app.emit('second-instance')
-  assert.deepEqual(presentation, ['show', 'focus'], 'a hidden account is shown as well as focused')
+  assert.deepEqual(presentation, ['show', 'raise', 'focus'], 'a hidden account is raised as well as focused')
   assert.equal(windows.length, 1, 'focus never creates a second account window')
   if (process.env.WINDOW_PRESENTATION_ONLY === '1') {
     console.log('First Open, IPC focus and second-instance presentation lifecycle: passed')
