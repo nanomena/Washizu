@@ -114,7 +114,7 @@ impl RecorderState {
 
     fn handle(&mut self, ev: MjaiEvent, store: &HistoryStore, bus: &HistoryBus) {
         match &ev {
-            MjaiEvent::InterruptedKyoku { .. } => self.reset(),
+            MjaiEvent::InterruptedKyoku { .. } | MjaiEvent::RestoreKyoku { .. } => self.reset(),
             MjaiEvent::StartGame { game_meta, .. } => {
                 let incoming_game_id = game_meta.as_ref().and_then(|meta| meta.game_id);
                 let reconnecting_same_game = incoming_game_id.is_some()

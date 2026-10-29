@@ -8,6 +8,7 @@ pub mod account;
 pub mod history;
 pub mod inspector;
 pub mod mjai;
+pub mod restore;
 pub mod status;
 
 pub use account::{AccountLevels, AccountPlatform, Level};

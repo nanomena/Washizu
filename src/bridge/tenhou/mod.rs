@@ -16,6 +16,7 @@
 
 pub mod encode;
 pub mod meld;
+mod restore;
 mod settlement;
 pub mod state;
 pub mod tile;
@@ -638,13 +639,12 @@ impl TenhouBridge {
     /// of `<INIT/>` when the client rejoins a game.
     ///
     /// It is a snapshot, not a log: each seat's river and calls are listed,
-    /// but nothing says *when* a call happened relative to the discards, so
-    /// the mjai stream for the hand cannot be rebuilt (Majsoul's
-    /// `GameRestore` can — it is an ordered action log). Restore the observed
-    /// hand/identity and emit an explicit interruption. The tracker retires
-    /// its old rules state, Primary waits for a real new deal, and the one
-    /// coordinator can choose restricted standby actions from subsequent
-    /// live windows. No river ordering or private draws are invented.
+    /// without the unique interleaving of calls/discards. Import the public
+    /// position explicitly; the primary starts a new temporal stream and
+    /// uses absent tokens for unknown history features. Subsequent real
+    /// windows carry an independent rules/provider-constrained legal set.
+    /// Invalid positions remain explicitly unavailable; no river ordering,
+    /// past decision or concealed draw is invented.
     ///
     /// Field layout mirrors `<INIT/>` (`seed` / `ten` / `oya` / `hai`, all
     /// wire-relative) plus per-seat `m<rel>` (comma-separated `<N m=…/>`
@@ -723,17 +723,12 @@ impl TenhouBridge {
         self.ensure_mjai_log();
         warn!(
             target: "akagi::bridge::tenhou",
-            "REINIT: rejoined seed={} as seat {} with {} tiles, {} call(s){}; restricted standby until a real INIT",
+            "REINIT: importing seed={} as seat {} with {} tiles, {} call(s){}",
             seed[0],
             self.state.seat,
             self.state.hand.len(),
             self.state.melds.len(),
             if self.state.in_riichi { ", in riichi" } else { "" }
-        );
-        self.notify(
-            Notification::warn("Tenhou: rejoined mid-hand")
-                .body("本手历史不完整：备用策略仅按服务器实际窗口和新摸牌接续；下一手重新建立主模型上下文。")
-                .id("tenhou-reinit"),
         );
         let roster = self.state.un_names.clone();
         let names = self.build_start_names();
@@ -759,9 +754,18 @@ impl TenhouBridge {
                 our_level: None,
             }),
         };
-        vec![start, MjaiEvent::InterruptedKyoku {
-            reason: "Tenhou REINIT contains a snapshot, not the missing ordered hand history. Primary awaits the next real INIT; restricted standby uses only observed legal actions.".into(),
-        }]
+        let restored = match restore::snapshot(&self.state, msg) {
+            Ok(snapshot) => {
+                self.notify(Notification::warn("Tenhou: restoring the main model")
+                    .body("按服务器局面快照恢复本手主模型；缺失的历史特征明确置为未知，下一次真实决策经合法动作校验后接续。")
+                    .id("tenhou-reinit"));
+                MjaiEvent::RestoreKyoku { snapshot }
+            }
+            Err(error) => MjaiEvent::InterruptedKyoku {
+                reason: format!("REINIT position rejected: {error:#}"),
+            },
+        };
+        vec![start, restored]
     }
 
     /// `<T0/>`, `<U7/>`, `<V12/>`, `<W3/>` — tsumo.

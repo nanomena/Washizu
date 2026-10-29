@@ -303,7 +303,10 @@ impl StandbyWorker {
             let mut policy_error: Option<String> = None;
             let mut interrupted = false;
             while let Some(work) = observations.blocking_recv() {
-                interrupted |= matches!(work.event, Some(MjaiEvent::InterruptedKyoku { .. }));
+                interrupted |= matches!(
+                    work.event,
+                    Some(MjaiEvent::InterruptedKyoku { .. } | MjaiEvent::RestoreKyoku { .. })
+                );
                 let mut legal = vec![];
                 let mut response = None;
                 let result = if interrupted {

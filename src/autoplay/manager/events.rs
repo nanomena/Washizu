@@ -70,7 +70,8 @@ impl AutoplayManager {
             }
             MjaiEvent::StartKyoku { .. }
             | MjaiEvent::EndKyoku
-            | MjaiEvent::InterruptedKyoku { .. } => {
+            | MjaiEvent::InterruptedKyoku { .. }
+            | MjaiEvent::RestoreKyoku { .. } => {
                 if matches!(ev, MjaiEvent::StartKyoku { .. }) {
                     self.toggles.reset();
                     let window = self
