@@ -100,6 +100,28 @@ test('title resume exposes only the saved-account control with a fresh physical 
   assert.deepEqual(f.state.effects, []);
 });
 
+test('native welcome exposes its real OK geometry without invoking it', () => {
+  const f = fixture(), root = new Element(), button = new Element('BUTTON', { x: 525, y: 473, width: 230, height: 77 });
+  root.append(button);
+  root.querySelector = selector => selector === 'button[name="ok"]' ? button : null;
+  Object.assign(f.state, { popup: { element: root, tag: 'SPLASH', closing: false, queued: 0 }, account: 'ID1234ABCD' });
+  const observed = f.api.readUi();
+  assert.equal(observed.popup.tag, 'SPLASH');
+  assert.equal(observed.popup.enabled, true);
+  assert.equal(observed.title, null);
+  const request = { kind: 'popup', identity: observed.popup.identity };
+  const target = f.api.probeUi(request).target;
+  assert.ok(target);
+  assert.equal(f.api.probeUi({ ...request, targetIdentity: target.identity, point: middle(target.bounds) }).status, 'ready');
+  f.state.overlay = new Element();
+  assert.equal(f.api.probeUi(request).status, 'changed');
+  f.state.overlay = null;
+  f.state.popup.closing = true;
+  assert.equal(f.api.readUi().popup.enabled, false);
+  assert.deepEqual(f.state.effects, []);
+  assert.equal(f.api.pressUi, undefined);
+});
+
 test('only the identified disconnect dialog exposes its current submit input', () => {
   const f = fixture(), root = new Element(), button = new Element('INPUT', { x: 100, y: 70, width: 120, height: 40 });
   root.append(button);
@@ -266,7 +288,7 @@ test('rank notice is an observed UI control while login and unknown prompts stay
   button.name = 'ok'; element.append(button);
   f.state.popup = { element, tag: 'NINTEI', queued: 0, closing: false };
   assert.equal(f.api.readUi().popup.enabled, true);
-  for (const tag of ['LOGIN', 'AUTOLOGIN', 'SPLASH', 'UNKNOWN']) {
+  for (const tag of ['LOGIN', 'AUTOLOGIN', 'UNKNOWN']) {
     f.state.popup.tag = tag;
     const popup = f.api.readUi().popup;
     assert.equal(popup.enabled, false);

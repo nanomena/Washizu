@@ -24,6 +24,8 @@ pub enum ClientTag {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PopupTag {
+    #[serde(rename = "SPLASH")]
+    Welcome,
     #[serde(rename = "TAIKYOKU")]
     Start,
     #[serde(rename = "AGARI")]
@@ -233,6 +235,17 @@ impl Run {
                 && self.stage == Stage::Reconnecting
                 && self.resume_account.as_ref() == Some(account);
         }
+        if matches!(
+            control,
+            Control::Popup {
+                tag: PopupTag::Welcome,
+                ..
+            }
+        ) {
+            return env.settings.enabled
+                && self.stage == Stage::Reconnecting
+                && self.resume_account.is_some();
+        }
         if self.player.is_none() {
             return false;
         }
@@ -331,6 +344,26 @@ impl Run {
             }
             if self.spent.contains(&popup.identity) {
                 return None;
+            }
+            if popup.tag == PopupTag::Welcome {
+                let account = self.resume_account.as_ref()?;
+                if observation.account.as_ref() != Some(account) {
+                    self.resume_account = None;
+                    self.stop(WaitingReason::OwnershipChanged);
+                    return None;
+                }
+                if self.stage != Stage::Reconnecting {
+                    self.stage = Stage::Reconnecting;
+                    self.until = Some(now + RESULT_LIMIT);
+                    self.attempts = 0;
+                }
+                return (popup.enabled && !popup.closing && popup.queued == 0).then(|| {
+                    Control::Popup {
+                        identity: popup.identity.clone(),
+                        tag: PopupTag::Welcome,
+                        queued: 0,
+                    }
+                });
             }
             let stage = match popup.tag {
                 PopupTag::Start if matches!(self.stage, Stage::WaitingStart | Stage::Starting) => {
@@ -590,6 +623,10 @@ impl Machine {
             && run.stage == Stage::Table
             && observation.title.is_none()
             && observation.disconnect.is_none()
+            && !matches!(
+                observation.popup.as_ref().map(|popup| popup.tag),
+                Some(PopupTag::Welcome)
+            )
         {
             if let Some(account) = observation.account.as_ref().filter(|s| {
                 s.len() == 10
