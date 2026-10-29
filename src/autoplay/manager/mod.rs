@@ -420,6 +420,10 @@ mod admission_tests {
             cfg.autoplay.enabled = true;
             cfg.platform.kind = Platform::Tenhou;
         }
+        let mut env =
+            ui_input::environment(&manager.ctx, &manager.cfg, true, &manager.monitor).await;
+        env.manual = false;
+        manager.ui.lock().unwrap().synchronize(env, Instant::now());
         let mut bridge =
             TenhouBridge::new(None, None).with_shared_state(Some(manager.ctx.tenhou_state.clone()));
         let mut rx = manager.mjai_bus.subscribe();
@@ -471,6 +475,18 @@ mod admission_tests {
             standby: RunnerHealth::Ready { through: 3 },
         });
         manager.apply_pending_protocol(&mut rx).await;
+        let mut env =
+            ui_input::environment(&manager.ctx, &manager.cfg, true, &manager.monitor).await;
+        env.manual = false;
+        {
+            let mut ui = manager.ui.lock().unwrap();
+            ui.synchronize(env, Instant::now() + std::time::Duration::from_secs(31));
+            assert_eq!(
+                ui.phase(),
+                crate::autoplay::ui::Phase::Web(crate::autoplay::ui::tenhou_web::Stage::Table)
+            );
+            assert_eq!(ui.waiting_reason(), None);
+        }
         let decision = manager
             .read_decision(&reply)
             .await

@@ -110,6 +110,7 @@ pub enum WaitingReason {
     SessionChanged,
     Lobby,
     EndTimeout,
+    ReconnectTimeout,
     PressLimit,
     ClientReload,
     NoKnownTable,
@@ -402,6 +403,9 @@ impl Machine {
 
     pub fn game_ended(&mut self, now: Instant) {
         if self.client() == Client::TenhouWeb {
+            if let State::Web(run) = &mut self.state {
+                run.end_resume();
+            }
             return;
         }
         let Some(env) = self.env else {

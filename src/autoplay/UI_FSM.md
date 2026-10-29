@@ -222,3 +222,26 @@ revokes input. Direct Native/API and positioned primary/standby use the same
 contract; no UI policy selection or second controller is introduced. Tenhou
 retains its prior handler and riichi-continuation behavior. See
 [the shared contract](../bot/CONTROL.md).
+
+## Tenhou title recovery
+
+The Web3 observation requires explicit nullable `account` and `title` fields.
+The account is only the public registered-ID prefix; the credential suffix
+never leaves the page. The native title observer exposes the saved-account
+button's geometry, and invokes no handler. Guest, registration and ID-entry
+controls are not input targets.
+
+Only this FSM learns resume authority at an authenticated own table. A reload
+of the same active game can retain that public identity while revoking every
+old DOM target and mouse ticket. A title with the same account may enter
+`Reconnecting`, independently of rematching/quick-confirm settings. Fresh
+clients, changed accounts, finished games and changed game identities have no
+resume authority. Disabled/manual ownership and final physical hit checks
+still revoke input. The common pointer performs the one authorized press.
+
+The reconnect episode has a fixed deadline and spends each observed control
+once. A missing document may be observed again only inside that bounded FSM
+episode. A lobby return cannot authorize a new match. Only authentic
+`StartKyoku` or `RestoreKyoku` returns the UI to `Table` and clears the deadline;
+a click or a disappearing title is not proof of a restored table. The model
+source coordinator separately validates and restores Primary context.

@@ -23,18 +23,18 @@ async function main() {
     await win.loadFile(fixture)
     await win.webContents.executeJavaScript(`{
       const panel=document.querySelector('#panel'),join=document.querySelector('#join0'),ok=document.querySelector('[name=ok]');
-      const state=window.fixture={tag:'LOBBY',epoch:1,reserved:false,effects:[],mouse:[]};
+      const state=window.fixture={tag:'LOBBY',epoch:1,reserved:false,effects:[],mouse:[],mode:1,title:null};
       for(const type of ['mousedown','mouseup','click'])document.addEventListener(type,event=>state.mouse.push({type,trusted:event.isTrusted}));
       join.addEventListener('click',event=>{state.effects.push({tag:'JOIN',trusted:event.isTrusted});state.reserved=true;state.epoch++;});
       ok.addEventListener('click',event=>{state.effects.push({tag:state.tag,trusted:event.isTrusted});state.epoch++;});
-      window.api=(${source})({input:{mode:()=>1},uiEpoch:()=>state.epoch,modal:()=>false,
-        popup:{read:()=>({element:panel,tag:state.tag,queued:0,closing:false})},
+      window.api=(${source})({input:{mode:()=>state.mode},title:{read:()=>({account:'ID1234ABCD'})},uiEpoch:()=>state.epoch,modal:()=>false,
+        popup:{read:()=>({element:state.title||panel,tag:state.tag,queued:0,closing:false})},
         lobby:{read:()=>({lobby:0,selected:['1'],loaded:true,reservationRequested:state.reserved})}}); true;
     }`)
     win.webContents.debugger.attach('1.3')
     const read = (/** @type {string} */ expression) => win.webContents.executeJavaScript(expression)
-    const target = async (/** @type {'join'|'popup'} */ kind) => {
-      const value = await read(`{const ui=api.readUi();const identity=${kind === 'join' ? 'ui.lobby.offers[0].identity' : 'ui.popup.identity'};({kind:${JSON.stringify(kind)},identity,probe:api.probeUi({kind:${JSON.stringify(kind)},identity})})}`)
+    const target = async (/** @type {'join'|'popup'|'resume'} */ kind) => {
+      const value = await read(`{const ui=api.readUi();const identity=${kind === 'join' ? 'ui.lobby.offers[0].identity' : kind === 'resume' ? 'ui.title.identity' : 'ui.popup.identity'};({kind:${JSON.stringify(kind)},identity,probe:api.probeUi({kind:${JSON.stringify(kind)},identity})})}`)
       assert.equal(value.probe.status, 'ready')
       return value
     }
@@ -62,12 +62,20 @@ async function main() {
       await read(`fixture.tag=${JSON.stringify(tag)};fixture.epoch++`)
       await click(await target('popup'))
     }
+    await read(`{
+      document.querySelector('#panel').remove();fixture.mode=0;fixture.tag='LOGIN';
+      const title=document.createElement('main');title.innerHTML='<div id="pane1"><button name="ok">Guest</button></div><div id="pane0"><button name="ok" style="left:80px">OK</button></div>';
+      document.body.append(title);fixture.title=title;
+      title.querySelector('#pane0 > [name=ok]').addEventListener('click',event=>{fixture.effects.push({tag:'RESUME',trusted:event.isTrusted});fixture.mode=1;title.remove();});
+    }`)
+    await click(await target('resume'))
+    assert.equal(await read('api.readUi().title'), null)
     const effects = await read('fixture.effects'), mouse = await read('fixture.mouse')
-    assert.deepEqual(effects.map((/** @type {any} */ event) => event.tag), ['JOIN','TAIKYOKU','AGARI','RYUUKYOKU','OWARI','NINTEI'])
+    assert.deepEqual(effects.map((/** @type {any} */ event) => event.tag), ['JOIN','TAIKYOKU','AGARI','RYUUKYOKU','OWARI','NINTEI','RESUME'])
     assert.ok(effects.every((/** @type {any} */ event) => event.trusted))
-    assert.equal(mouse.length, 18)
+    assert.equal(mouse.length, 21)
     assert.ok(mouse.every((/** @type {any} */ event) => event.trusted))
-    console.log('ok read-only Tenhou UI probes; occlusion refusal; six trusted Chromium mouse presses and real button effects')
+    console.log('ok read-only Tenhou UI probes; occlusion refusal; seven trusted Chromium mouse presses including registered-title resume')
     win.webContents.debugger.detach()
   } catch (error) { console.error(error); process.exitCode = 1 }
   finally { window?.destroy(); app.exit(Number(process.exitCode) || 0) }

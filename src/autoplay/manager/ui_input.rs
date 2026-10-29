@@ -170,6 +170,7 @@ impl AutoplayManager {
                 ui::WaitingReason::NoGame => "当前没有已确认的对局。",
                 ui::WaitingReason::SessionChanged => "客户端会话已经改变，需要新的真实对局信息。",
                 ui::WaitingReason::ClientReload => "客户端正在重新加载。",
+                ui::WaitingReason::ReconnectTimeout => "重新连接等待超时，请检查网络或手动重连。",
             };
             let _ = self
                 .notify

@@ -124,6 +124,8 @@ fn target() -> TableSpec {
 fn popup(identity: &str, tag: PopupTag, queued: u32) -> Web3Observation {
     Web3Observation {
         client: ClientTag::Web3,
+        account: None,
+        title: None,
         popup: Some(Popup {
             identity: identity.into(),
             tag,
@@ -138,6 +140,8 @@ fn popup(identity: &str, tag: PopupTag, queued: u32) -> Web3Observation {
 fn lobby() -> Web3Observation {
     Web3Observation {
         client: ClientTag::Web3,
+        account: None,
+        title: None,
         popup: None,
         lobby: Some(Lobby {
             identity: "lobby-instance".into(),
@@ -163,6 +167,7 @@ fn lobby() -> Web3Observation {
 fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_popup() {
     for invalid in [
         r#"{"client":"web3"}"#,
+        r#"{"client":"web3","popup":null,"lobby":null}"#,
         r#"{"client":"web4","popup":null,"lobby":null}"#,
         r#"{"client":"web3","popup":{"identity":"x","tag":"AGARI","enabled":true,"closing":false},"lobby":null}"#,
     ] {
@@ -171,7 +176,7 @@ fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_po
             "{invalid}"
         );
     }
-    let unknown: Web3Observation = serde_json::from_str(r#"{"client":"web3","popup":{"identity":"login","tag":"LOGIN","enabled":true,"closing":false,"queued":0},"lobby":null}"#).unwrap();
+    let unknown: Web3Observation = serde_json::from_str(r#"{"client":"web3","account":null,"title":null,"popup":{"identity":"login","tag":"LOGIN","enabled":true,"closing":false,"queued":0},"lobby":null}"#).unwrap();
     assert_eq!(unknown.popup.as_ref().unwrap().tag, PopupTag::Other);
     let mut h = Harness::new(Some(target()));
     h.observe_only(&unknown, 10);
@@ -181,6 +186,116 @@ fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_po
         Dispatch::Sent
     );
     assert!(serde_json::from_str::<Dispatch>(r#""ok""#).is_err());
+}
+
+fn title(identity: &str, account: &str) -> Web3Observation {
+    Web3Observation {
+        client: ClientTag::Web3,
+        account: Some(account.into()),
+        title: Some(Title {
+            identity: identity.into(),
+            enabled: true,
+        }),
+        popup: None,
+        lobby: None,
+    }
+}
+
+fn authenticated() -> Harness {
+    let mut h = Harness::new(Some(target()));
+    h.env.context = Some(crate::monitor::DecisionContext {
+        game: 1,
+        round: 1,
+        event_seq: 1,
+    });
+    h.ui.table_started(None);
+    let mut observation = title("unused", "ID1234ABCD");
+    observation.title = None;
+    h.observe_only(&observation, 1);
+    h
+}
+
+#[test]
+fn own_title_resume_is_once_per_control_and_real_restore_clears_its_deadline() {
+    let mut h = authenticated();
+    let observation = title("saved-title", "ID1234ABCD");
+    assert!(matches!(h.press(&observation), Control::Resume { .. }));
+    h.observe_only(&observation, 5);
+    assert_eq!(h.sent.len(), 1);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    // The bridge publishes authentic StartGame + RestoreKyoku, not a new deal.
+    h.ui.web_game_started(Some(0), Some(target()), h.now);
+    h.ui.table_started(None);
+    h.now += RESULT_LIMIT + Duration::from_secs(1);
+    h.sync();
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Table));
+    h.press(&popup("real-result", PopupTag::Win, 0));
+}
+
+#[test]
+fn title_cannot_log_in_a_fresh_client_changed_account_or_finished_game() {
+    let observation = title("title", "ID1234ABCD");
+    let mut fresh = Harness::new(Some(target()));
+    fresh.observe_only(&observation, 5);
+    assert!(fresh.sent.is_empty());
+    let mut changed = authenticated();
+    changed.observe_only(&title("other-account", "ID87654321"), 1);
+    assert_eq!(
+        changed.ui.waiting_reason(),
+        Some(WaitingReason::OwnershipChanged)
+    );
+    assert!(changed.sent.is_empty());
+    let mut finished = authenticated();
+    finished.ui.game_ended(finished.now);
+    finished.observe_only(&observation, 5);
+    assert!(finished.sent.is_empty());
+}
+
+#[test]
+fn title_final_permission_obeys_manual_disable_account_and_observation_changes() {
+    let observation = title("title", "ID1234ABCD");
+    for change in 0..4 {
+        let mut h = authenticated();
+        let (ticket, control) = h.ready(&observation);
+        let mut final_observation = observation.clone();
+        match change {
+            0 => h.env.manual = true,
+            1 => h.env.settings.enabled = false,
+            2 => final_observation.account = Some("ID87654321".into()),
+            _ => final_observation.title.as_mut().unwrap().identity = "replaced".into(),
+        }
+        assert!(!h.invoke(ticket, &control, &final_observation, Dispatch::Sent));
+        assert!(h.sent.is_empty());
+    }
+}
+
+#[test]
+fn same_game_reload_retains_only_resume_identity_and_unavailable_reads_are_bounded() {
+    let mut h = authenticated();
+    let (old_ticket, old_control) = h.ready(&title("old-document", "ID1234ABCD"));
+    h.env.generation.session += 1;
+    h.sync();
+    assert!(!h.invoke(
+        old_ticket,
+        &old_control,
+        &title("old-document", "ID1234ABCD"),
+        Dispatch::Sent
+    ));
+    let Effect::ObserveWeb(ticket) = h.next().unwrap() else {
+        panic!()
+    };
+    h.ui.web_observed(ticket, None, h.now, &mut h.rng);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    h.press(&title("new-document", "ID1234ABCD"));
+    h.now += RESULT_LIMIT + Duration::from_secs(1);
+    h.sync();
+    assert_eq!(h.ui.waiting_reason(), Some(WaitingReason::ReconnectTimeout));
+    assert!(h.ui.due().is_none());
+    let mut different_game = authenticated();
+    different_game.env.generation.session += 1;
+    different_game.env.context.as_mut().unwrap().game += 1;
+    different_game.observe_only(&title("new-game", "ID1234ABCD"), 5);
+    assert!(different_game.sent.is_empty());
 }
 
 #[test]

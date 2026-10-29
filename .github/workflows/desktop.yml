@@ -110,6 +110,7 @@ jobs:
           xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:profiles
           xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:proxy
           xvfb-run -a --server-args="-screen 0 2560x1600x24" npm run smoke:tenhou-ui
+          xvfb-run -a --server-args="-screen 0 2560x1600x24" node node_modules/electron/cli.js tests/tenhou-client-smoke.mjs --no-sandbox --core="$GITHUB_WORKSPACE/target/${{ matrix.target }}/release/akagi-core"
 
       - name: Restore bundled runtime cache
         uses: actions/cache@v4
