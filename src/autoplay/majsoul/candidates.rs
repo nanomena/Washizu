@@ -57,7 +57,14 @@ pub(super) fn read(
     let mut seen = vec![false; width * height];
     let bright = |index: usize| {
         let [r, g, b] = image.pixels[(y0 + index / width) * image.width + x0 + index % width];
-        r >= 180 && g >= 175 && b >= 145 && r.max(g).max(b) - r.min(g).min(b) <= 65
+        r >= 180
+            && g >= 175
+            && b >= 145
+            && r.max(g).max(b) - r.min(g).min(b) <= 65
+            // The client's pink pointer trail can touch a tile. Its red/blue
+            // bias is not part of the neutral/cream tile face.
+            && r.saturating_sub(g) <= 12
+            && b.saturating_sub(g) <= 12
     };
     let mut faces = Vec::new();
     let mut todo = Vec::new();
@@ -256,6 +263,17 @@ mod tests {
             }
         }
         assert!(read(&image, 1., viewport, 2).is_none());
+    }
+
+    #[test]
+    fn native_pointer_trail_does_not_extend_a_candidate_face_at_1x() {
+        let (image, viewport) = native(include_bytes!("../fixtures/melds/candidate-two-1x.png"));
+        let row = read(&image, 1., viewport, 2).expect("two real choices at 1x");
+        assert_eq!(row.faces.len(), 4);
+        for pair in row.faces.windows(2) {
+            assert!(pair[0].x + pair[0].width < pair[1].x);
+        }
+        assert!(row.target(1).unwrap().x > row.target(0).unwrap().x);
     }
 
     #[test]
