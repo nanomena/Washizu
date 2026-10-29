@@ -64,14 +64,20 @@ impl TrackedGame {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObservationOrigin {
+    CompleteTrace,
+    AwaitingRestoredPhase,
+    RestoredLive,
+}
+
 pub struct GameTracker {
     state: Option<TrackedGame>,
     rule: GameRule,
     /// The bot's own seat, captured from `start_game.id`.
     our_seat: Option<u8>,
     interrupted_players: Option<u8>,
-    restored: bool,
-    restore_anchor: bool,
+    origin: ObservationOrigin,
     /// Total events fed since process start. Useful for "is the bridge
     /// alive?" checks; not reset on game boundaries.
     pub events_seen: u64,
@@ -84,8 +90,7 @@ impl GameTracker {
             rule: GameRule::default_tenhou(),
             our_seat: None,
             interrupted_players: None,
-            restored: false,
-            restore_anchor: false,
+            origin: ObservationOrigin::CompleteTrace,
             events_seen: 0,
         }
     }
@@ -102,8 +107,7 @@ impl GameTracker {
             )?));
             self.our_seat = Some(snapshot.seat);
             self.interrupted_players = None;
-            self.restored = true;
-            self.restore_anchor = true;
+            self.origin = ObservationOrigin::AwaitingRestoredPhase;
             return Ok(());
         }
 
@@ -112,7 +116,7 @@ impl GameTracker {
             // The missing river timing, furiten and concealed draws cannot
             // be imported as native rules state. Retain only real identity.
             self.state = None;
-            self.restored = false;
+            self.origin = ObservationOrigin::CompleteTrace;
             return Ok(());
         }
 
@@ -121,8 +125,7 @@ impl GameTracker {
         } = ev
         {
             self.interrupted_players = None;
-            self.restored = false;
-            self.restore_anchor = false;
+            self.origin = ObservationOrigin::CompleteTrace;
             // Fresh game → fresh state. Constructor seeds round 0 with the
             // mode-appropriate starting score (25k for 4p, 35k for 3p).
             self.state = Some(match *num_players {
@@ -180,8 +183,10 @@ impl GameTracker {
         if let Some(tg) = self.state.as_mut() {
             match tg {
                 TrackedGame::Four(s) => {
-                    if self.restored {
-                        let included_draw = if self.restore_anchor {
+                    if self.origin != ObservationOrigin::CompleteTrace {
+                        let awaiting_phase =
+                            self.origin == ObservationOrigin::AwaitingRestoredPhase;
+                        let included_draw = if awaiting_phase {
                             if let AkagiEvent::Tsumo { actor, pai } = ev {
                                 if Some(*actor) == self.our_seat
                                     && s.players[*actor as usize].hand.len()
@@ -215,13 +220,23 @@ impl GameTracker {
                         // the first real phase, then count only real draws.
                         if !included_draw
                             && (matches!(ev, AkagiEvent::Tsumo { .. })
-                                || (self.restore_anchor
-                                    && matches!(ev, AkagiEvent::Dahai { actor, .. } if Some(*actor) != self.our_seat)))
+                                || (awaiting_phase
+                                    && matches!(ev, AkagiEvent::Dahai { actor, .. } | AkagiEvent::Reach { actor, .. } | AkagiEvent::Ankan { actor, .. } | AkagiEvent::Kakan { actor, .. } if Some(*actor) != self.our_seat)))
                         {
                             s.wall.drawable_count = s.wall.drawable_count.saturating_sub(1);
                         }
-                        if matches!(ev, AkagiEvent::Tsumo { .. } | AkagiEvent::Dahai { .. }) {
-                            self.restore_anchor = false;
+                        if matches!(
+                            ev,
+                            AkagiEvent::Tsumo { .. }
+                                | AkagiEvent::Dahai { .. }
+                                | AkagiEvent::Reach { .. }
+                                | AkagiEvent::Chi { .. }
+                                | AkagiEvent::Pon { .. }
+                                | AkagiEvent::Daiminkan { .. }
+                                | AkagiEvent::Ankan { .. }
+                                | AkagiEvent::Kakan { .. }
+                        ) {
+                            self.origin = ObservationOrigin::RestoredLive;
                         }
                     }
                     s.apply_mjai_event(ri);
@@ -292,7 +307,7 @@ impl GameTracker {
     /// Snapshot of the current state. Returns `None` if no game has
     /// started yet.
     pub fn snapshot(&self) -> Option<GameStateSnapshot> {
-        if self.restored {
+        if self.origin != ObservationOrigin::CompleteTrace {
             return None;
         } // Unknown history flags are not UI facts.
         self.state.as_ref().map(|tg| match tg {
@@ -315,7 +330,7 @@ impl GameTracker {
     }
 
     pub(crate) fn interrupted(&self) -> bool {
-        self.interrupted_players.is_some() || self.restored
+        self.interrupted_players.is_some() || self.origin != ObservationOrigin::CompleteTrace
     }
 
     fn restored_legal(
@@ -377,7 +392,7 @@ impl GameTracker {
         event: &AkagiEvent,
         window: Option<crate::bot::control::InputWindow>,
     ) -> AkagiEvent {
-        if self.restored
+        if self.origin != ObservationOrigin::CompleteTrace
             && matches!(
                 event,
                 AkagiEvent::Tsumo { .. }
