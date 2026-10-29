@@ -408,6 +408,108 @@ pub async fn run_autoplay_manager(
 mod admission_tests {
     use super::*;
     #[tokio::test]
+    async fn a_selected_restored_primary_enters_the_common_mouse_transaction_without_a_fake_rules_snapshot(
+    ) {
+        use crate::bot::control::{
+            DecisionControl, DecisionRequest, DecisionSource, InputWindow, RunnerHealth,
+        };
+        use crate::bridge::{Bridge, Direction, TenhouBridge};
+        let mut manager = AutoplayManager::for_tests();
+        {
+            let mut cfg = manager.cfg.write().await;
+            cfg.autoplay.enabled = true;
+            cfg.platform.kind = Platform::Tenhou;
+        }
+        let mut bridge =
+            TenhouBridge::new(None, None).with_shared_state(Some(manager.ctx.tenhou_state.clone()));
+        let mut rx = manager.mjai_bus.subscribe();
+        for frame in [
+            r#"{"tag":"GO","type":"65","lobby":"0"}"#,
+            r#"{"tag":"REINIT","seed":"0,0,0,3,0,23","ten":"250,250,250,250","oya":"0","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96","kawa0":"1,106,74","kawa1":"79,122,3","kawa2":"72,100,9","kawa3":"107,78,67"}"#,
+            r#"{"tag":"T120"}"#,
+        ] {
+            for captured in bridge
+                .parse(Direction::Down, frame.as_bytes())
+                .into_captured()
+            {
+                let mut tracker = manager.tracker.lock().await;
+                tracker.handle(&captured.event).unwrap();
+                manager
+                    .monitor
+                    .game_event(&captured.event, tracker.snapshot(), None);
+                manager.mjai_bus.send(captured).unwrap();
+            }
+        }
+        assert!(manager.tracker.lock().await.snapshot().is_none());
+        let window = manager
+            .ctx
+            .tenhou_state
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .window
+            .unwrap();
+        let request = DecisionRequest {
+            context: manager.monitor.snapshot().context,
+            window: Some(InputWindow::Tenhou(window)),
+        };
+        let mut reply = crate::bot::BotResponse {
+            request: Some(request),
+            action: MjaiEvent::Dahai {
+                actor: 0,
+                pai: "4m".into(),
+                tsumogiri: false,
+            },
+            meta: None,
+        };
+        reply.set_control(DecisionControl {
+            context: request.context,
+            window: Some(request.window.unwrap().proof()),
+            source: DecisionSource::Primary,
+            primary: RunnerHealth::Ready { through: 3 },
+            standby: RunnerHealth::Ready { through: 3 },
+        });
+        manager.apply_pending_protocol(&mut rx).await;
+        let decision = manager
+            .read_decision(&reply)
+            .await
+            .expect("a validated restored primary is an input source");
+        assert!(decision.snapshot.is_none());
+        let plan = manager.tenhou.plan(&decision.context(&reply.action));
+        assert_eq!(plan.presses.len(), 1);
+        let binding = crate::autoplay::transaction::Binding {
+            context: request.context,
+            owner: decision.owner,
+            window: turn::window_identity(request.window.unwrap().proof()),
+            input: manager.ctx.input_watch.ticket(),
+        };
+        assert!(manager.turn.lock().unwrap().begin(
+            binding,
+            reply.action.clone(),
+            plan,
+            crate::autoplay::transaction::Settings {
+                retries: 0,
+                verify_ms: 300,
+                gap_ms: 0,
+                ready_ms: 8000,
+                reload_after: 0
+            },
+            Instant::now()
+        ));
+        assert_eq!(
+            manager.turn.lock().unwrap().phase(),
+            Some(crate::autoplay::transaction::Phase::Preparing)
+        );
+        let mut stale = reply;
+        stale.request.as_mut().unwrap().context.event_seq -= 1;
+        assert!(
+            manager.read_decision(&stale).await.is_none(),
+            "restoration never authorizes a stale request"
+        );
+    }
+
+    #[tokio::test]
     async fn a_fast_new_game_reply_is_admitted_after_its_queued_protocol_boundaries() {
         use crate::autoplay::{BudgetSource, TimeBudget};
         use crate::bot::control::{

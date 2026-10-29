@@ -10,6 +10,7 @@
 
 pub mod convert;
 pub mod mahgen_view;
+pub mod restore;
 pub mod snapshot;
 pub mod tracker;
 

@@ -121,9 +121,10 @@ impl AutoplayManager {
             // Keep cached_our_seat up to date for handle_mjai_event.
             self.state.cached_our_seat = Some(our_seat);
             let snapshot = tracker.snapshot();
-            if snapshot.is_none()
-                && !matches!(resp.control(), Ok(Some(control)) if control.source == DecisionSource::NativeStandby)
-            {
+            let selected_without_full_trace = matches!(resp.control(), Ok(Some(control))
+                if control.source == DecisionSource::NativeStandby
+                || (control.source == DecisionSource::Primary && tracker.restored_live()));
+            if snapshot.is_none() && !selected_without_full_trace {
                 return None;
             }
             let num_players = tracker.num_players()?;

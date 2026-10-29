@@ -80,6 +80,16 @@ fn default_num_players() -> u8 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MjaiEvent {
+    /// Validated public board with an explicit new temporal-cache origin.
+    RestoreKyoku {
+        snapshot: Box<crate::schema::restore::KyokuRestore>,
+    },
+    /// One real event and its independently computed, provider-constrained
+    /// legal actions, captured atomically at that event's original window.
+    ObservedDecision {
+        event: Box<MjaiEvent>,
+        legal: Vec<MjaiEvent>,
+    },
     /// A provider restored a live hand without its ordered history. This is
     /// an explicit observation gap, never a synthetic deal or replay move.
     /// Primary runners must not receive this marker or the incomplete hand.
@@ -237,6 +247,12 @@ pub enum MjaiEvent {
 }
 
 impl MjaiEvent {
+    pub fn observed_event(&self) -> &Self {
+        match self {
+            Self::ObservedDecision { event, .. } => event,
+            _ => self,
+        }
+    }
     pub fn end_game() -> Self {
         Self::EndGame {
             reason: GameEndReason::Confirmed,

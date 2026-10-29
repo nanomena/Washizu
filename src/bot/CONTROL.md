@@ -1,5 +1,6 @@
 # Selected response contract
 Last verified: 2026-10-26
+Public-position extension verified by the accompanying snapshot recovery tests.
 
 The source coordinator alone writes `BotResponse.meta.control` and publishes
 the response. Primary and local workers never publish executable responses.
@@ -17,6 +18,11 @@ only renders source/health and never switches a policy.
 - `context` is the original `TrackedEvent.context`, produced synchronously by
   `MonitorHandle::game_event` when the real event is applied. A later monitor
   snapshot only rejects obsolete requests; it never supplies their identity.
+- A restored-position `observed_decision` wraps the actual event and its exact
+  independent legal set without assigning another context or input window.
+  Only `event` is the trigger shown to the UI/executor. The journal retains
+  the explicit observation envelope; replay delivers it once at the same
+  positioned cursor. Main-model restore acknowledgements cannot grant input.
 - `window` projects the existing bridge-owned monotonic `TimeBudget.opened_at`
   (Majsoul) or `TenhouState.window.opened_at` plus `ops` (Tenhou). `opened_ns` is
   a signed decimal string relative to one process origin. It is opaque and

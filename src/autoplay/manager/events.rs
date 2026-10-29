@@ -70,7 +70,8 @@ impl AutoplayManager {
             }
             MjaiEvent::StartKyoku { .. }
             | MjaiEvent::EndKyoku
-            | MjaiEvent::InterruptedKyoku { .. } => {
+            | MjaiEvent::InterruptedKyoku { .. }
+            | MjaiEvent::RestoreKyoku { .. } => {
                 if matches!(ev, MjaiEvent::StartKyoku { .. }) {
                     self.toggles.reset();
                     let window = self
@@ -94,6 +95,12 @@ impl AutoplayManager {
                     num_players: self.state.num_players,
                     ..ManagerState::default()
                 };
+                if let MjaiEvent::RestoreKyoku { snapshot } = ev {
+                    self.state.self_riichi_accepted = snapshot
+                        .players
+                        .get(snapshot.seat as usize)
+                        .is_some_and(|player| player.riichi);
+                }
                 self.hand.reset();
                 self.turn
                     .lock()

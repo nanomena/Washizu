@@ -37,6 +37,9 @@ pub struct State {
     pub last_kawa_tile: String,
     /// True between our tsumo and our dahai.
     pub is_tsumo: bool,
+    /// REINIT already included our pending draw. A repeated real T frame
+    /// identifies that physical tile; normalize its position without adding it twice.
+    pub restored_pending_draw: bool,
     /// True iff this is a 3-player (sanma) game.
     pub is_3p: bool,
     /// 3 (sanma) or 4 (yonma). The wire is always 4-cycle; this field only
@@ -93,6 +96,7 @@ impl Default for State {
             live_wall: 70,
             last_kawa_tile: "?".to_string(),
             is_tsumo: false,
+            restored_pending_draw: false,
             is_3p: false,
             num_players: 4,
             last_revealed_tile_actor: None,
@@ -206,6 +210,7 @@ impl State {
         self.live_wall = 70;
         self.last_kawa_tile = "?".to_string();
         self.is_tsumo = false;
+        self.restored_pending_draw = false;
         self.last_revealed_tile_actor = None;
         self.window = None;
     }

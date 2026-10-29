@@ -171,7 +171,10 @@ impl Coordinator {
     }
 
     async fn observe(&mut self, tracked: TrackedEvent) -> bool {
-        self.interrupted |= matches!(tracked.event, MjaiEvent::InterruptedKyoku { .. });
+        self.interrupted |= matches!(
+            tracked.event,
+            MjaiEvent::InterruptedKyoku { .. } | MjaiEvent::RestoreKyoku { .. }
+        );
         let Some(context) = tracked.context else {
             self.monitor.gap(
                 "A real event lacked its tracked identity; no recovery decision can be validated."
@@ -196,6 +199,7 @@ impl Coordinator {
             tracked.event,
             MjaiEvent::StartGame { .. }
                 | MjaiEvent::InterruptedKyoku { .. }
+                | MjaiEvent::RestoreKyoku { .. }
                 | MjaiEvent::StartKyoku { .. }
                 | MjaiEvent::EndKyoku
                 | MjaiEvent::EndGame { .. }
@@ -228,6 +232,9 @@ impl Coordinator {
             through,
             decide: can_decide,
             interrupted_legal: self.interrupted.then(|| {
+                if let MjaiEvent::ObservedDecision { legal, .. } = &tracked.event {
+                    return legal.clone();
+                }
                 tracked.window.map_or_else(Vec::new, |window| {
                     window.interrupted_actions(&tracked.event, self.seat)
                 })
@@ -248,7 +255,9 @@ impl Coordinator {
             let now = Instant::now();
             let (deadline, reserve_ms, remaining_ms) =
                 inference_deadline(tracked.window, &cfg, now);
-            let id = self.monitor.begin(context, &self.name, &tracked.event);
+            let id = self
+                .monitor
+                .begin(context, &self.name, tracked.event.observed_event());
             self.monitor.set_control(DecisionControl {
                 context,
                 window,
@@ -263,7 +272,7 @@ impl Coordinator {
                 },
                 context,
                 window,
-                trigger: tracked.event,
+                trigger: tracked.event.observed_event().clone(),
                 started: now,
                 deadline,
                 reserve_ms,

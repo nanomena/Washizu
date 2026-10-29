@@ -976,7 +976,7 @@ fn label_pais_bot_action(a: &BotAction) -> (&'static str, Vec<String>) {
 }
 
 /// Map a schema-agnostic [`BotAction`] to Akagi's `MjaiEvent` reply.
-pub(super) fn bot_action_to_mjai(a: BotAction, actor: u8) -> MjaiEvent {
+pub(crate) fn bot_action_to_mjai(a: BotAction, actor: u8) -> MjaiEvent {
     match a {
         BotAction::Dahai { pai, tsumogiri } => MjaiEvent::Dahai {
             actor,

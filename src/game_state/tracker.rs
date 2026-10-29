@@ -64,12 +64,20 @@ impl TrackedGame {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObservationOrigin {
+    CompleteTrace,
+    AwaitingRestoredPhase,
+    RestoredLive,
+}
+
 pub struct GameTracker {
     state: Option<TrackedGame>,
     rule: GameRule,
     /// The bot's own seat, captured from `start_game.id`.
     our_seat: Option<u8>,
     interrupted_players: Option<u8>,
+    origin: ObservationOrigin,
     /// Total events fed since process start. Useful for "is the bridge
     /// alive?" checks; not reset on game boundaries.
     pub events_seen: u64,
@@ -82,6 +90,7 @@ impl GameTracker {
             rule: GameRule::default_tenhou(),
             our_seat: None,
             interrupted_players: None,
+            origin: ObservationOrigin::CompleteTrace,
             events_seen: 0,
         }
     }
@@ -92,11 +101,22 @@ impl GameTracker {
     pub fn handle(&mut self, ev: &AkagiEvent) -> Result<()> {
         self.events_seen += 1;
 
+        if let AkagiEvent::RestoreKyoku { snapshot } = ev {
+            self.state = Some(TrackedGame::Four(crate::game_state::restore::build(
+                snapshot,
+            )?));
+            self.our_seat = Some(snapshot.seat);
+            self.interrupted_players = None;
+            self.origin = ObservationOrigin::AwaitingRestoredPhase;
+            return Ok(());
+        }
+
         if matches!(ev, AkagiEvent::InterruptedKyoku { .. }) {
             self.interrupted_players = self.num_players();
             // The missing river timing, furiten and concealed draws cannot
             // be imported as native rules state. Retain only real identity.
             self.state = None;
+            self.origin = ObservationOrigin::CompleteTrace;
             return Ok(());
         }
 
@@ -105,6 +125,7 @@ impl GameTracker {
         } = ev
         {
             self.interrupted_players = None;
+            self.origin = ObservationOrigin::CompleteTrace;
             // Fresh game → fresh state. Constructor seeds round 0 with the
             // mode-appropriate starting score (25k for 4p, 35k for 3p).
             self.state = Some(match *num_players {
@@ -162,6 +183,62 @@ impl GameTracker {
         if let Some(tg) = self.state.as_mut() {
             match tg {
                 TrackedGame::Four(s) => {
+                    if self.origin != ObservationOrigin::CompleteTrace {
+                        let awaiting_phase =
+                            self.origin == ObservationOrigin::AwaitingRestoredPhase;
+                        let included_draw = if awaiting_phase {
+                            if let AkagiEvent::Tsumo { actor, pai } = ev {
+                                if Some(*actor) == self.our_seat
+                                    && s.players[*actor as usize].hand.len()
+                                        + 3 * s.players[*actor as usize].melds.len()
+                                        == 14
+                                {
+                                    let tile = riichienv_core::parser::mjai_to_tid(pai)
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("Invalid restored live draw")
+                                        })?;
+                                    let p = &mut s.players[*actor as usize];
+                                    let pos = p.hand.iter().position(|t| *t == tile).ok_or_else(
+                                        || {
+                                            anyhow::anyhow!(
+                                                "Restored pending draw contradicts live tile"
+                                            )
+                                        },
+                                    )?;
+                                    p.hand.remove(pos);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        // No wall tile identities were imported. Reconcile
+                        // the first real phase, then count only real draws.
+                        if !included_draw
+                            && (matches!(ev, AkagiEvent::Tsumo { .. })
+                                || (awaiting_phase
+                                    && matches!(ev, AkagiEvent::Dahai { actor, .. } | AkagiEvent::Reach { actor, .. } | AkagiEvent::Ankan { actor, .. } | AkagiEvent::Kakan { actor, .. } if Some(*actor) != self.our_seat)))
+                        {
+                            s.wall.drawable_count = s.wall.drawable_count.saturating_sub(1);
+                        }
+                        if matches!(
+                            ev,
+                            AkagiEvent::Tsumo { .. }
+                                | AkagiEvent::Dahai { .. }
+                                | AkagiEvent::Reach { .. }
+                                | AkagiEvent::Chi { .. }
+                                | AkagiEvent::Pon { .. }
+                                | AkagiEvent::Daiminkan { .. }
+                                | AkagiEvent::Ankan { .. }
+                                | AkagiEvent::Kakan { .. }
+                        ) {
+                            self.origin = ObservationOrigin::RestoredLive;
+                        }
+                    }
                     s.apply_mjai_event(ri);
                     if let Some((actor, tedashi, was_riichi_commit)) = dahai_patch {
                         let p = &mut s.players[actor];
@@ -230,6 +307,9 @@ impl GameTracker {
     /// Snapshot of the current state. Returns `None` if no game has
     /// started yet.
     pub fn snapshot(&self) -> Option<GameStateSnapshot> {
+        if self.origin != ObservationOrigin::CompleteTrace {
+            return None;
+        } // Unknown history flags are not UI facts.
         self.state.as_ref().map(|tg| match tg {
             TrackedGame::Four(s) => GameStateSnapshot::from_state(s, self.our_seat),
             TrackedGame::Three(s) => GameStateSnapshot::from_state_3p(s, self.our_seat),
@@ -250,7 +330,94 @@ impl GameTracker {
     }
 
     pub(crate) fn interrupted(&self) -> bool {
-        self.interrupted_players.is_some()
+        self.interrupted_players.is_some() || self.origin != ObservationOrigin::CompleteTrace
+    }
+
+    pub(crate) fn restored_live(&self) -> bool {
+        self.origin == ObservationOrigin::RestoredLive && self.state.is_some()
+    }
+
+    fn restored_legal(
+        &self,
+        event: &AkagiEvent,
+        window: Option<crate::bot::control::InputWindow>,
+    ) -> Vec<AkagiEvent> {
+        let (Some(TrackedGame::Four(state)), Some(seat)) = (&self.state, self.our_seat) else {
+            return vec![];
+        };
+        let Some(crate::bot::control::InputWindow::Tenhou(window)) = window else {
+            return vec![];
+        };
+        use crate::autoplay::tenhou_state::*;
+        let mut legal: Vec<_> = native_bot::engine::legal_replies_4p(state, seat)
+            .into_iter()
+            .map(|a| crate::bot::native::bot_action_to_mjai(a, seat))
+            .filter(|a| match a {
+                AkagiEvent::Reach { .. } => window.allows(OP_REACH),
+                AkagiEvent::Pon { .. } => window.allows(OP_PON),
+                AkagiEvent::Chi { .. } => window.allows(OP_CHI),
+                AkagiEvent::Daiminkan { .. } => window.allows(OP_DAIMINKAN),
+                AkagiEvent::Ankan { .. } | AkagiEvent::Kakan { .. } => {
+                    state
+                        .players
+                        .iter()
+                        .flat_map(|p| &p.melds)
+                        .filter(|m| m.tiles.len() == 4)
+                        .count()
+                        < 4
+                }
+                AkagiEvent::Hora { .. } | AkagiEvent::Ryukyoku { .. } => false,
+                AkagiEvent::None => window.has_declinable_claim(),
+                _ => true,
+            })
+            .collect();
+        // Win eligibility can include scoring/furiten history absent from
+        // REINIT. Only the server's actual offer can authorize it.
+        for action in crate::bridge::tenhou::observed_actions(event, seat, window) {
+            if matches!(action, AkagiEvent::Hora { .. } | AkagiEvent::None)
+                && !legal.contains(&action)
+            {
+                legal.push(action);
+            }
+        }
+        if window.allows(OP_KYUUSHU) {
+            legal.push(AkagiEvent::Ryukyoku {
+                deltas: None,
+                tehais: None,
+                scores: None,
+                reason: None,
+            });
+        }
+        legal
+    }
+
+    pub(crate) fn delivered_observation(
+        &self,
+        event: &AkagiEvent,
+        window: Option<crate::bot::control::InputWindow>,
+    ) -> AkagiEvent {
+        if self.origin != ObservationOrigin::CompleteTrace
+            && matches!(
+                event,
+                AkagiEvent::Tsumo { .. }
+                    | AkagiEvent::Dahai { .. }
+                    | AkagiEvent::Reach { .. }
+                    | AkagiEvent::ReachAccepted { .. }
+                    | AkagiEvent::Chi { .. }
+                    | AkagiEvent::Pon { .. }
+                    | AkagiEvent::Daiminkan { .. }
+                    | AkagiEvent::Ankan { .. }
+                    | AkagiEvent::Kakan { .. }
+                    | AkagiEvent::Dora { .. }
+            )
+        {
+            AkagiEvent::ObservedDecision {
+                legal: self.restored_legal(event, window),
+                event: Box::new(event.clone()),
+            }
+        } else {
+            event.clone()
+        }
     }
 
     /// Borrow the live engine state. Returns `None` for non-4p games or no
@@ -470,7 +637,7 @@ async fn run(
                 // later one. A burst of events from one frame is applied in
                 // microseconds; anything that asks afterwards has already
                 // missed the state it meant to ask about.
-                let (can_act, context) = {
+                let (can_act, context, delivered) = {
                     let mut t = tracker.lock().await;
                     let error = t.handle(&ev).err().map(|e| format!("{e:#}"));
                     if let Some(error) = &error {
@@ -484,13 +651,14 @@ async fn run(
                     } else {
                         t.our_seat_can_act()
                     };
-                    (can_act, context)
+                    let delivered = t.delivered_observation(&ev, captured.window);
+                    (can_act, context, delivered)
                 };
                 if let Some(p) = &post {
                     // Receiver may have lagged or no-one subscribed yet — ignore.
                     let _ = p.send(TrackedEvent {
                         window: captured.window,
-                        event: ev,
+                        event: delivered,
                         can_act,
                         context,
                     });

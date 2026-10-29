@@ -27,7 +27,13 @@ use serde_json::Value;
 /// Returns `Ok(None)` for `MjaiEvent::None` (intentional skip), `Ok(Some(_))`
 /// for any protocol event, `Err` for malformed input.
 pub fn to_riichienv(ev: &AkagiEvent) -> Result<Option<RiEvent>> {
-    if matches!(ev, AkagiEvent::None | AkagiEvent::InterruptedKyoku { .. }) {
+    if matches!(
+        ev,
+        AkagiEvent::None
+            | AkagiEvent::InterruptedKyoku { .. }
+            | AkagiEvent::RestoreKyoku { .. }
+            | AkagiEvent::ObservedDecision { .. }
+    ) {
         return Ok(None);
     }
     if let AkagiEvent::Ryukyoku {

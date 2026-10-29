@@ -353,8 +353,10 @@ impl BotManager {
             return Ok(());
         }
 
-        if matches!(event, MjaiEvent::InterruptedKyoku { .. })
-            && !matches!(self.runner, Some(ManagedBot::Coordinated { .. }))
+        if matches!(
+            event,
+            MjaiEvent::InterruptedKyoku { .. } | MjaiEvent::RestoreKyoku { .. }
+        ) && !matches!(self.runner, Some(ManagedBot::Coordinated { .. }))
         {
             // This observation marker is never part of a bot's MJAI wire
             // protocol. Unpositioned runners cannot validate partial context.

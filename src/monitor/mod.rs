@@ -307,7 +307,9 @@ impl MonitorHandle {
             }
             if matches!(
                 event,
-                MjaiEvent::StartKyoku { .. } | MjaiEvent::InterruptedKyoku { .. }
+                MjaiEvent::StartKyoku { .. }
+                    | MjaiEvent::InterruptedKyoku { .. }
+                    | MjaiEvent::RestoreKyoku { .. }
             ) {
                 expire(&mut s.decision);
                 s.previous_decision = s.decision.take().or(s.previous_decision.take());

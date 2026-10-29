@@ -137,3 +137,20 @@ model failure, for which an independently valid local standby can continue.
 See [qualification](RECOVERY-TESTS.md) for evidence, commands and limits. The integrated Mahjong Soul FSM now owns the final stage/automatic-off/context/window
 mouse-down check. Offline composed regression covers its identity contract; the
 parent owns final release/client qualification. This worktree is not deployment.
+
+Public-position reconnect (Tenhou REINIT) imports `restore_kyoku.snapshot` rather
+than fabricating a deal or an ordered action prefix. The main service explicitly
+acknowledges the restored viewer, absent history fields and new temporal origin
+in `meta.restoration`; a positioned receipt alone cannot certify this capability.
+The independent rules tracker imports the known hand and public registers with
+no concealed opponent tiles or wall. Each subsequent real step is delivered as
+`observed_decision {event, legal}` with the original producer window, context
+and sequence unchanged. Only known-hand rules and that original server offer
+authorize actions; unknown furiten/yaku cannot authorize a win. The main model
+can therefore answer this hand once the real live phase is known. Its normal
+weights, reward target and coefficient remain unchanged. A snapshot's missing
+historical fields are absent tokens and its cache starts anew, not a claim to
+have recovered the lost temporal prefix. Speculative forecasts need a complete
+trace and remain unavailable for this imported hand. Invalid snapshots use the
+explicit unavailable/observed-standby path. The ordinary full-prefix replay
+contract for complete journals and Mahjong Soul restores remains unchanged.

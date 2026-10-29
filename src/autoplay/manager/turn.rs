@@ -141,7 +141,9 @@ impl AutoplayManager {
             legal_actions: &decision.legal_actions,
             our_seat: decision.our_seat,
             kind: kind(action),
-            first_action_of_kyoku: decision.last_kawa_tile.is_none(),
+            // A snapshot import has no known previous event. It is not a
+            // new hand and must not acquire the opening-turn delay.
+            first_action_of_kyoku: decision.snapshot.is_some() && decision.last_kawa_tile.is_none(),
             in_riichi: decision.self_riichi_accepted,
             opening_animation: dealt,
             probs: decision.probs,

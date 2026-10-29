@@ -129,7 +129,8 @@ impl PrimaryWorker {
                             .react(work.event.as_slice())
                             .await
                             .map_err(|e| format!("{e:#}"))
-                            .and_then(|reply| validate_delivery(reply, work.through));
+                            .and_then(|reply| validate_delivery(reply, work.through))
+                            .and_then(|reply| validate_restoration(reply, work.event.as_slice()));
                         let needs_restart = match &result {
                             Err(_) => true,
                             Ok(reply) => {
@@ -270,6 +271,36 @@ async fn replay(
         .await
         .map_err(|e| format!("replay real game prefix: {e:#}"))
         .and_then(|reply| validate_delivery(reply, through))
+        .and_then(|reply| validate_restoration(reply, &prefix))
+}
+
+fn validate_restoration(reply: BotResponse, events: &[MjaiEvent]) -> Result<BotResponse, String> {
+    if reply.unavailable_reason().is_some()
+        || !events.iter().any(|e| {
+            matches!(
+                e,
+                MjaiEvent::RestoreKyoku { .. } | MjaiEvent::ObservedDecision { .. }
+            )
+        })
+    {
+        return Ok(reply);
+    }
+    let meta = reply.meta.as_ref().and_then(|m| m.get("restoration"));
+    if !meta.is_some_and(|m| {
+        m["origin"] == "public_snapshot"
+            && m["temporal_prefix"] == "reset"
+            && m["missing_history"] == "unknown_fields"
+    }) {
+        return Err("Primary did not acknowledge the public-position restore contract; no incomplete or ignored snapshot can become ready.".into());
+    }
+    for event in events {
+        if let MjaiEvent::RestoreKyoku { snapshot } = event {
+            if meta.unwrap()["seat"].as_u64() != Some(u64::from(snapshot.seat)) {
+                return Err("Primary restore acknowledged a different viewer.".into());
+            }
+        }
+    }
+    Ok(reply)
 }
 
 fn validate_delivery(reply: BotResponse, expected: u64) -> Result<BotResponse, String> {
@@ -303,7 +334,10 @@ impl StandbyWorker {
             let mut policy_error: Option<String> = None;
             let mut interrupted = false;
             while let Some(work) = observations.blocking_recv() {
-                interrupted |= matches!(work.event, Some(MjaiEvent::InterruptedKyoku { .. }));
+                interrupted |= matches!(
+                    work.event,
+                    Some(MjaiEvent::InterruptedKyoku { .. } | MjaiEvent::RestoreKyoku { .. })
+                );
                 let mut legal = vec![];
                 let mut response = None;
                 let result = if interrupted {
@@ -378,6 +412,22 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::json;
+
+    #[test]
+    fn positioned_receipt_alone_cannot_acknowledge_an_ignored_snapshot() {
+        let event = MjaiEvent::ObservedDecision {
+            event: Box::new(MjaiEvent::None),
+            legal: vec![],
+        };
+        let mut reply = BotResponse {
+            request: None,
+            action: MjaiEvent::None,
+            meta: Some(json!({"delivery":{"through":3}})),
+        };
+        assert!(validate_restoration(reply.clone(), std::slice::from_ref(&event)).is_err());
+        reply.meta.as_mut().unwrap()["restoration"] = json!({"origin":"public_snapshot", "temporal_prefix":"reset", "missing_history":"unknown_fields", "seat":0});
+        assert!(validate_restoration(reply, &[event]).is_ok());
+    }
 
     #[tokio::test]
     async fn semantic_failure_rebuilds_the_complete_real_prefix_after_backoff() {
