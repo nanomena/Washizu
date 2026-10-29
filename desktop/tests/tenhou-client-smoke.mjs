@@ -61,7 +61,7 @@ try {
   assert.equal(game.isVisible(), false, 'qualification never presents a window')
   assert.equal(observed.url, 'https://tenhou.net/3/')
   const ui = await game.webContents.executeJavaScript('window.__akagiTenhou.readUi()')
-  assert.deepEqual(Object.keys(ui).sort(), ['account', 'client', 'lobby', 'popup', 'title'])
+  assert.deepEqual(Object.keys(ui).sort(), ['account', 'client', 'disconnect', 'lobby', 'popup', 'title'])
   assert.equal(ui.account, null, 'fresh isolated page has no saved account credential')
   const monitor = /** @type {{autoplay_enabled: boolean, events: unknown[]}} */ (await core.call('get_monitor'))
   assert.equal(monitor.autoplay_enabled, false)

@@ -23,18 +23,19 @@ async function main() {
     await win.loadFile(fixture)
     await win.webContents.executeJavaScript(`{
       const panel=document.querySelector('#panel'),join=document.querySelector('#join0'),ok=document.querySelector('[name=ok]');
-      const state=window.fixture={tag:'LOBBY',epoch:1,reserved:false,effects:[],mouse:[],mode:1,title:null};
+      const state=window.fixture={tag:'LOBBY',epoch:1,reserved:false,effects:[],mouse:[],mode:1,title:null,disconnect:null};
       for(const type of ['mousedown','mouseup','click'])document.addEventListener(type,event=>state.mouse.push({type,trusted:event.isTrusted}));
       join.addEventListener('click',event=>{state.effects.push({tag:'JOIN',trusted:event.isTrusted});state.reserved=true;state.epoch++;});
       ok.addEventListener('click',event=>{state.effects.push({tag:state.tag,trusted:event.isTrusted});state.epoch++;});
       window.api=(${source})({input:{mode:()=>state.mode},title:{read:()=>({account:'ID1234ABCD'})},uiEpoch:()=>state.epoch,modal:()=>false,
+        disconnect:{read:()=>state.disconnect},
         popup:{read:()=>({element:state.title||panel,tag:state.tag,queued:0,closing:false})},
         lobby:{read:()=>({lobby:0,selected:['1'],loaded:true,reservationRequested:state.reserved})}}); true;
     }`)
     win.webContents.debugger.attach('1.3')
     const read = (/** @type {string} */ expression) => win.webContents.executeJavaScript(expression)
-    const target = async (/** @type {'join'|'popup'|'resume'} */ kind) => {
-      const value = await read(`{const ui=api.readUi();const identity=${kind === 'join' ? 'ui.lobby.offers[0].identity' : kind === 'resume' ? 'ui.title.identity' : 'ui.popup.identity'};({kind:${JSON.stringify(kind)},identity,probe:api.probeUi({kind:${JSON.stringify(kind)},identity})})}`)
+    const target = async (/** @type {'join'|'popup'|'resume'|'disconnect'} */ kind) => {
+      const value = await read(`{const ui=api.readUi();const identity=${kind === 'join' ? 'ui.lobby.offers[0].identity' : kind === 'resume' ? 'ui.title.identity' : kind === 'disconnect' ? 'ui.disconnect.identity' : 'ui.popup.identity'};({kind:${JSON.stringify(kind)},identity,probe:api.probeUi({kind:${JSON.stringify(kind)},identity})})}`)
       assert.equal(value.probe.status, 'ready')
       return value
     }
@@ -63,6 +64,16 @@ async function main() {
       await click(await target('popup'))
     }
     await read(`{
+      document.querySelector('#panel').style.display='none';
+      const modal=document.createElement('div');modal.innerHTML='<form><input type="button" value="CANCEL"><input type="submit" value="OK"></form>';
+      modal.querySelector('form').style='position:absolute;left:80px;top:80px';
+      document.body.append(modal);fixture.disconnect=modal;
+      modal.querySelector('form').addEventListener('submit',event=>event.preventDefault());
+      modal.querySelector('[type=submit]').addEventListener('click',event=>{fixture.effects.push({tag:'DISCONNECT',trusted:event.isTrusted});fixture.disconnect=null;modal.remove();});
+    }`)
+    await click(await target('disconnect'))
+    assert.equal(await read('api.readUi().disconnect'), null)
+    await read(`{
       document.querySelector('#panel').remove();fixture.mode=0;fixture.tag='LOGIN';
       const title=document.createElement('main');title.innerHTML='<div id="pane1"><button name="ok">Guest</button></div><div id="pane0"><button name="ok" style="left:80px">OK</button></div>';
       document.body.append(title);fixture.title=title;
@@ -71,11 +82,11 @@ async function main() {
     await click(await target('resume'))
     assert.equal(await read('api.readUi().title'), null)
     const effects = await read('fixture.effects'), mouse = await read('fixture.mouse')
-    assert.deepEqual(effects.map((/** @type {any} */ event) => event.tag), ['JOIN','TAIKYOKU','AGARI','RYUUKYOKU','OWARI','NINTEI','RESUME'])
+    assert.deepEqual(effects.map((/** @type {any} */ event) => event.tag), ['JOIN','TAIKYOKU','AGARI','RYUUKYOKU','OWARI','NINTEI','DISCONNECT','RESUME'])
     assert.ok(effects.every((/** @type {any} */ event) => event.trusted))
-    assert.equal(mouse.length, 21)
+    assert.equal(mouse.length, 24)
     assert.ok(mouse.every((/** @type {any} */ event) => event.trusted))
-    console.log('ok read-only Tenhou UI probes; occlusion refusal; seven trusted Chromium mouse presses including registered-title resume')
+    console.log('ok read-only Tenhou UI probes; eight trusted Chromium mouse presses including disconnect confirmation and title resume')
     win.webContents.debugger.detach()
   } catch (error) { console.error(error); process.exitCode = 1 }
   finally { window?.destroy(); app.exit(Number(process.exitCode) || 0) }

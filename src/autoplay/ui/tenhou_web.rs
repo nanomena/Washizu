@@ -72,6 +72,13 @@ pub struct Title {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisconnectDialog {
+    pub identity: String,
+    pub enabled: bool,
+}
+
 /// Required fields have no guessed defaults. A missing/invalid producer is
 /// reported as unavailable by the executor, never as a convenient lobby.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -80,6 +87,8 @@ pub struct Web3Observation {
     pub client: ClientTag,
     #[serde(deserialize_with = "required_nullable")]
     pub account: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub disconnect: Option<DisconnectDialog>,
     #[serde(deserialize_with = "required_nullable")]
     pub title: Option<Title>,
     #[serde(deserialize_with = "required_nullable")]
@@ -98,6 +107,10 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
+    ConfirmDisconnect {
+        identity: String,
+        account: String,
+    },
     Resume {
         identity: String,
         account: String,
@@ -118,6 +131,7 @@ pub enum Control {
 impl Control {
     pub fn dispatch_key(&self) -> (&'static str, &str) {
         match self {
+            Self::ConfirmDisconnect { identity, .. } => ("disconnect", identity),
             Self::Resume { identity, .. } => ("resume", identity),
             Self::Popup { identity, .. } => ("popup", identity),
             Self::Reserve { identity, .. } => ("join", identity),
@@ -126,7 +140,8 @@ impl Control {
 
     fn identity(&self) -> &str {
         match self {
-            Self::Resume { identity, .. }
+            Self::ConfirmDisconnect { identity, .. }
+            | Self::Resume { identity, .. }
             | Self::Popup { identity, .. }
             | Self::Reserve { identity, .. } => identity,
         }
@@ -211,7 +226,9 @@ impl Run {
     }
 
     fn allowed(&self, control: &Control, env: Environment) -> bool {
-        if let Control::Resume { account, .. } = control {
+        if let Control::Resume { account, .. } | Control::ConfirmDisconnect { account, .. } =
+            control
+        {
             return env.settings.enabled
                 && self.stage == Stage::Reconnecting
                 && self.resume_account.as_ref() == Some(account);
@@ -254,6 +271,35 @@ impl Run {
     }
 
     fn control(&mut self, observation: &Web3Observation, now: Instant) -> Option<Control> {
+        if let Some(dialog) = &observation.disconnect {
+            if observation.title.is_some()
+                || observation.popup.is_some()
+                || observation.lobby.is_some()
+            {
+                return None;
+            }
+            let account = self.resume_account.as_ref()?;
+            if observation.account.as_ref() != Some(account) {
+                self.resume_account = None;
+                self.stop(WaitingReason::OwnershipChanged);
+                return None;
+            }
+            if self.stage != Stage::Reconnecting {
+                self.stage = Stage::Reconnecting;
+                self.until = Some(now + RESULT_LIMIT);
+                self.attempts = 0;
+            }
+            if !dialog.enabled
+                || dialog.identity.is_empty()
+                || self.spent.contains(&dialog.identity)
+            {
+                return None;
+            }
+            return Some(Control::ConfirmDisconnect {
+                identity: dialog.identity.clone(),
+                account: account.clone(),
+            });
+        }
         if let Some(title) = &observation.title {
             if observation.popup.is_some() || observation.lobby.is_some() {
                 return None;
@@ -409,7 +455,8 @@ impl Machine {
         if session_changed || !matches!(self.state, State::Web(_)) {
             // A reload of the same active game may retain only the public
             // account authorization. All DOM targets/tickets are retired.
-            let resume_account = match &self.state {
+            let mut next = Run::default();
+            match &self.state {
                 State::Web(run)
                     if self.env.is_some_and(|old| {
                         old.client == env.client
@@ -417,14 +464,17 @@ impl Machine {
                             && old.context.map(|c| c.game) == env.context.map(|c| c.game)
                     }) =>
                 {
-                    run.resume_account.clone()
+                    next.resume_account = run.resume_account.clone();
+                    if run.stage == Stage::Reconnecting {
+                        next.stage = Stage::Reconnecting;
+                        next.until = run.until;
+                        next.attempts = run.attempts;
+                        next.spent = run.spent.clone();
+                    }
                 }
-                _ => None,
-            };
-            self.state = State::Web(Run {
-                resume_account,
-                ..Run::default()
-            });
+                _ => {}
+            }
+            self.state = State::Web(next);
         }
         let State::Web(run) = &mut self.state else {
             unreachable!()
@@ -539,6 +589,7 @@ impl Machine {
             && env.context.is_some()
             && run.stage == Stage::Table
             && observation.title.is_none()
+            && observation.disconnect.is_none()
         {
             if let Some(account) = observation.account.as_ref().filter(|s| {
                 s.len() == 10

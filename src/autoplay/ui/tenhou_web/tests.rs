@@ -125,6 +125,7 @@ fn popup(identity: &str, tag: PopupTag, queued: u32) -> Web3Observation {
     Web3Observation {
         client: ClientTag::Web3,
         account: None,
+        disconnect: None,
         title: None,
         popup: Some(Popup {
             identity: identity.into(),
@@ -141,6 +142,7 @@ fn lobby() -> Web3Observation {
     Web3Observation {
         client: ClientTag::Web3,
         account: None,
+        disconnect: None,
         title: None,
         popup: None,
         lobby: Some(Lobby {
@@ -176,7 +178,7 @@ fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_po
             "{invalid}"
         );
     }
-    let unknown: Web3Observation = serde_json::from_str(r#"{"client":"web3","account":null,"title":null,"popup":{"identity":"login","tag":"LOGIN","enabled":true,"closing":false,"queued":0},"lobby":null}"#).unwrap();
+    let unknown: Web3Observation = serde_json::from_str(r#"{"client":"web3","account":null,"disconnect":null,"title":null,"popup":{"identity":"login","tag":"LOGIN","enabled":true,"closing":false,"queued":0},"lobby":null}"#).unwrap();
     assert_eq!(unknown.popup.as_ref().unwrap().tag, PopupTag::Other);
     let mut h = Harness::new(Some(target()));
     h.observe_only(&unknown, 10);
@@ -192,6 +194,7 @@ fn title(identity: &str, account: &str) -> Web3Observation {
     Web3Observation {
         client: ClientTag::Web3,
         account: Some(account.into()),
+        disconnect: None,
         title: Some(Title {
             identity: identity.into(),
             enabled: true,
@@ -213,6 +216,90 @@ fn authenticated() -> Harness {
     observation.title = None;
     h.observe_only(&observation, 1);
     h
+}
+
+fn disconnected(identity: &str, account: &str) -> Web3Observation {
+    let mut observation = title(identity, account);
+    observation.title = None;
+    observation.disconnect = Some(DisconnectDialog {
+        identity: identity.into(),
+        enabled: true,
+    });
+    observation
+}
+
+#[test]
+fn disconnect_confirmation_and_title_resume_share_one_deadline_across_reload() {
+    let mut h = authenticated();
+    h.env.settings.quick_confirm = false;
+    h.env.settings.auto_continue = false;
+    let dialog = disconnected("closed-dialog", "ID1234ABCD");
+    assert!(matches!(
+        h.press(&dialog),
+        Control::ConfirmDisconnect { .. }
+    ));
+    let confirmed_at = h.now;
+    h.observe_only(&dialog, 4);
+    assert_eq!(h.sent.len(), 1);
+    h.now += Duration::from_secs(10);
+    h.env.generation.session += 1;
+    h.sync();
+    assert!(matches!(
+        h.press(&title("reloaded-title", "ID1234ABCD")),
+        Control::Resume { .. }
+    ));
+    h.observe_only(&title("reloaded-title", "ID1234ABCD"), 3);
+    assert_eq!(h.sent.len(), 2);
+    h.now = confirmed_at + RESULT_LIMIT + Duration::from_secs(1);
+    h.sync();
+    assert_eq!(h.ui.waiting_reason(), Some(WaitingReason::ReconnectTimeout));
+    assert!(h.ui.due().is_none());
+}
+
+#[test]
+fn disconnect_title_restore_returns_to_table_without_a_second_start_timeout() {
+    let mut h = authenticated();
+    h.press(&disconnected("closed-dialog", "ID1234ABCD"));
+    h.env.generation.session += 1;
+    h.sync();
+    h.press(&title("reloaded-title", "ID1234ABCD"));
+    h.ui.web_game_started(Some(0), Some(target()), h.now);
+    h.ui.table_started(None);
+    h.now += RESULT_LIMIT + Duration::from_secs(1);
+    h.sync();
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Table));
+    h.press(&popup("real-result", PopupTag::Win, 0));
+    assert_eq!(h.sent.len(), 3);
+}
+
+#[test]
+fn disconnect_requires_known_own_account_and_fresh_manual_ownership() {
+    let dialog = disconnected("closed-dialog", "ID1234ABCD");
+    let mut fresh = Harness::new(Some(target()));
+    fresh.observe_only(&dialog, 5);
+    assert!(fresh.sent.is_empty());
+    let mut changed = authenticated();
+    changed.observe_only(&disconnected("other-account", "ID87654321"), 1);
+    assert_eq!(
+        changed.ui.waiting_reason(),
+        Some(WaitingReason::OwnershipChanged)
+    );
+    for disabled in [false, true] {
+        let mut h = authenticated();
+        let (ticket, control) = h.ready(&dialog);
+        if disabled {
+            h.env.settings.enabled = false;
+        } else {
+            h.env.manual = true;
+        }
+        assert!(!h.invoke(ticket, &control, &dialog, Dispatch::Sent));
+        assert!(h.sent.is_empty());
+    }
+    let mut contradictory = authenticated();
+    let mut observation = dialog.clone();
+    observation.title = title("hidden-underlay", "ID1234ABCD").title;
+    contradictory.observe_only(&observation, 5);
+    assert!(contradictory.sent.is_empty());
 }
 
 #[test]

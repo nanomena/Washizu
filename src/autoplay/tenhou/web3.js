@@ -268,7 +268,16 @@
     const session = native.title.read();
     const current = native.popup.read();
     const account = typeof session.account === 'string' && /^ID[0-9A-F]{8}$/.test(session.account) ? session.account : null;
-    const dto = { client: 'web3', account, title: null, popup: null, lobby: null };
+    const dto = { client: 'web3', account, disconnect: null, title: null, popup: null, lobby: null };
+    const closed = native.disconnect.read();
+    // Only the native dialog whose current confirmation callback came from
+    // this client's own socket-close event. Unknown modals are never targets.
+    if (connected(closed)) {
+      const button = closed.querySelector('form > input[type="submit"]');
+      const enabled = !!account && visible(closed) && visible(button) && !button.disabled;
+      dto.disconnect = { identity: documentId + ':disconnect:' + nodeId(closed) + ':' + (button ? nodeId(button) : 'missing') + ':' + account + ':' + Number(enabled), enabled };
+      return { dto, element: closed, button };
+    }
     // Only the registered-account title control. No guest/register/ID entry.
     if (native.input.mode() === 0 && ['LOGIN', 'AUTOLOGIN'].includes(current.tag) && connected(current.element)) {
       const element = current.element;
@@ -326,10 +335,13 @@
 
   function probeUi(request) {
     const response = (status, target = null) => ({ client: 'web3', status, target });
-    if (!request || !['popup', 'join', 'resume'].includes(request.kind) || typeof request.identity !== 'string') return response('unavailable');
+    if (!request || !['popup', 'join', 'resume', 'disconnect'].includes(request.kind) || typeof request.identity !== 'string') return response('unavailable');
     const current = uiSnapshot();
     let button;
-    if (request.kind === 'resume') {
+    if (request.kind === 'disconnect') {
+      if (!current.dto.disconnect || current.dto.disconnect.identity !== request.identity || !current.dto.disconnect.enabled) return response('changed');
+      button = current.button;
+    } else if (request.kind === 'resume') {
       if (!current.dto.title || current.dto.title.identity !== request.identity || !current.dto.title.enabled) return response('changed');
       button = current.button;
     } else if (request.kind === 'popup') {

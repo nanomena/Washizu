@@ -33,6 +33,7 @@ function fixture() {
   const native = {
     epoch: () => state.epoch, uiEpoch: () => state.uiEpoch, modal: () => state.modal,
     title: { read: () => ({ account: state.account || null }) },
+    disconnect: { read: () => state.disconnectElement || null },
     input: { mode: () => state.live, phaseReady: () => state.ready, hand: () => state.hand, actor: () => state.actor,
       drawn: () => state.drawn, riichi: () => state.riichi, isCard: value => value instanceof Card, targetSlot: value => value.slot,
       slot: i => state.cards[i] && { ...state.cards[i], target: state.cards[i] } },
@@ -48,6 +49,7 @@ function fixture() {
     pageXOffset: 0, pageYOffset: 0, getComputedStyle: node => node.style,
     document: { elementFromPoint(x, y) {
       if (state.overlay && contains(state.overlay.rect, { x, y })) return state.overlay;
+      if (state.disconnectButton && contains(state.disconnectButton.rect, { x, y })) return state.disconnectButton;
       if (state.titleButton && contains(state.titleButton.rect, { x, y })) return state.titleButton;
       for (const button of state.popup.element?.children || []) if (button.style.display !== 'none' && contains(button.rect, { x, y })) return button;
       for (const outer of menuRoot.children) if (outer.style.display !== 'none' && outer.style.visibility !== 'hidden' && contains(outer.rect, { x, y })) return outer;
@@ -95,6 +97,31 @@ test('title resume exposes only the saved-account control with a fresh physical 
   root.style.display = '';f.state.live = 1;
   assert.equal(f.api.readUi().title, null, 'an underlying title cannot cover a live table');
   assert.equal(f.api.pressUi, undefined);
+  assert.deepEqual(f.state.effects, []);
+});
+
+test('only the identified disconnect dialog exposes its current submit input', () => {
+  const f = fixture(), root = new Element(), button = new Element('INPUT', { x: 100, y: 70, width: 120, height: 40 });
+  root.append(button);
+  root.querySelector = selector => selector === 'form > input[type="submit"]' ? button : null;
+  Object.assign(f.state, { account: 'ID1234ABCD', modal: true, disconnectElement: root, disconnectButton: button });
+  const ui = f.api.readUi(), request = { kind: 'disconnect', identity: ui.disconnect.identity };
+  assert.equal(ui.disconnect.enabled, true);
+  assert.equal(ui.title, null);assert.equal(ui.popup, null);assert.equal(ui.lobby, null);
+  const target = f.api.probeUi(request).target;
+  assert.ok(target);
+  assert.equal(f.api.probeUi({ ...request, targetIdentity: target.identity, point: middle(target.bounds) }).status, 'ready');
+  f.state.overlay = new Element();
+  assert.equal(f.api.probeUi(request).status, 'changed');
+  f.state.overlay = null;button.disabled = true;
+  assert.equal(f.api.readUi().disconnect.enabled, false);
+  button.disabled = false;root.style.opacity = '0';
+  assert.equal(f.api.readUi().disconnect.enabled, false);
+  root.style.opacity = '1';f.state.account = 'ID87654321';
+  assert.equal(f.api.probeUi(request).status, 'changed');
+  f.state.disconnectElement = null;
+  assert.equal(f.api.readUi().disconnect, null, 'an unrelated modal has no reconnect permission');
+  assert.equal(f.api.probeUi(request).status, 'changed');
   assert.deepEqual(f.state.effects, []);
 });
 
