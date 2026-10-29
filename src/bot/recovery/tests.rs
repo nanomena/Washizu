@@ -130,20 +130,28 @@ pub(crate) fn opening() -> Vec<MjaiEvent> {
 #[tokio::test]
 #[ignore = "requires own nanogamekits venv; set AKAGI_RECOVERY_WSL_ROOT"]
 async fn offline_python_primary_and_native_standby_recover_across_processes() {
-    real_cross_process_recovery(0).await;
+    real_cross_process_recovery(0, false).await;
 }
 
 #[cfg(target_os = "windows")]
 #[tokio::test]
 #[ignore = "requires own nanogamekits venv; set AKAGI_RECOVERY_WSL_ROOT"]
 async fn offline_python_inference_failure_recovers_after_native_takes_control() {
-    real_cross_process_recovery(2).await;
+    real_cross_process_recovery(2, false).await;
 }
 
 #[cfg(target_os = "windows")]
-async fn real_cross_process_recovery(failures: u32) {
+#[tokio::test]
+#[ignore = "offline only; own WSL venv, optional AKAGI_RECOVERY_CHECKPOINT; no installed games may be running"]
+async fn offline_python_snapshot_primary_recovers_in_this_hand_across_processes() {
+    real_cross_process_recovery(0, true).await;
+}
+
+#[cfg(target_os = "windows")]
+async fn real_cross_process_recovery(failures: u32, restored: bool) {
     use crate::bot::runner::SubprocessBot;
     use crate::bot::runtime::{PythonRuntime, RuntimeMode};
+    use crate::bridge::{Bridge, Direction, TenhouBridge};
     use std::path::{Path, PathBuf};
     use tokio::process::Command;
 
@@ -191,12 +199,17 @@ async fn real_cross_process_recovery(failures: u32) {
         &wsl_path(&stop),
     ]);
     service.args(["--failures", &failures.to_string()]);
+    if restored {
+        if let Ok(checkpoint) = std::env::var("AKAGI_RECOVERY_CHECKPOINT") {
+            service.args(["--checkpoint", &wsl_path(Path::new(&checkpoint))]);
+        }
+    }
     service
         .kill_on_drop(true)
         .stdout(std::process::Stdio::null());
     let mut child = service.spawn().expect("start actual tiny model service");
     let guard = ServiceStop(stop);
-    wait_file(&ready, 60).await;
+    wait_file(&ready, 180).await;
     let info: serde_json::Value = serde_json::from_slice(&std::fs::read(&ready).unwrap()).unwrap();
     let settings = files.path().join("settings.json");
     std::fs::write(
@@ -231,8 +244,25 @@ async fn real_cross_process_recovery(failures: u32) {
     .unwrap();
     let mut rig = Rig::with_runner(Box::new(primary));
     rig.budget_ms = 3_000; // includes Windows/WSL process startup, then a real inference timeout
-    for event in opening() {
-        rig.feed(event);
+    let mut bridge =
+        TenhouBridge::new(None, None).with_shared_state(Some(rig.clock.tenhou_state.clone()));
+    if restored {
+        for frame in [
+            r#"{"tag":"GO","type":"65","lobby":"0"}"#,
+            r#"{"tag":"REINIT","seed":"0,0,0,3,0,23","ten":"250,250,250,250","oya":"0","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96","kawa0":"1,106,74","kawa1":"79,122,3","kawa2":"72,100,9","kawa3":"107,78,67"}"#,
+            r#"{"tag":"T120"}"#,
+        ] {
+            for captured in bridge
+                .parse(Direction::Down, frame.as_bytes())
+                .into_captured()
+            {
+                rig.captured(captured);
+            }
+        }
+    } else {
+        for event in opening() {
+            rig.feed(event);
+        }
     }
     let local = rig.reply().await;
     assert_eq!(
@@ -244,17 +274,40 @@ async fn real_cross_process_recovery(failures: u32) {
         "actual JAX call is waiting"
     );
     assert!(matches!(local.action, MjaiEvent::Dahai { .. }));
-    rig.feed(local.action.clone());
-    for (actor, tile) in [(1, "W"), (2, "C"), (3, "P")] {
-        rig.feed(MjaiEvent::Tsumo {
-            actor,
-            pai: "?".into(),
-        });
-        rig.feed(MjaiEvent::Dahai {
-            actor,
-            pai: tile.into(),
-            tsumogiri: false,
-        });
+    let first_context = local.request.unwrap().context;
+    if restored {
+        assert!(
+            matches!(&local.action, MjaiEvent::Dahai { pai, tsumogiri: true, .. } if pai == "N")
+        );
+        for frame in [
+            r#"{"tag":"D120"}"#,
+            r#"{"tag":"U"}"#,
+            r#"{"tag":"E116"}"#,
+            r#"{"tag":"V"}"#,
+            r#"{"tag":"F132"}"#,
+            r#"{"tag":"W"}"#,
+            r#"{"tag":"G124"}"#,
+        ] {
+            for captured in bridge
+                .parse(Direction::Down, frame.as_bytes())
+                .into_captured()
+            {
+                rig.captured(captured);
+            }
+        }
+    } else {
+        rig.feed(local.action.clone());
+        for (actor, tile) in [(1, "W"), (2, "C"), (3, "P")] {
+            rig.feed(MjaiEvent::Tsumo {
+                actor,
+                pai: "?".into(),
+            });
+            rig.feed(MjaiEvent::Dahai {
+                actor,
+                pai: tile.into(),
+                tsumogiri: false,
+            });
+        }
     }
     std::fs::write(&release, "release actual inference").unwrap();
     if failures == 0 {
@@ -271,10 +324,19 @@ async fn real_cross_process_recovery(failures: u32) {
         "late actual model answer cannot replace standby"
     );
     rig.budget_ms = 3_000;
-    rig.feed(MjaiEvent::Tsumo {
-        actor: 0,
-        pai: "9s".into(),
-    });
+    if restored {
+        for captured in bridge
+            .parse(Direction::Down, br#"{"tag":"T104"}"#)
+            .into_captured()
+        {
+            rig.captured(captured);
+        }
+    } else {
+        rig.feed(MjaiEvent::Tsumo {
+            actor: 0,
+            pai: "9s".into(),
+        });
+    }
     let primary = rig.reply().await;
     assert_eq!(
         primary.control().unwrap().unwrap().source,
@@ -283,6 +345,15 @@ async fn real_cross_process_recovery(failures: u32) {
     let meta = primary.meta.as_ref().unwrap();
     assert_eq!(meta["model"], info["model"]);
     assert_eq!(meta["delivery"]["through"], 11);
+    if restored {
+        let context = primary.request.unwrap().context;
+        assert_eq!(
+            (context.game, context.round),
+            (first_context.game, first_context.round),
+            "main restored before any new hand/game"
+        );
+        assert_eq!(meta["restoration"]["origin"], "public_snapshot");
+    }
     assert!(
         meta["step"].as_u64().unwrap() > 0,
         "cache did not reset after standby's move"
