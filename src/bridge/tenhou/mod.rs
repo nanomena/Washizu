@@ -857,11 +857,15 @@ impl TenhouBridge {
         // *middle* of `hand`, so after our own chi/pon/kan the tail still
         // holds the tile we drew last turn; without the gate, discarding that
         // tile reports a tedashi as tsumogiri.
-        let tsumogiri = if actor == self.state.seat {
-            self.state.is_tsumo && self.state.hand.last().copied() == Some(idx)
-        } else {
-            tag_tsumogiri
-        };
+        let tsumogiri =
+            if actor == self.state.seat && self.state.restored_pending_draw && self.state.in_riichi
+            {
+                true // An accepted riichi's committed discard must be its draw.
+            } else if actor == self.state.seat {
+                self.state.is_tsumo && self.state.hand.last().copied() == Some(idx)
+            } else {
+                tag_tsumogiri
+            };
 
         self.state.last_kawa_tile = pai.clone();
         self.state.last_revealed_tile_actor = Some(actor);
