@@ -333,6 +333,10 @@ impl GameTracker {
         self.interrupted_players.is_some() || self.origin != ObservationOrigin::CompleteTrace
     }
 
+    pub(crate) fn restored_live(&self) -> bool {
+        self.origin == ObservationOrigin::RestoredLive && self.state.is_some()
+    }
+
     fn restored_legal(
         &self,
         event: &AkagiEvent,
