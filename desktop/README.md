@@ -23,6 +23,10 @@ normal interfaces. Proxy URLs with authentication, paths or parameters are
 rejected; authenticated upstreams can be exposed through a local proxy port.
 A custom proxy has no direct fallback.
 
+Drag any non-button part of an account row above or below another row to
+change its saved order. Reordering keeps stable ids, account data, proxies and
+running clients intact; Manage and Open retain their normal click behavior.
+
 Settings → App holds the account chooser button and the application's
 About/license details. The game window has no application menu bar. Showing
 the chooser during a game does not stop that client. Closing the chooser while

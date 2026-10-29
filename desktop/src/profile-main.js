@@ -65,6 +65,7 @@ export async function startProfiles(root) {
       const values = args && typeof args === 'object' ? args : {}
       if (method === 'create_profile') { store.create(values.name, values.platform); fitGuide() }
       else if (method === 'save_profile') store.update(values.id, values.name, values.proxy)
+      else if (method === 'reorder_profiles') store.reorder(values.ids)
       else if (method === 'delete_profile') { const profile = store.get(values.id); sessions.remove(profile.id, () => store.delete(profile.id)); fitGuide() }
       else if (method === 'save_profile_defaults') store.saveDefaults(values.defaults)
       else if (method === 'open_profile') { const profile = store.get(values.id); error = ''; sessions.open(profile.id) }

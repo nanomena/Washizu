@@ -1,5 +1,6 @@
 /** 日本語. Keys are the page's own Simplified Chinese text. */
 export const ja: Record<string, string> = {
+  '账号列表已变化，请重新排序。': 'アカウント一覧が変更されました。もう一度並べ替えてください。',
   "游戏代理": "ゲーム用プロキシ",
   "连接方式": "接続方法",
   "跟随系统": "システム設定を使用",

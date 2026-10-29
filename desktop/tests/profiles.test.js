@@ -7,6 +7,25 @@ import { test } from 'node:test'
 import { ProfileStore, defaultProfileRoot, homePlatform } from '../src/profiles.js'
 import { spoutSenderName } from '../src/view-preferences.js'
 
+test('ordering persists every stable profile and rejects stale membership without touching account data', t => {
+  const store = new ProfileStore(temporary(t)).load(), a = store.create('A', 'Majsoul'), b = store.create('B', 'Tenhou'), c = store.create('C', 'Tenhou')
+  store.update(b.id, b.name, { mode: 'custom', server: 'socks5://127.0.0.1:17811' })
+  const entries = new Map(store.list().map(p => [p.id, p]))
+  const config = fs.readFileSync(path.join(store.home(b.id), 'config.toml'), 'utf8')
+  store.reorder([c.id, a.id, b.id])
+  const again = new ProfileStore(store.root).load()
+  assert.deepEqual(again.list(), [entries.get(c.id), entries.get(a.id), entries.get(b.id)])
+  assert.equal(fs.readFileSync(path.join(store.home(b.id), 'config.toml'), 'utf8'), config)
+  const committed = fs.readFileSync(store.file, 'utf8')
+  for (const ids of [[a.id, b.id], [a.id, a.id, b.id], [a.id, b.id, 'unknown'], [a.id, b.id, 7], 'invalid']) {
+    assert.throws(() => store.reorder(ids), /重新排序/)
+    assert.equal(fs.readFileSync(store.file, 'utf8'), committed)
+  }
+  t.mock.method(store, 'save', () => { throw new Error('write refused') })
+  assert.throws(() => store.reorder([a.id, b.id, c.id]), /write refused/)
+  assert.deepEqual(store.list(), again.list())
+})
+
 test('v1 profiles migrate once to explicit system routing without touching account homes', t => {
   const root = temporary(t), file = path.join(root, 'profiles.json')
   const old = { id: 'existing', name: 'Original', platform: 'Majsoul', lastOpened: null }
