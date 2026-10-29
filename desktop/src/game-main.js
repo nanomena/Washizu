@@ -32,7 +32,7 @@ import { registerDockScheme, serveDock } from './dock.js'
 import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, WEBGL_CONTEXTS, processLine, worthKeeping } from './watch.js'
 import { keepWorkersRunning } from './workers.js'
-import { contentSize, holdRatio } from './window-frame.js'
+import { contentSize, holdRatio, presentWindow } from './window-frame.js'
 import { ProfileStore, PLATFORMS, homePlatform } from './profiles.js'
 import { readObsPreference, saveObsPreference, spoutSenderName } from './view-preferences.js'
 import { applyGameProxy } from './profile-proxy.js'
@@ -159,10 +159,7 @@ function tellOptions() {
 
 /** Present this account for both its first opening and later focus requests. */
 function showWindow() {
-  if (!window) return
-  if (window.isMinimized()) window.restore()
-  window.show()
-  window.focus()
+  presentWindow(window)
 }
 
 /** @param {import('./core.js').Ready} ready */

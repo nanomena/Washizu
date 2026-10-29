@@ -1,6 +1,17 @@
 // @ts-check
-// The chooser and game share the same content ratio and Windows frame correction.
+// Native window presentation and game content ratio helpers.
 import { RATIO, framedRatio, settle } from './layout.js'
+
+/** Explicitly raise the account as well as requesting focus. A focus request
+ * alone can leave a visible window behind the chooser on Windows.
+ * @param {import('electron').BaseWindow | null} frame */
+export function presentWindow(frame) {
+  if (!frame) return
+  if (frame.isMinimized()) frame.restore()
+  frame.show()
+  frame.moveTop()
+  frame.focus()
+}
 
 /** @param {import('electron').BaseWindow} frame */
 export function contentSize(frame) {
