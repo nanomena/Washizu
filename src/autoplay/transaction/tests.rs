@@ -96,6 +96,7 @@ impl Harness {
         };
         let observation = SiteObservation {
             ready: true,
+            blocked: None,
             target_kind: TargetKind::Commit,
             target: Some(target),
             layout: None,
@@ -1107,6 +1108,7 @@ fn an_unreadable_or_missing_control_at_the_final_probe_never_spends_an_attempt()
         let permit = h.permit();
         let observation = (!unreadable).then_some(SiteObservation {
             ready: false,
+            blocked: None,
             target_kind: TargetKind::Commit,
             target: None,
             layout: None,

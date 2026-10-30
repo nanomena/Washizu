@@ -60,6 +60,7 @@ impl TenhouAutoplay {
     ) -> SiteObservation {
         let mut observation = SiteObservation {
             ready: false,
+            blocked: None,
             target_kind: TargetKind::Commit,
             target: None,
             layout: layout(input),
@@ -234,24 +235,36 @@ impl SiteAdapter for TenhouAutoplay {
         let input = client::read_input(page).await?;
         let observed_at = Instant::now();
         let mut observation = self.facts(&state, &input, &intent.action, observed_at);
-        if !input.ready || !same_hand(&input, &state) || intent.action != *ctx.action {
-            return Ok(observation);
+        if !input.ready {
+            let gate = input.blocked.as_deref().unwrap_or("unspecified");
+            return Ok(observation.because(format!("page input not ready: {gate}")));
+        }
+        if !same_hand(&input, &state) {
+            let reason = format!(
+                "page hand ({} tiles) differs from protocol hand ({} tiles)",
+                input.hand.len(),
+                state.hand.len()
+            );
+            return Ok(observation.because(reason));
+        }
+        if intent.action != *ctx.action {
+            return Ok(observation.because("intent is for another action"));
         }
         let window = input
             .window
             .as_ref()
             .ok_or_else(|| anyhow!("ready Tenhou input lacks a window"))?;
         let Some(_) = state.window else {
-            return Ok(observation);
+            return Ok(observation.because("no protocol decision window"));
         };
         let request = if intent.role == PressRole::Discard {
             let Some((tile, tsumogiri)) = discard_tile(&intent.action, &state) else {
-                return Ok(observation);
+                return Ok(observation.because("selected discard is not in the protocol hand"));
             };
             if !input.tiles.iter().any(|candidate| {
                 candidate.tile == tile && candidate.legal && candidate.drawn == tsumogiri
             }) {
-                return Ok(observation);
+                return Ok(observation.because("selected tile is not legal on the page"));
             }
             client::TargetRequest::Discard {
                 window: window.clone(),
@@ -261,10 +274,10 @@ impl SiteAdapter for TenhouAutoplay {
             }
         } else {
             let Some(wanted) = client::choice_payload(&intent.action, &state) else {
-                return Ok(observation);
+                return Ok(observation.because("no protocol choice for this action"));
             };
             let Some(offer) = input.matching_offer(&wanted) else {
-                return Ok(observation);
+                return Ok(observation.because("page offers no matching choice"));
             };
             client::TargetRequest::Offer {
                 window: window.clone(),
@@ -273,19 +286,20 @@ impl SiteAdapter for TenhouAutoplay {
         };
         let probe = client::probe_target(page, &request).await?;
         let Some(mut target) = probe.target else {
-            return Ok(observation);
+            let status = probe.status;
+            return Ok(observation.because(format!("page found no target: {status:?}")));
         };
         if let Some(point) = point {
             let checked = client::validate_target(page, &request, &target.identity, point).await?;
             let Some(validated) = checked.target else {
-                return Ok(observation);
+                return Ok(observation.because("final page check found no target"));
             };
             if validated.identity != target.identity
                 || validated.kind != target.kind
                 || validated.bounds != target.bounds
                 || validated.viewport != target.viewport
             {
-                return Ok(observation);
+                return Ok(observation.because("final page check saw a different target"));
             }
             target = validated;
         }

@@ -261,6 +261,7 @@ impl SiteAdapter for MajsoulAutoplay {
             .map_err(|_| anyhow!("Majsoul window lock poisoned"))?;
         let mut observation = SiteObservation {
             ready: false,
+            blocked: None,
             target_kind: TargetKind::Commit,
             target: None,
             layout: None,
@@ -272,17 +273,20 @@ impl SiteAdapter for MajsoulAutoplay {
             continuation: None,
         };
         if intent.action != *ctx.action {
-            return Ok(observation);
+            return Ok(observation.because("intent is for another action"));
         }
         let Some(view) = read_view(page, actual).await? else {
-            return Ok(observation);
+            return Ok(observation.because("game view unavailable"));
         };
         observation.layout = layout(&view, ctx);
-        if !view.clear || observation.layout.is_none() {
-            return Ok(observation);
+        if !view.clear {
+            return Ok(observation.because("table is covered"));
+        }
+        if observation.layout.is_none() {
+            return Ok(observation.because("hand layout unknown"));
         }
         let Some(budget) = budget else {
-            return Ok(observation);
+            return Ok(observation.because("no decision time budget"));
         };
         let normalized = ActionContext {
             pointer: ctx.pointer.map(|p| view.viewport.norm(p.0, p.1)),
@@ -294,7 +298,7 @@ impl SiteAdapter for MajsoulAutoplay {
             let (face, control, kind) =
                 if let Some(row) = candidates::read(&image, scale, view.viewport, choice.count) {
                     let Some(face) = row.target(choice.index) else {
-                        return Ok(observation);
+                        return Ok(observation.because("candidate row lacks the selected choice"));
                     };
                     (
                         face,
@@ -303,7 +307,7 @@ impl SiteAdapter for MajsoulAutoplay {
                     )
                 } else {
                     let Some(button) = mapping.targets.first() else {
-                        return Ok(observation);
+                        return Ok(observation.because("no mapped call button"));
                     };
                     let Some(face) = candidates::action(
                         &image,
@@ -311,7 +315,7 @@ impl SiteAdapter for MajsoulAutoplay {
                         view.viewport,
                         (button.x_norm, button.y_norm),
                     ) else {
-                        return Ok(observation);
+                        return Ok(observation.because("call button not visible"));
                     };
                     (
                         face,
@@ -330,7 +334,7 @@ impl SiteAdapter for MajsoulAutoplay {
                 .map_err(|_| anyhow!("Majsoul window lock poisoned"))?
                 != Some(budget)
             {
-                return Ok(observation);
+                return Ok(observation.because("decision window changed"));
             }
             let identity = TargetIdentity {
                 window: window_identity(crate::bot::control::InputWindow::Majsoul(budget).proof()),
@@ -354,7 +358,7 @@ impl SiteAdapter for MajsoulAutoplay {
             _ => mapping.targets.first(),
         };
         let Some(point) = selected else {
-            return Ok(observation);
+            return Ok(observation.because("no mapped target"));
         };
         let point = (point.x_norm, point.y_norm);
         let bounds = target_bounds(view.viewport, point);
@@ -364,7 +368,7 @@ impl SiteAdapter for MajsoulAutoplay {
                 .as_ref()
                 .and_then(|l| l.tiles.iter().find(|t| t.bounds == bounds))
             else {
-                return Ok(observation);
+                return Ok(observation.because("no hand tile at the mapped slot"));
             };
             let (pai, drawn) = match ctx.action {
                 MjaiEvent::Dahai { pai, tsumogiri, .. } => (pai, Some(*tsumogiri)),
@@ -373,22 +377,22 @@ impl SiteAdapter for MajsoulAutoplay {
                     tsumogiri,
                     ..
                 } => (pai, *tsumogiri),
-                _ => return Ok(observation),
+                _ => return Ok(observation.because("action has no discard tile")),
             };
             if tile.tile != *pai
                 || (!is_dealer_opening(ctx) && drawn.is_some_and(|d| d != tile.drawn))
             {
-                return Ok(observation);
+                return Ok(observation.because("mapped slot holds a different tile"));
             }
         }
         if actual.is_some_and(|p| !bounds.contains(p.0, p.1)) {
-            return Ok(observation);
+            return Ok(observation.because("pointer is outside the target"));
         }
         // Unity keeps the rack inside WASM. The protocol mapping is usable
         // only while the actual table shows automatic sorting enabled.
         // A covered table or manual rack never gets final input permission.
         if actual.is_some() && !sorted_table(page, view.viewport).await? {
-            return Ok(observation);
+            return Ok(observation.because("rack is not auto-sorted"));
         }
         if *self
             .context
@@ -397,7 +401,7 @@ impl SiteAdapter for MajsoulAutoplay {
             .map_err(|_| anyhow!("Majsoul window lock poisoned"))?
             != Some(budget)
         {
-            return Ok(observation);
+            return Ok(observation.because("decision window changed"));
         }
         observation.target = Some(InputTarget {
             identity: TargetIdentity {

@@ -8,7 +8,7 @@ use crate::autoplay::delay::{self, DecisionKind};
 use crate::autoplay::platform::{self, SiteAdapter, TurnClockFacts, TurnPlan};
 use crate::autoplay::pointer::{self, ApproachInput, Touch};
 use crate::autoplay::transaction::{
-    self, CancelReason, Effect, Facts, InputRequirement, Observed, Outcome, Owner,
+    self, CancelReason, Effect, Facts, InputRequirement, Observed, Outcome, Owner, Phase,
 };
 use crate::bot::control::WindowProof;
 use crate::config::{AppConfig, Platform};
@@ -171,6 +171,10 @@ impl AutoplayManager {
         let mut viewport = None;
         // The last distinct reason the site could not be read, logged once.
         let mut unreadable: Option<String> = None;
+        // Since when the turn has aimed without a target, and the reason last
+        // logged for it; and the site's latest reason. Logs only.
+        let mut waiting: Option<(Instant, Option<String>)> = None;
+        let mut blocked: Option<String> = None;
         loop {
             let intent = { self.turn.lock().unwrap().intent() };
             let Some(intent) = intent else {
@@ -212,6 +216,29 @@ impl AutoplayManager {
                     .unwrap()
                     .next(&current, sight, Instant::now())
             };
+            let aiming = matches!(self.turn.lock().unwrap().phase(), Some(Phase::Aiming));
+            match (&observed, aiming) {
+                (Ok(observation), true) if observation.target.is_none() => {
+                    blocked = observation.blocked.clone();
+                    let (since, said) = waiting.get_or_insert((Instant::now(), None));
+                    if since.elapsed() >= Duration::from_secs(3) && *said != blocked {
+                        warn!(
+                            reason = blocked.as_deref().unwrap_or("none given"),
+                            waited_ms = since.elapsed().as_millis() as u64,
+                            ?action,
+                            "autoplay: no target yet"
+                        );
+                        *said = blocked.clone();
+                    }
+                }
+                (Err(_), true) => {}
+                (Ok(observation), _) if observation.target.is_some() => {
+                    waiting = None;
+                    blocked = None;
+                }
+                // Kept for the finished line: the last reason a target was missing.
+                _ => waiting = None,
+            }
             let layout = observed
                 .as_ref()
                 .ok()
@@ -399,7 +426,7 @@ impl AutoplayManager {
                     viewport = Some(target.viewport);
                 }
                 Effect::Finished { outcome, reload } => {
-                    info!(?outcome, ?action, unreadable = ?unreadable, "autoplay: selected turn finished");
+                    info!(?outcome, ?action, unreadable = ?unreadable, blocked = ?blocked, "autoplay: selected turn finished");
                     if matches!(outcome, Outcome::ClientAccepted | Outcome::ServerConfirmed) {
                         if let Some(viewport) = viewport {
                             self.hand.rest_after(viewport, &action);

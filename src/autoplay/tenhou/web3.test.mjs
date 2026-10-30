@@ -328,3 +328,20 @@ test('CDP attach recognizes the read-only playing contract without forcing a rel
   assert.equal(vm.runInNewContext(expression, { window: { __akagiTenhou: { ...api, probeTarget: undefined } }, location: { host: 'tenhou.net' } }), false);
   assert.equal(vm.runInNewContext(expression, { window: {}, location: { host: 'game.maj-soul.com' } }), true);
 });
+test('an unready snapshot names the first input gate that failed, for logs only', () => {
+  const gates = [
+    ['not-live', f => { f.state.live = 0; }],
+    ['phase', f => { f.state.ready = false; }],
+    ['modal', f => { f.state.modal = true; }],
+    ['no-clock', f => { f.state.mounted = false; }],
+    ['not-our-input', f => { f.state.target = {}; }],
+  ];
+  for (const [gate, change] of gates) {
+    const f = fixture(); change(f);
+    const snapshot = f.api.readInput();
+    assert.equal(snapshot.ready, false); assert.equal(snapshot.blocked, gate, gate);
+    assert.deepEqual(f.state.effects, []);
+  }
+  const ready = fixture().api.readInput();
+  assert.equal(ready.ready, true); assert.equal(ready.blocked, null);
+});
