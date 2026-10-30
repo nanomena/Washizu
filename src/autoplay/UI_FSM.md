@@ -107,7 +107,7 @@ and CDP move/down/up sequence as play and Mahjong Soul UI confirmations.
 | FinalResult | actual OWARI popup | one confirmation when auto-continue is enabled |
 | WaitingLobby | successful own final confirmation | wait for an actual rebuilt lobby and exactly one enabled offer matching the real table |
 | ReservationConfirming | mouse sequence sent | bounded wait for the actual client reservation flag; no repeat; expiry stops |
-| ReservationPending | observed client reservation request | no repeat; real StartGame completes the reservation path |
+| ReservationPending | observed client reservation request | no repeat; real StartGame completes the reservation path; an own continuation's queue is bounded (below) |
 | Stopped | unavailable producer/dispatch, unknown target, changed/ambiguous/disabled offer, revoked ending ownership, expiry/attempt limit | report typed reason; no guessed replacement room or retry loop |
 
 Only the real StartGame's player seat and `MatchInfo::Tenhou {go_type,lobby}`
@@ -231,20 +231,40 @@ never leaves the page. The native title observer exposes the saved-account
 button's geometry, and invokes no handler. Guest, registration and ID-entry
 controls are not input targets.
 
-Only this FSM learns resume authority at an authenticated own table. A reload
-of the same active game can retain that public identity while revoking every
-old DOM target and mouse ticket. A title with the same account may enter
-`Reconnecting`, independently of rematching/quick-confirm settings. Fresh
-clients, changed accounts, finished games and changed game identities have no
-resume authority. Disabled/manual ownership and final physical hit checks
+Only this FSM learns resume authority: at an authenticated own table, or in
+the authenticated lobby while the reservation of its own continuation (a real
+game's player, after its own final and reserve dispatch) is confirming or
+pending. A reload of the same active game, or of that own queue, can retain the
+public identity while revoking every old DOM target and mouse ticket. A title
+with the same account may enter `Reconnecting`, independently of
+rematching/quick-confirm settings. Fresh clients and their manual
+reservations, changed accounts, finished games and changed game identities have
+no resume authority. Disabled/manual ownership and final physical hit checks
 still revoke input. The common pointer performs the one authorized press.
 
-The reconnect episode has a fixed deadline and spends each observed control
-once. A missing document may be observed again only inside that bounded FSM
-episode. A lobby return cannot authorize a new match. Only authentic
-`StartKyoku` or `RestoreKyoku` returns the UI to `Table` and clears the deadline;
-a click or a disappearing title is not proof of a restored table. The model
-source coordinator separately validates and restores Primary context.
+The reconnect episode has one deadline of 300 s, long enough for a proxy's
+failover, and spends each observed control once; its presses are bounded by
+that deadline rather than the per-stage press limit. A missing document may be
+observed again only inside that bounded FSM episode. A lobby return cannot
+authorize a new match. Only authentic `StartKyoku` or `RestoreKyoku` returns
+the UI to `Table` and clears the deadline; a click or a disappearing title is
+not proof of a restored table. The model source coordinator separately
+validates and restores Primary context.
+
+## Stalled own match
+
+A socket can stall without closing: the client then shows no disconnect modal
+and waits indefinitely. An own continuation's `ReservationPending` therefore
+has a deadline: 15 minutes in the queue, or 60 s after the client's TAIKYOKU
+popup announces the match (INIT normally follows in about 12 s). The popup only
+bounds the wait and grants no input. On expiry this FSM enters `Reconnecting`
+and issues one `ReloadWeb` effect; the executor rechecks its permission
+(`consume_reload`) immediately before reloading the page, exactly like the
+turn transaction's dead-click reload. Manual or disabled ownership defers the
+requested reload; a reload the client cannot start stops with
+`DispatchUnavailable`. After the reload the title resume above applies, and
+Tenhou's own rejoin returns an ongoing match to the table. A manual queue has
+no deadline and is never reloaded.
 
 ## Native disconnect confirmation
 

@@ -4,7 +4,7 @@
 
 use super::{
     Client, Effect, Environment, Input, Machine, State, Suspension, Ticket, WaitingReason,
-    END_LIMIT, LOOK, PRESS_LIMIT, RESULT_LIMIT,
+    END_LIMIT, LOOK, PRESS_LIMIT, RECONNECT_LIMIT, RESERVATION_LIMIT, RESULT_LIMIT, START_LIMIT,
 };
 use crate::autoplay::humanize;
 use crate::autoplay::tenhou::client::Dispatch;
@@ -189,6 +189,8 @@ pub(super) struct Run {
     spent: HashSet<String>,
     until: Option<Instant>,
     attempts: u32,
+    /// An expired own reservation asked for one client reload.
+    reload: bool,
 }
 
 impl Default for Run {
@@ -202,8 +204,16 @@ impl Default for Run {
             spent: HashSet::new(),
             until: None,
             attempts: 0,
+            reload: false,
         }
     }
+}
+
+/// The public registered-ID prefix; the credential suffix never leaves the page.
+fn public_account(account: &Option<String>) -> Option<&String> {
+    account.as_ref().filter(|s| {
+        s.len() == 10 && s.starts_with("ID") && s.as_bytes()[2..].iter().all(u8::is_ascii_hexdigit)
+    })
 }
 
 impl Run {
@@ -217,14 +227,31 @@ impl Run {
         self.until = None;
     }
 
-    fn expire(&mut self, now: Instant) {
-        if self.until.is_some_and(|until| now >= until) {
-            self.stop(if self.stage == Stage::Reconnecting {
-                WaitingReason::ReconnectTimeout
-            } else {
-                WaitingReason::EndTimeout
-            });
+    fn reconnect(&mut self, now: Instant) {
+        if self.stage != Stage::Reconnecting {
+            self.stage = Stage::Reconnecting;
+            self.until = Some(now + RECONNECT_LIMIT);
+            self.attempts = 0;
         }
+    }
+
+    /// Returns true when the expiry asks for a client reload.
+    fn expire(&mut self, now: Instant) -> bool {
+        if !self.until.is_some_and(|until| now >= until) {
+            return false;
+        }
+        match self.stage {
+            Stage::Reconnecting => self.stop(WaitingReason::ReconnectTimeout),
+            // Only an own continuation carries resume authority in the queue.
+            Stage::ReservationPending if self.resume_account.is_some() => {
+                self.candidate = None;
+                self.reconnect(now);
+                self.reload = true;
+                return true;
+            }
+            _ => self.stop(WaitingReason::EndTimeout),
+        }
+        false
     }
 
     fn allowed(&self, control: &Control, env: Environment) -> bool {
@@ -291,17 +318,13 @@ impl Run {
             {
                 return None;
             }
-            let account = self.resume_account.as_ref()?;
-            if observation.account.as_ref() != Some(account) {
+            let account = self.resume_account.clone()?;
+            if observation.account.as_ref() != Some(&account) {
                 self.resume_account = None;
                 self.stop(WaitingReason::OwnershipChanged);
                 return None;
             }
-            if self.stage != Stage::Reconnecting {
-                self.stage = Stage::Reconnecting;
-                self.until = Some(now + RESULT_LIMIT);
-                self.attempts = 0;
-            }
+            self.reconnect(now);
             if !dialog.enabled
                 || dialog.identity.is_empty()
                 || self.spent.contains(&dialog.identity)
@@ -310,33 +333,41 @@ impl Run {
             }
             return Some(Control::ConfirmDisconnect {
                 identity: dialog.identity.clone(),
-                account: account.clone(),
+                account,
             });
         }
         if let Some(title) = &observation.title {
             if observation.popup.is_some() || observation.lobby.is_some() {
                 return None;
             }
-            let account = self.resume_account.as_ref()?;
-            if observation.account.as_ref() != Some(account) {
+            let account = self.resume_account.clone()?;
+            if observation.account.as_ref() != Some(&account) {
                 self.resume_account = None;
                 self.stop(WaitingReason::OwnershipChanged);
                 return None;
             }
-            if self.stage != Stage::Reconnecting {
-                self.stage = Stage::Reconnecting;
-                self.until = Some(now + RESULT_LIMIT);
-                self.attempts = 0;
-            }
+            self.reconnect(now);
             if !title.enabled || title.identity.is_empty() || self.spent.contains(&title.identity) {
                 return None;
             }
             return Some(Control::Resume {
                 identity: title.identity.clone(),
-                account: account.clone(),
+                account,
             });
         }
         if let Some(popup) = &observation.popup {
+            // The client announced our match (TAIKYOKU); real StartGame follows
+            // within seconds. The fact only bounds the wait and grants no input.
+            if popup.tag == PopupTag::Start
+                && self.stage == Stage::ReservationPending
+                && self.resume_account.is_some()
+            {
+                let matched = now + START_LIMIT;
+                if self.until.is_none_or(|until| until > matched) {
+                    self.until = Some(matched);
+                }
+                return None;
+            }
             // A popup plus a usable lobby is contradictory, not permission
             // to prefer one observer or choose whichever button is enabled.
             if observation.lobby.is_some() || popup.identity.is_empty() {
@@ -352,11 +383,7 @@ impl Run {
                     self.stop(WaitingReason::OwnershipChanged);
                     return None;
                 }
-                if self.stage != Stage::Reconnecting {
-                    self.stage = Stage::Reconnecting;
-                    self.until = Some(now + RESULT_LIMIT);
-                    self.attempts = 0;
-                }
+                self.reconnect(now);
                 return (popup.enabled && !popup.closing && popup.queued == 0).then(|| {
                     Control::Popup {
                         identity: popup.identity.clone(),
@@ -423,8 +450,13 @@ impl Run {
             return None;
         }
         if lobby.reservation_requested {
-            self.stage = Stage::ReservationPending;
-            self.until = None;
+            if self.stage != Stage::ReservationPending {
+                self.stage = Stage::ReservationPending;
+                self.until = self
+                    .resume_account
+                    .is_some()
+                    .then(|| now + RESERVATION_LIMIT);
+            }
             return None;
         }
         if self.stage != Stage::WaitingLobby {
@@ -486,23 +518,35 @@ impl Machine {
             self.revoke();
         }
         if session_changed || !matches!(self.state, State::Web(_)) {
-            // A reload of the same active game may retain only the public
-            // account authorization. All DOM targets/tickets are retired.
+            // A reload of the same active game, or of our own queued match, may
+            // retain only the public account authorization. All DOM
+            // targets/tickets are retired.
             let mut next = Run::default();
             match &self.state {
                 State::Web(run)
                     if self.env.is_some_and(|old| {
                         old.client == env.client
-                            && old.context.is_some()
-                            && old.context.map(|c| c.game) == env.context.map(|c| c.game)
+                            && (old.context.is_some()
+                                && old.context.map(|c| c.game) == env.context.map(|c| c.game)
+                                || old.context.is_none()
+                                    && env.context.is_none()
+                                    && run.resume_account.is_some()
+                                    && matches!(
+                                        run.stage,
+                                        Stage::ReservationPending | Stage::Reconnecting
+                                    ))
                     }) =>
                 {
                     next.resume_account = run.resume_account.clone();
-                    if run.stage == Stage::Reconnecting {
-                        next.stage = Stage::Reconnecting;
-                        next.until = run.until;
-                        next.attempts = run.attempts;
-                        next.spent = run.spent.clone();
+                    match run.stage {
+                        Stage::Reconnecting => {
+                            next.stage = Stage::Reconnecting;
+                            next.until = run.until;
+                            next.attempts = run.attempts;
+                            next.spent = run.spent.clone();
+                        }
+                        Stage::ReservationPending => next.reconnect(now),
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -521,13 +565,18 @@ impl Machine {
                 run.stop(WaitingReason::OwnershipChanged);
             }
         }
-        run.expire(now);
+        let reload = run.expire(now);
         self.suspension = why;
         self.env = Some(env);
         if matches!(run.stage, Stage::Stopped(_)) {
             self.effects.cancel();
-        } else if why.is_none() && self.effects.idle() {
-            self.effects.schedule(now + LOOK, Input::WebObserve);
+        } else if why.is_none() && (reload || self.effects.idle()) {
+            // A pending reload survives revocation and waits for ownership.
+            if run.reload {
+                self.effects.schedule(now, Input::WebReload);
+            } else {
+                self.effects.schedule(now + LOOK, Input::WebObserve);
+            }
         }
     }
 
@@ -566,7 +615,9 @@ impl Machine {
         let State::Web(run) = &mut self.state else {
             return None;
         };
-        run.expire(now);
+        if run.expire(now) {
+            self.effects.schedule(now, Input::WebReload);
+        }
         if matches!(run.stage, Stage::Stopped(_)) {
             self.effects.cancel();
             return None;
@@ -578,6 +629,7 @@ impl Machine {
                 ticket,
                 control: candidate.control.clone(),
             }),
+            Input::WebReload => Some(Effect::ReloadWeb(ticket)),
             _ => unreachable!("Web route cannot inherit a pixel/decision effect"),
         }
     }
@@ -598,7 +650,10 @@ impl Machine {
         let State::Web(run) = &mut self.state else {
             return;
         };
-        run.expire(now);
+        if run.expire(now) {
+            self.effects.schedule(now, Input::WebReload);
+            return;
+        }
         if matches!(run.stage, Stage::Stopped(_)) {
             return;
         }
@@ -607,20 +662,22 @@ impl Machine {
             // own game gets a bounded reconnect episode; no second retry owner.
             if run.resume_account.is_some() {
                 run.candidate = None;
-                if run.stage != Stage::Reconnecting {
-                    run.stage = Stage::Reconnecting;
-                    run.until = Some(now + RESULT_LIMIT);
-                    run.attempts = 0;
-                }
+                run.reconnect(now);
                 self.effects.schedule(now + LOOK, Input::WebObserve);
             } else {
                 run.stop(WaitingReason::ObservationUnavailable);
             }
             return;
         };
-        if run.player.is_some()
-            && env.context.is_some()
-            && run.stage == Stage::Table
+        // Resume authority is learned at our authenticated table, or in the
+        // authenticated lobby while our own continuation's reservation runs.
+        let own_client = run.player.is_some()
+            && (env.context.is_some() && run.stage == Stage::Table
+                || matches!(
+                    run.stage,
+                    Stage::ReservationConfirming | Stage::ReservationPending
+                ));
+        if own_client
             && observation.title.is_none()
             && observation.disconnect.is_none()
             && !matches!(
@@ -628,11 +685,7 @@ impl Machine {
                 Some(PopupTag::Welcome)
             )
         {
-            if let Some(account) = observation.account.as_ref().filter(|s| {
-                s.len() == 10
-                    && s.starts_with("ID")
-                    && s.as_bytes()[2..].iter().all(u8::is_ascii_hexdigit)
-            }) {
+            if let Some(account) = public_account(&observation.account) {
                 match &run.resume_account {
                     Some(old) if old != account => {
                         run.resume_account = None;
@@ -743,10 +796,11 @@ impl Machine {
                 Dispatch::Changed => {} // no invocation; a fresh observation may acquire a new ticket
                 Dispatch::Unavailable => run.stop(WaitingReason::DispatchUnavailable),
             }
+            // A reconnect is bounded by its deadline; each control is spent once.
             if run.attempts >= PRESS_LIMIT
                 && !matches!(
                     run.stage,
-                    Stage::ReservationConfirming | Stage::ReservationPending
+                    Stage::ReservationConfirming | Stage::ReservationPending | Stage::Reconnecting
                 )
             {
                 run.stop(WaitingReason::PressLimit);
@@ -754,6 +808,52 @@ impl Machine {
         }
         if !matches!(run.stage, Stage::Stopped(_)) {
             self.effects.schedule(now + LOOK, Input::WebObserve)
+        }
+    }
+
+    /// Final permission immediately before the executor reloads the client.
+    /// Both outcomes spend the ticket; a refused reload stays requested.
+    pub fn consume_reload(&mut self, ticket: Ticket) -> bool {
+        if self.suspension.is_some() || self.effects.issued(ticket) != Some(Input::WebReload) {
+            return false;
+        }
+        let allowed = match (&self.state, self.env) {
+            (State::Web(run), Some(env)) => {
+                env.settings.enabled
+                    && run.reload
+                    && run.stage == Stage::Reconnecting
+                    && run.resume_account.is_some()
+            }
+            _ => false,
+        };
+        self.effects.consume(ticket, allowed)
+    }
+
+    /// The reload normally retires this run through a session change first;
+    /// a reload the client could not start stops the episode explicitly.
+    pub fn web_reloaded(&mut self, ticket: Ticket, reloaded: bool, now: Instant) {
+        if self.effects.input(ticket) != Some(Input::WebReload) {
+            return;
+        }
+        let State::Web(run) = &mut self.state else {
+            return;
+        };
+        let Some(completion) = self.effects.complete(ticket, reloaded) else {
+            return;
+        };
+        if completion.permitted {
+            run.reload = false;
+            if !reloaded {
+                run.stop(WaitingReason::DispatchUnavailable);
+            }
+        }
+        if !matches!(run.stage, Stage::Stopped(_)) {
+            let input = if run.reload {
+                Input::WebReload
+            } else {
+                Input::WebObserve
+            };
+            self.effects.schedule(now + LOOK, input)
         }
     }
 }
