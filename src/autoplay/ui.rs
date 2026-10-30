@@ -20,6 +20,13 @@ use std::time::{Duration, Instant};
 const RESULT_LIMIT: Duration = Duration::from_secs(30);
 const LAST_RESULT_LIMIT: Duration = Duration::from_secs(45);
 const END_LIMIT: Duration = Duration::from_secs(180);
+/// TAIKYOKU to INIT takes about 12 s while every seat is connected.
+const START_LIMIT: Duration = Duration::from_secs(60);
+/// A reconnect outlasts a proxy's failover (health checks run every 120 s).
+const RECONNECT_LIMIT: Duration = Duration::from_secs(300);
+/// Observed own queues reach about 13 minutes; past this an own reservation
+/// is presumed lost with its socket and the client is reloaded once.
+const RESERVATION_LIMIT: Duration = Duration::from_secs(15 * 60);
 const RETRY_WAIT: Duration = Duration::from_secs(3);
 const PRESS_LIMIT: u32 = 8;
 const LOOK: Duration = Duration::from_millis(humanize::END_LOOK_EVERY_MS);
@@ -186,6 +193,7 @@ enum Input {
     AutoWin,
     WebObserve,
     WebControl,
+    WebReload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +208,8 @@ pub enum Effect {
         ticket: Ticket,
         control: tenhou_web::Control,
     },
+    /// Reload the Tenhou client so an own stalled match can be resumed.
+    ReloadWeb(Ticket),
 }
 
 /// Final capture facts, read after hover. `table_visible` is positive pixel
@@ -559,7 +569,7 @@ impl Machine {
             return false;
         };
         let allowed = frame.stable_geometry && self.env.is_some_and(|env| match input {
-            Input::WebObserve | Input::WebControl => false,
+            Input::WebObserve | Input::WebControl | Input::WebReload => false,
             Input::Observe => false,
             Input::Screen(sight) => {
                 frame.sight == sight

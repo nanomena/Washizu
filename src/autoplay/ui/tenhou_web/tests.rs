@@ -243,7 +243,7 @@ fn reconnect_welcome_precedes_title_under_the_same_account_deadline_and_mouse_ow
         panic!("read expected")
     };
     h.ui.web_observed(ticket, None, h.now, &mut h.rng);
-    let original_deadline = h.now + RESULT_LIMIT;
+    let original_deadline = h.now + RECONNECT_LIMIT;
     h.env.generation.session += 1;
     h.sync();
     let splash = welcome("native-splash", "ID1234ABCD");
@@ -338,7 +338,7 @@ fn disconnect_confirmation_and_title_resume_share_one_deadline_across_reload() {
     ));
     h.observe_only(&title("reloaded-title", "ID1234ABCD"), 3);
     assert_eq!(h.sent.len(), 2);
-    h.now = confirmed_at + RESULT_LIMIT + Duration::from_secs(1);
+    h.now = confirmed_at + RECONNECT_LIMIT + Duration::from_secs(1);
     h.sync();
     assert_eq!(h.ui.waiting_reason(), Some(WaitingReason::ReconnectTimeout));
     assert!(h.ui.due().is_none());
@@ -462,7 +462,7 @@ fn same_game_reload_retains_only_resume_identity_and_unavailable_reads_are_bound
     h.ui.web_observed(ticket, None, h.now, &mut h.rng);
     assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
     h.press(&title("new-document", "ID1234ABCD"));
-    h.now += RESULT_LIMIT + Duration::from_secs(1);
+    h.now += RECONNECT_LIMIT + Duration::from_secs(1);
     h.sync();
     assert_eq!(h.ui.waiting_reason(), Some(WaitingReason::ReconnectTimeout));
     assert!(h.ui.due().is_none());
@@ -804,4 +804,204 @@ fn deadlines_and_changed_dispatch_limits_are_finite_without_a_requeue_loop() {
     assert_eq!(h.ui.waiting_reason(), Some(WaitingReason::PressLimit));
     assert!(h.ui.due().is_none());
     assert!(h.sent.is_empty());
+}
+
+fn own_lobby(requested: bool) -> Web3Observation {
+    let mut observation = lobby();
+    observation.account = Some("ID1234ABCD".into());
+    observation.lobby.as_mut().unwrap().reservation_requested = requested;
+    observation
+}
+
+/// Final -> own reservation -> the client's own queue flag.
+fn queued() -> Harness {
+    let mut h = Harness::new(Some(target()));
+    h.final_sent();
+    h.press(&own_lobby(false));
+    h.observe_only(&own_lobby(false), 2);
+    h.observe_only(&own_lobby(true), 2);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::ReservationPending));
+    h
+}
+
+fn reload_effect(h: &mut Harness) -> Ticket {
+    for _ in 0..1000 {
+        match h.next().expect("pending Web effect") {
+            Effect::ReloadWeb(ticket) => return ticket,
+            Effect::ObserveWeb(ticket) => {
+                let observation = popup("still-start", PopupTag::Start, 0);
+                h.ui.web_observed(ticket, Some(observation), h.now, &mut h.rng)
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        }
+    }
+    panic!("no reload requested")
+}
+
+#[test]
+fn a_reconnect_outlasts_a_proxy_failover_and_spends_each_new_control_once() {
+    let mut h = authenticated();
+    h.env.settings.quick_confirm = false;
+    h.env.settings.auto_continue = false;
+    let began = h.now;
+    // More rounds than a stage's press limit, past the old 30 s deadline.
+    for round in 0..PRESS_LIMIT {
+        let dialog = disconnected(&format!("closed-{round}"), "ID1234ABCD");
+        assert!(matches!(
+            h.press(&dialog),
+            Control::ConfirmDisconnect { .. }
+        ));
+        h.observe_only(&dialog, 2);
+        h.now += Duration::from_secs(4);
+        h.env.generation.session += 1;
+        h.sync();
+        assert!(matches!(
+            h.press(&title(&format!("title-{round}"), "ID1234ABCD")),
+            Control::Resume { .. }
+        ));
+        h.now += Duration::from_secs(4);
+        h.sync();
+        assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    }
+    assert_eq!(h.sent.len(), 2 * PRESS_LIMIT as usize);
+    assert!(h.now - began > RESULT_LIMIT * 2);
+    h.now += RECONNECT_LIMIT;
+    h.sync();
+    assert_eq!(h.ui.waiting_reason(), Some(WaitingReason::ReconnectTimeout));
+    assert!(h.ui.due().is_none());
+}
+
+#[test]
+fn a_page_reload_during_an_own_queue_resumes_the_saved_account() {
+    let mut h = queued();
+    h.env.generation.session += 1;
+    h.sync();
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    assert!(matches!(
+        h.press(&title("reloaded-title", "ID1234ABCD")),
+        Control::Resume { .. }
+    ));
+    // Tenhou rejoins the matched game: authentic StartGame and INIT.
+    h.ui.web_game_started(Some(1), Some(target()), h.now);
+    h.ui.table_started(None);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Table));
+    // A lobby after the resume still cannot authorize a new match.
+    let mut lost = queued();
+    lost.env.generation.session += 1;
+    lost.sync();
+    lost.press(&title("reloaded-title", "ID1234ABCD"));
+    lost.observe_only(&own_lobby(false), 3);
+    assert_eq!(lost.ui.waiting_reason(), Some(WaitingReason::Lobby));
+    let reserves = lost
+        .sent
+        .iter()
+        .filter(|c| matches!(c, Control::Reserve { .. }));
+    assert_eq!(reserves.count(), 1);
+}
+
+#[test]
+fn a_match_that_never_reaches_the_table_reloads_the_client_once_then_resumes() {
+    let mut h = queued();
+    let start = popup("announced", PopupTag::Start, 0);
+    h.observe_only(&start, 3);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::ReservationPending));
+    assert!(h.sent.iter().all(|c| !matches!(
+        c,
+        Control::Popup {
+            tag: PopupTag::Start,
+            ..
+        }
+    )));
+    let announced = h.now;
+    let ticket = reload_effect(&mut h);
+    assert!(h.now >= announced + START_LIMIT - Duration::from_secs(5));
+    assert!(h.now < announced + START_LIMIT + Duration::from_secs(5));
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    h.sync();
+    assert!(h.ui.consume_reload(ticket));
+    h.env.generation.session += 1; // the executor's invalidation, then the reload
+    h.sync();
+    h.ui.web_reloaded(ticket, true, h.now); // retired with the old session
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    assert!(matches!(
+        h.press(&title("reloaded-title", "ID1234ABCD")),
+        Control::Resume { .. }
+    ));
+    for _ in 0..10 {
+        let Some(Effect::ObserveWeb(ticket)) = h.next() else {
+            panic!("only reads follow the one reload")
+        };
+        let observation = title("reloaded-title", "ID1234ABCD");
+        h.ui.web_observed(ticket, Some(observation), h.now, &mut h.rng);
+    }
+    h.ui.web_game_started(Some(1), Some(target()), h.now);
+    h.ui.table_started(None);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Table));
+}
+
+#[test]
+fn a_normal_start_clears_the_matched_deadline_without_reloading() {
+    let mut h = queued();
+    h.observe_only(&popup("announced", PopupTag::Start, 0), 3);
+    h.ui.web_game_started(Some(2), Some(target()), h.now);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Starting));
+    h.ui.table_started(None);
+    h.now += START_LIMIT * 2;
+    h.sync();
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Table));
+}
+
+#[test]
+fn only_an_own_queue_past_its_limit_reloads_and_a_manual_queue_never_does() {
+    let mut h = queued();
+    let queued_at = h.now;
+    h.now = queued_at + RESERVATION_LIMIT - Duration::from_secs(5);
+    h.sync();
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::ReservationPending));
+    h.now = queued_at + RESERVATION_LIMIT + Duration::from_secs(1);
+    h.sync();
+    assert!(matches!(h.ui.tick(h.now), Some(Effect::ReloadWeb(_))));
+    // A fresh client's manual reservation carries no resume authority.
+    let mut fresh = Harness::new(Some(target()));
+    fresh.env.generation.session += 1;
+    fresh.sync();
+    fresh.observe_only(&own_lobby(true), 2);
+    assert_eq!(fresh.ui.phase(), Phase::Web(Stage::ReservationPending));
+    fresh.now += RESERVATION_LIMIT * 2;
+    fresh.observe_only(&popup("announced", PopupTag::Start, 0), 3);
+    fresh.observe_only(&own_lobby(true), 3);
+    assert_eq!(fresh.ui.phase(), Phase::Web(Stage::ReservationPending));
+}
+
+#[test]
+fn a_requested_reload_waits_for_manual_ownership_and_settings() {
+    let mut h = queued();
+    h.observe_only(&popup("announced", PopupTag::Start, 0), 1);
+    let ticket = reload_effect(&mut h);
+    h.env.manual = true;
+    h.env.generation.manual += 1;
+    h.sync();
+    assert!(!h.ui.consume_reload(ticket));
+    h.ui.web_reloaded(ticket, false, h.now);
+    assert!(h.ui.tick(h.now + START_LIMIT).is_none());
+    h.env.manual = false;
+    h.sync();
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    let again = reload_effect(&mut h);
+    h.env.settings.enabled = false;
+    h.env.generation.settings += 1;
+    h.sync();
+    assert!(!h.ui.consume_reload(again));
+    // A reload the client could not start is reported, never retried silently.
+    h.env.settings.enabled = true;
+    h.env.generation.settings += 1;
+    h.sync();
+    let third = reload_effect(&mut h);
+    h.sync();
+    assert!(h.ui.consume_reload(third));
+    h.ui.web_reloaded(third, false, h.now);
+    assert_eq!(
+        h.ui.waiting_reason(),
+        Some(WaitingReason::DispatchUnavailable)
+    );
 }

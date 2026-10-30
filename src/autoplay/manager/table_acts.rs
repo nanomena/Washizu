@@ -47,6 +47,35 @@ impl AutoplayManager {
                     });
                     info!(?control, ?result, "autoplay: Web UI mouse effect completed");
                 }
+                ui::Effect::ReloadWeb(ticket) => {
+                    let page = { self.ctx.page.read().await.clone() };
+                    self.sync_ui().await;
+                    let allowed = page.is_some()
+                        && self
+                            .ui_transition("Web reload permission", |ui| ui.consume_reload(ticket));
+                    let mut reloaded = false;
+                    if let (true, Some(page)) = (allowed, page) {
+                        let _ = self.notify.send(
+                            crate::schema::Notification::warn("Reloading the game").body(
+                                "The reserved match never reached the table; reconnecting to recover.",
+                            ),
+                        );
+                        self.ctx.invalidate_ui();
+                        match page.reload().await {
+                            Ok(_) => reloaded = true,
+                            Err(error) => tracing::warn!(%error, "autoplay: client reload failed"),
+                        }
+                        self.canvas.forget(&self.ctx).await;
+                    }
+                    self.sync_ui().await;
+                    self.ui_transition("Web reload", |ui| {
+                        ui.web_reloaded(ticket, reloaded, Instant::now())
+                    });
+                    info!(
+                        allowed,
+                        reloaded, "autoplay: Web client reload effect completed"
+                    );
+                }
                 ui::Effect::Observe(ticket) => {
                     let sight = self.look_at().await;
                     self.sync_ui().await;
