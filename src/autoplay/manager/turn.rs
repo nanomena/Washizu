@@ -8,7 +8,7 @@ use crate::autoplay::delay::{self, DecisionKind};
 use crate::autoplay::platform::{self, SiteAdapter, TurnClockFacts, TurnPlan};
 use crate::autoplay::pointer::{self, ApproachInput, Touch};
 use crate::autoplay::transaction::{
-    self, CancelReason, Effect, Facts, InputRequirement, Outcome, Owner,
+    self, CancelReason, Effect, Facts, InputRequirement, Observed, Outcome, Owner,
 };
 use crate::bot::control::WindowProof;
 use crate::config::{AppConfig, Platform};
@@ -168,8 +168,9 @@ impl AutoplayManager {
         action: MjaiEvent,
         plan: TurnPlan,
     ) {
-        let mut prepared = None;
         let mut viewport = None;
+        // The last distinct reason the site could not be read, logged once.
+        let mut unreadable: Option<String> = None;
         loop {
             let intent = { self.turn.lock().unwrap().intent() };
             let Some(intent) = intent else {
@@ -183,14 +184,16 @@ impl AutoplayManager {
             let observed = adapter
                 .observe(&page, &decision.context(&action), &intent, None)
                 .await;
-            let observation = match observed {
-                Ok(observation) => observation,
+            match &observed {
+                Ok(_) => unreadable = None,
                 Err(error) => {
-                    warn!(%error, "autoplay: target observation unavailable");
-                    self.turn.lock().unwrap().cancel(CancelReason::Target);
-                    return;
+                    let reason = format!("{error:#}");
+                    if unreadable.as_ref() != Some(&reason) {
+                        warn!(%reason, "autoplay: target observation unavailable");
+                        unreadable = Some(reason);
+                    }
                 }
-            };
+            }
             let current = facts(
                 &self.ctx,
                 &self.cfg,
@@ -200,15 +203,22 @@ impl AutoplayManager {
             )
             .await;
             let effect = {
+                let sight = match &observed {
+                    Ok(observation) => Observed::Seen(observation),
+                    Err(_) => Observed::Failed,
+                };
                 self.turn
                     .lock()
                     .unwrap()
-                    .next(&current, Some(&observation), Instant::now())
+                    .next(&current, sight, Instant::now())
             };
+            let layout = observed
+                .as_ref()
+                .ok()
+                .and_then(|observation| observation.layout.clone());
             match effect {
                 Effect::Observe => tokio::time::sleep(Duration::from_millis(20)).await,
                 Effect::YieldManual => {
-                    prepared = None;
                     self.hand.cancel();
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
@@ -218,12 +228,8 @@ impl AutoplayManager {
                     )
                     .await
                 }
-                Effect::Pace { clock } => {
-                    let Some(target) = observation.target.as_ref() else {
-                        self.turn.lock().unwrap().cancel(CancelReason::Target);
-                        continue;
-                    };
-                    if let Some(layout) = observation.layout.clone() {
+                Effect::Pace { clock, target } => {
+                    if let Some(layout) = layout.clone() {
                         self.hand.set_layout(layout);
                     }
                     let presses = plan.presses.len() as u32;
@@ -264,8 +270,7 @@ impl AutoplayManager {
                         pointer::aim::target(target.bounds, self.hand.at(), &mut rand::rng());
                     let glance = if pacing.hesitate {
                         if let MjaiEvent::Dahai { pai, .. } = &action {
-                            observation
-                                .layout
+                            layout
                                 .as_ref()
                                 .and_then(|layout| {
                                     decision
@@ -303,7 +308,6 @@ impl AutoplayManager {
                         )
                         .await
                     {
-                        prepared = None;
                         self.hand.cancel();
                         continue;
                     }
@@ -320,40 +324,31 @@ impl AutoplayManager {
                             .lock()
                             .unwrap()
                             .approach_failed(&current, Instant::now());
-                        prepared = None;
                         self.hand.cancel();
-                        continue;
                     }
-                    prepared = Some((target.identity.clone(), point));
                 }
                 Effect::Press {
                     permit,
                     target,
                     intent,
-                    retry,
+                    attempt,
                 } => {
-                    if let Some(layout) = observation.layout.clone() {
+                    if let Some(layout) = layout {
                         self.hand.set_layout(layout);
                     }
-                    let point = prepared
-                        .take()
-                        .filter(|(identity, _)| identity == &target.identity)
-                        .map(|(_, point)| point)
-                        .unwrap_or_else(|| {
-                            pointer::aim::target(target.bounds, self.hand.at(), &mut rand::rng())
-                        });
+                    let point = self.hand.press_point(target.bounds);
                     let touch = Touch {
                         hover_ms: decision.cfg.hover_delay_ms,
-                        hold_ms: if retry == 0 {
+                        hold_ms: if attempt == 0 {
                             decision.cfg.click_hold_ms
                         } else {
                             decision
                                 .cfg
                                 .click_hold_ms
-                                .saturating_mul(retry + 1)
+                                .saturating_mul(attempt + 1)
                                 .min(2_000)
                         },
-                        jiggle: matches!(action, MjaiEvent::Reach { .. }) || retry > 1,
+                        jiggle: matches!(action, MjaiEvent::Reach { .. }) || attempt > 1,
                     };
                     let ctx = self.ctx.clone();
                     let cfg = self.cfg.clone();
@@ -381,19 +376,17 @@ impl AutoplayManager {
                                     .await;
                                 let current =
                                     facts(&ctx, &cfg, &monitor, decision.platform, &turn).await;
-                                let Ok(observed) = observed else {
-                                    turn.lock().unwrap().cancel(CancelReason::Target);
-                                    return false;
-                                };
-                                let allowed = turn.lock().unwrap().consume(
+                                if let Err(error) = &observed {
+                                    warn!(%error, "autoplay: final target observation unavailable");
+                                }
+                                turn.lock().unwrap().consume(
                                     permit,
                                     &current,
-                                    &observed,
+                                    observed.as_ref().ok(),
                                     point,
                                     touch.hold_ms,
                                     Instant::now(),
-                                );
-                                allowed
+                                )
                             },
                         )
                         .await;
@@ -406,7 +399,7 @@ impl AutoplayManager {
                     viewport = Some(target.viewport);
                 }
                 Effect::Finished { outcome, reload } => {
-                    info!(?outcome, ?action, "autoplay: selected turn finished");
+                    info!(?outcome, ?action, unreadable = ?unreadable, "autoplay: selected turn finished");
                     if matches!(outcome, Outcome::ClientAccepted | Outcome::ServerConfirmed) {
                         if let Some(viewport) = viewport {
                             self.hand.rest_after(viewport, &action);
@@ -438,7 +431,7 @@ impl AutoplayManager {
                 self.turn
                     .lock()
                     .unwrap()
-                    .next(&current, None, Instant::now())
+                    .next(&current, Observed::Skipped, Instant::now())
             };
             if matches!(effect, Effect::Finished { .. } | Effect::YieldManual) {
                 return false;

@@ -32,13 +32,10 @@ use rand::Rng;
 use riichienv_core::action::{Action, ActionType};
 use riichienv_core::parser::tid_to_mjai;
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub struct MajsoulAutoplay {
     context: Arc<AutoplayContext>,
-    /// A measured safe region for the current physical control. Every reuse
-    /// still requires fresh pixels to contain it; this owns no UI phase.
-    meld_geometry: Mutex<Option<InputTarget>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,52 +59,24 @@ struct MeldChoice {
 
 impl MajsoulAutoplay {
     pub fn new(context: Arc<AutoplayContext>) -> Self {
-        Self {
-            context,
-            meld_geometry: Mutex::new(None),
-        }
+        Self { context }
     }
+}
 
-    fn measured_meld_target(
-        &self,
-        identity: TargetIdentity,
-        viewport: CanvasRect,
-        face: CanvasRect,
-        actual: Option<(f64, f64)>,
-    ) -> Option<InputTarget> {
-        let contains = |outer: CanvasRect, inner: CanvasRect| {
-            outer.contains(inner.x, inner.y)
-                && outer.contains(inner.x + inner.width, inner.y + inner.height)
-        };
-        let mut cache = self.meld_geometry.lock().ok()?;
-        if let Some(saved) = cache
-            .as_ref()
-            .filter(|saved| saved.identity == identity && saved.viewport == viewport)
-        {
-            if contains(face, saved.bounds) {
-                return actual
-                    .is_none_or(|point| saved.bounds.contains(point.0, point.1))
-                    .then(|| saved.clone());
-            }
-        }
-        // The final probe may validate an already bound region, never invent
-        // a replacement after the pointer has reached an old location.
-        if actual.is_some() {
-            return None;
-        }
-        let target = InputTarget {
-            identity,
-            viewport,
-            bounds: CanvasRect {
-                x: face.x + face.width * 0.22,
-                y: face.y + face.height * 0.28,
-                width: face.width * 0.56,
-                height: face.height * 0.38,
-            },
-        };
-        tracing::info!(control=%target.identity.control, bounds=?target.bounds, "autoplay: bound rendered meld target");
-        *cache = Some(target.clone());
-        Some(target)
+/// A measured meld face as this frame shows it: the whole face is the hit
+/// region, its glyph-centred interior the aim. Whether it is at rest is the
+/// turn controller's judgement across reads.
+fn meld_target(identity: TargetIdentity, viewport: CanvasRect, face: CanvasRect) -> InputTarget {
+    InputTarget {
+        identity,
+        viewport,
+        bounds: CanvasRect {
+            x: face.x + face.width * 0.22,
+            y: face.y + face.height * 0.28,
+            width: face.width * 0.56,
+            height: face.height * 0.38,
+        },
+        hit: face,
     }
 }
 
@@ -373,8 +342,8 @@ impl SiteAdapter for MajsoulAutoplay {
                 control,
             };
             observation.target_kind = kind;
-            observation.target = self.measured_meld_target(identity, view.viewport, face, actual);
-            observation.ready = observation.target.is_some();
+            observation.target = Some(meld_target(identity, view.viewport, face));
+            observation.ready = true;
             return Ok(observation);
         }
         let selected = match intent.role {
@@ -441,6 +410,7 @@ impl SiteAdapter for MajsoulAutoplay {
                 control: format!("{:?}:{}:{}", intent.role, point.0, point.1),
             },
             bounds,
+            hit: bounds,
             viewport: view.viewport,
         });
         observation.ready = true;
@@ -1275,8 +1245,7 @@ mod tests {
         );
     }
     #[test]
-    fn measured_meld_geometry_requires_fresh_containment_and_preserves_random_aim() {
-        let adapter = MajsoulAutoplay::new(Arc::new(AutoplayContext::new()));
+    fn a_measured_meld_face_is_the_hit_region_and_its_interior_the_varied_aim() {
         let identity = TargetIdentity {
             window: "current".into(),
             hand: vec!["4m".into(), "5mr".into()],
@@ -1294,39 +1263,24 @@ mod tests {
             width: 55.,
             height: 85.,
         };
-        let bound = adapter
-            .measured_meld_target(identity.clone(), viewport, face, None)
-            .unwrap();
+        let target = meld_target(identity, viewport, face);
+        assert_eq!(target.hit, face);
         let mut rng = rand::rng();
         let points: Vec<_> = (0..200)
-            .map(|_| crate::autoplay::pointer::aim::target(bound.bounds, None, &mut rng))
+            .map(|_| crate::autoplay::pointer::aim::target(target.bounds, None, &mut rng))
             .collect();
         assert!(points.iter().all(|p| face.contains(p.0, p.1)));
         assert!(points.windows(2).any(|p| (p[0].0 - p[1].0).abs() > 1.));
-        let hover_face = CanvasRect {
-            y: face.y - 10.,
-            ..face
-        };
-        for point in points {
-            assert_eq!(
-                adapter.measured_meld_target(identity.clone(), viewport, hover_face, Some(point)),
-                Some(bound.clone())
-            );
-        }
-        let gone = CanvasRect {
-            x: face.x + 100.,
-            ..face
-        };
-        assert!(adapter
-            .measured_meld_target(identity.clone(), viewport, gone, Some((420., 490.)))
-            .is_none());
-        let replaced = TargetIdentity {
-            window: "replaced".into(),
-            ..identity
-        };
-        assert!(adapter
-            .measured_meld_target(replaced, viewport, face, Some((420., 490.)))
-            .is_none());
+        // Hover lifts the face; a point aimed before it is still on it.
+        let hovered = meld_target(
+            target.identity.clone(),
+            viewport,
+            CanvasRect {
+                y: face.y - 10.,
+                ..face
+            },
+        );
+        assert!(points.iter().all(|p| hovered.hit.contains(p.0, p.1)));
     }
     #[test]
     fn actual_hand_layout_keeps_red_and_drawn_identity_in_viewport_css_pixels() {

@@ -1,8 +1,9 @@
 //! Shared browser autoplay runtime.
 //!
-//! SiteAdapter normalizes real observations and exact physical targets.
-//! TurnController owns preparation, readiness, pacing, one-use mouse permits,
-//! confirmations, retries and cancellation for the coordinator-selected action.
+//! SiteAdapter normalizes each real observation and exact physical target.
+//! TurnController owns whether a control is at rest, pacing, one-use mouse
+//! permits, confirmations, retries and cancellation for the
+//! coordinator-selected action.
 //! PacingPolicy chooses one absolute schedule; PointerController executes all
 //! browser travel, hover, press and release. UI Machine separately owns lobby,
 //! result and continuation-page effects. Forecasts only feed that same pointer.

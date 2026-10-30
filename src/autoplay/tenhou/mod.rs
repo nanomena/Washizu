@@ -290,6 +290,7 @@ impl SiteAdapter for TenhouAutoplay {
                 control: target.identity,
             },
             bounds: target.bounds,
+            hit: target.bounds,
             viewport: target.viewport,
         });
         observation.ready = true;
