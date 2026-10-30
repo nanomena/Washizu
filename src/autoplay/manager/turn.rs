@@ -324,7 +324,7 @@ impl AutoplayManager {
                         self.hand.cancel();
                         continue;
                     }
-                    prepared = Some((target.identity.clone(), point));
+                    prepared = Some((target.clone(), point));
                 }
                 Effect::Press {
                     permit,
@@ -337,7 +337,9 @@ impl AutoplayManager {
                     }
                     let point = prepared
                         .take()
-                        .filter(|(identity, _)| identity == &target.identity)
+                        .filter(|(bound, point)| {
+                            bound == &target && target.bounds.contains(point.0, point.1)
+                        })
                         .map(|(_, point)| point)
                         .unwrap_or_else(|| {
                             pointer::aim::target(target.bounds, self.hand.at(), &mut rand::rng())

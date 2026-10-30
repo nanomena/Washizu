@@ -518,6 +518,28 @@ impl TurnController {
             run.phase = Phase::Dispatching;
         } else if run.manual_interruption(facts, now) {
             run.pause_manual();
+        } else if !run.committed
+            && facts.enabled
+            && !facts.manual
+            && facts.owner == run.binding.owner
+            && facts.context == Some(run.binding.context)
+            && facts.window.as_deref() == Some(&run.binding.window)
+            && facts.input == run.binding.input
+            && now + Duration::from_millis(u64::from(remaining_ms)) < run.deadline
+            && observation.target.as_ref().is_none_or(|target| {
+                observation.target_kind == run.kind
+                    && valid_rect(target.bounds)
+                    && run.target.as_ref().is_some_and(|old| {
+                        old.identity == target.identity && old.viewport == target.viewport
+                    })
+            })
+        {
+            // This guard runs before mouse-down. Retire the old permission,
+            // then require a fresh positive target under the same request,
+            // input ticket and original clock. This is not a dispatched retry.
+            run.permit = None;
+            run.phase = Phase::WaitingReady;
+            tracing::info!(context=?run.binding.context, "autoplay: target changed before mouse-down; observing a fresh target");
         } else {
             run.finish(Outcome::Cancelled(CancelReason::Target));
         }
@@ -658,7 +680,11 @@ impl Run {
             }
         }
         if let Some(previous) = &self.target {
-            if previous != target {
+            if previous != target
+                && (self.committed
+                    || previous.identity != target.identity
+                    || previous.viewport != target.viewport)
+            {
                 return false;
             }
         }

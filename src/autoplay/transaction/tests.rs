@@ -954,6 +954,8 @@ fn final_mouse_permission_rechecks_every_owner_context_input_and_physical_target
             assert!(!h.controller.dispatched(permit, true, &h.facts, h.now));
             if change == 1 || change == 5 {
                 assert_eq!(h.controller.phase(), Some(Phase::PausedManual));
+            } else if change == 11 {
+                assert_eq!(h.controller.phase(), Some(Phase::WaitingReady));
             } else {
                 assert!(matches!(
                     h.controller.phase(),
@@ -961,6 +963,95 @@ fn final_mouse_permission_rechecks_every_owner_context_input_and_physical_target
                 ));
             }
         }
+    }
+}
+
+#[test]
+fn same_control_geometry_can_settle_during_pacing_without_restarting_the_clock() {
+    for site in ["canvas", "dom"] {
+        let action = MjaiEvent::Chi {
+            actor: 0,
+            target: 3,
+            pai: "9m".into(),
+            consumed: ["7m".into(), "8m".into()],
+        };
+        let mut h = Harness::new(
+            site,
+            action.clone(),
+            vec![press(
+                PressRole::Action,
+                &action,
+                Confirmation::ClientCommand,
+            )],
+        );
+        h.observation.target.as_mut().unwrap().viewport = rect(0., 0., 1280., 720.);
+        h.observation.target.as_mut().unwrap().bounds = rect(696.17, 536.14, 27.16, 9.69);
+        assert!(matches!(h.next(), Effect::Pace { .. }));
+        assert!(h.controller.paced(h.now));
+        let deadline = h.controller.run.as_ref().unwrap().deadline;
+        h.observation.target.as_mut().unwrap().bounds = rect(654.33, 531.3, 28.84, 13.3);
+        let Effect::Press {
+            permit: old,
+            target,
+            ..
+        } = h.next()
+        else {
+            panic!("fresh physical target expected")
+        };
+        assert_eq!(target.bounds, h.observation.target.as_ref().unwrap().bounds);
+        assert!(!h
+            .controller
+            .consume(old, &h.facts, &h.observation, (710., 541.), 100, h.now));
+        assert_eq!(h.controller.phase(), Some(Phase::WaitingReady));
+        assert!(!h.controller.dispatched(old, true, &h.facts, h.now));
+        let permit = h.permit();
+        assert!(!h
+            .controller
+            .consume(old, &h.facts, &h.observation, (668., 537.), 100, h.now));
+        assert!(h
+            .controller
+            .consume(permit, &h.facts, &h.observation, (668., 537.), 100, h.now));
+        assert!(h.controller.dispatched(permit, true, &h.facts, h.now));
+        assert_eq!(h.controller.run.as_ref().unwrap().deadline, deadline);
+        h.command(InputKind::Other);
+        assert_eq!(h.outcome(), Outcome::ClientAccepted);
+    }
+}
+
+#[test]
+fn lost_final_geometry_requires_a_new_positive_target_and_cannot_replay_a_sent_press() {
+    for site in ["canvas", "dom"] {
+        let action = discard();
+        let mut h = Harness::new(
+            site,
+            action.clone(),
+            vec![press(
+                PressRole::Discard,
+                &action,
+                Confirmation::ClientCommand,
+            )],
+        );
+        let old = h.permit();
+        let original = h.observation.target.take().unwrap();
+        h.observation.ready = false;
+        assert!(!h
+            .controller
+            .consume(old, &h.facts, &h.observation, (125., 530.), 100, h.now));
+        assert_eq!(h.controller.phase(), Some(Phase::WaitingReady));
+        assert!(matches!(h.next(), Effect::Observe));
+        h.observation.target = Some(InputTarget {
+            bounds: rect(130., 500., 50., 75.),
+            ..original
+        });
+        h.observation.ready = true;
+        let fresh = h.permit();
+        assert!(h
+            .controller
+            .consume(fresh, &h.facts, &h.observation, (155., 530.), 100, h.now));
+        assert!(h.controller.dispatched(fresh, true, &h.facts, h.now));
+        h.now += Duration::from_millis(101);
+        h.observation.target.as_mut().unwrap().bounds.x += 20.;
+        assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Target));
     }
 }
 
