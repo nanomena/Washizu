@@ -439,6 +439,7 @@ mod tests {
         let input = InputSnapshot {
             _client: ClientTag::Web3,
             ready: true,
+            blocked: None,
             window: Some("doc:1".into()),
             hand: vec![16, 17, 18, 19],
             clock: None,
