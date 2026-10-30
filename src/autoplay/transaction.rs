@@ -548,6 +548,12 @@ impl TurnController {
         }
         let (aim, kind) = (aim.clone(), *kind);
         match run.validity(facts, now) {
+            // A retry's probe can meet the late receipt of the earlier press.
+            Validity::Invalid(CancelReason::Input) if run.committed && facts.command => {
+                self.dead_clicks = 0;
+                run.finish(Outcome::ClientAccepted);
+                return false;
+            }
             Validity::Invalid(reason) => {
                 run.finish(Outcome::Cancelled(reason));
                 return false;

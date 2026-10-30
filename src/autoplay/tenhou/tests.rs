@@ -98,6 +98,53 @@ fn incomplete_or_incorrect_riichi_does_not_issue_a_declaration() {
     }
 }
 #[test]
+fn accepted_riichi_leaves_a_plain_draw_to_the_client_but_answers_a_win_or_kan_offer() {
+    use riichienv_core::action::Action;
+    let action = MjaiEvent::Dahai {
+        actor: 0,
+        pai: "5m".into(),
+        tsumogiri: true,
+    };
+    let mut st = state(&[17, 0, 19]);
+    st.in_riichi = true;
+    st.window.as_mut().unwrap().ops = 0;
+    let discard = Action::new(ActionType::Discard, Some(19), vec![], Some(0));
+    let presses = |legal: &[Action], accepted: bool| {
+        semantic_plan(
+            &ActionContext {
+                action: &action,
+                snapshot: Some(&snapshot()),
+                legal_actions: legal,
+                our_seat: 0,
+                last_kawa_tile: None,
+                last_self_tsumo: None,
+                self_riichi_accepted: accepted,
+                num_players: 4,
+                pointer: None,
+            },
+            &st,
+        )
+        .presses
+        .len()
+    };
+    // 240 such discards across 31 runs: the client sent every one itself.
+    assert_eq!(presses(std::slice::from_ref(&discard), true), 0);
+    for offer in [ActionType::Tsumo, ActionType::Ankan] {
+        let legal = [discard.clone(), Action::new(offer, None, vec![], Some(0))];
+        assert_eq!(
+            presses(&legal, true),
+            1,
+            "{offer:?} keeps the client waiting"
+        );
+    }
+    assert_eq!(presses(std::slice::from_ref(&discard), false), 1);
+    assert_eq!(
+        presses(&[], true),
+        1,
+        "an unknown legal set keeps the press"
+    );
+}
+#[test]
 fn accepted_riichi_still_plans_a_discard_but_invalid_windows_and_other_actors_do_not() {
     let action = MjaiEvent::Dahai {
         actor: 0,

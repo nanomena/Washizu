@@ -1193,6 +1193,24 @@ fn a_win_that_closes_the_round_after_our_command_is_accepted() {
 }
 
 #[test]
+fn a_late_receipt_meeting_a_retry_probe_is_accepted_without_a_second_press() {
+    // 2026-10-30 02:36: a win request arrived 330 ms after its press, while
+    // the retry was already aiming at the same button.
+    let (action, presses) = one_discard();
+    let mut h = Harness::new("canvas", action, presses);
+    h.dispatch();
+    h.now += Duration::from_millis(101);
+    let retry = h.permit();
+    h.command(InputKind::Discard);
+    assert!(
+        !h.consume(retry),
+        "the late receipt withholds the retry press"
+    );
+    assert!(!h.controller.dispatched(retry, false, &h.facts, h.now));
+    assert_eq!(h.outcome(), Outcome::ClientAccepted);
+}
+
+#[test]
 fn a_closed_candidate_menu_is_reopened_within_the_same_attempt_budget() {
     let action = MjaiEvent::Chi {
         actor: 0,

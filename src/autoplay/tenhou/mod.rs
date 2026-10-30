@@ -10,6 +10,7 @@ use crate::autoplay::tenhou_state::TenhouState;
 use crate::schema::MjaiEvent;
 use anyhow::{anyhow, Result};
 use chromiumoxide::page::Page;
+use riichienv_core::action::ActionType;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -143,6 +144,16 @@ fn semantic_plan(ctx: &ActionContext<'_>, state: &TenhouState) -> TurnPlan {
         })
     };
     match ctx.action {
+        // After our riichi is accepted the client discards each draw by
+        // itself, unless a win or kan is also legal and it waits for us.
+        MjaiEvent::Dahai {
+            tsumogiri: true, ..
+        } if ctx.self_riichi_accepted
+            && !ctx.legal_actions.is_empty()
+            && ctx
+                .legal_actions
+                .iter()
+                .all(|legal| legal.action_type == ActionType::Discard) => {}
         MjaiEvent::Dahai { .. } => {
             if discard_tile(ctx.action, state).is_none() {
                 return plan;
