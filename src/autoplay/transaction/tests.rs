@@ -1019,7 +1019,7 @@ fn same_control_geometry_can_settle_during_pacing_without_restarting_the_clock()
 }
 
 #[test]
-fn lost_final_geometry_requires_a_new_positive_target_and_cannot_replay_a_sent_press() {
+fn lost_geometry_and_an_unconfirmed_click_reacquire_only_within_the_retry_budget() {
     for site in ["canvas", "dom"] {
         let action = discard();
         let mut h = Harness::new(
@@ -1051,7 +1051,62 @@ fn lost_final_geometry_requires_a_new_positive_target_and_cannot_replay_a_sent_p
         assert!(h.controller.dispatched(fresh, true, &h.facts, h.now));
         h.now += Duration::from_millis(101);
         h.observation.target.as_mut().unwrap().bounds.x += 20.;
-        assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Target));
+        let Effect::Press {
+            permit: retry,
+            retry: attempt,
+            ..
+        } = h.next()
+        else {
+            panic!("an unconfirmed click may retry on freshly measured geometry")
+        };
+        assert_eq!(attempt, 1);
+        assert!(h
+            .controller
+            .consume(retry, &h.facts, &h.observation, (175., 530.), 100, h.now));
+        assert!(h.controller.dispatched(retry, true, &h.facts, h.now));
+        h.command(InputKind::Discard);
+        assert_eq!(h.outcome(), Outcome::ClientAccepted);
+    }
+}
+
+#[test]
+fn fresh_geometry_does_not_reset_the_unconfirmed_click_retry_limit() {
+    for site in ["canvas", "dom"] {
+        let action = discard();
+        let mut h = Harness::new(
+            site,
+            action.clone(),
+            vec![press(
+                PressRole::Discard,
+                &action,
+                Confirmation::ClientCommand,
+            )],
+        );
+        h.dispatch();
+        let deadline = h.controller.run.as_ref().unwrap().deadline;
+        for expected in 1..=2 {
+            h.now += Duration::from_millis(101);
+            h.observation.target.as_mut().unwrap().bounds.x += 20.;
+            let Effect::Press {
+                permit,
+                target,
+                retry,
+                ..
+            } = h.next()
+            else {
+                panic!("retry expected")
+            };
+            assert_eq!(retry, expected);
+            let point = (target.bounds.x + 25., target.bounds.y + 30.);
+            assert!(h
+                .controller
+                .consume(permit, &h.facts, &h.observation, point, 100, h.now));
+            assert!(h.controller.dispatched(permit, true, &h.facts, h.now));
+            assert_eq!(h.controller.run.as_ref().unwrap().deadline, deadline);
+        }
+        h.now += Duration::from_millis(101);
+        h.observation.target.as_mut().unwrap().bounds.x += 20.;
+        assert_eq!(h.outcome(), Outcome::Cancelled(CancelReason::Unconfirmed));
     }
 }
 

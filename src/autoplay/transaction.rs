@@ -518,7 +518,7 @@ impl TurnController {
             run.phase = Phase::Dispatching;
         } else if run.manual_interruption(facts, now) {
             run.pause_manual();
-        } else if !run.committed
+        } else if (!run.committed || run.retries > 0)
             && facts.enabled
             && !facts.manual
             && facts.owner == run.binding.owner
@@ -681,7 +681,7 @@ impl Run {
         }
         if let Some(previous) = &self.target {
             if previous != target
-                && (self.committed
+                && ((self.committed && self.retries == 0)
                     || previous.identity != target.identity
                     || previous.viewport != target.viewport)
             {
