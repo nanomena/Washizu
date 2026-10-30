@@ -124,6 +124,15 @@ impl PointerController {
         self.at
     }
 
+    /// Where to press a control: where the pointer already is when that is
+    /// on it (the approach brought it there), else a fresh point on it.
+    pub fn press_point(&self, bounds: CanvasRect) -> Point {
+        match self.at {
+            Some(at) if bounds.contains(at.0, at.1) => at,
+            at => super::aim::target(bounds, at, &mut rand::rng()),
+        }
+    }
+
     /// Go on from where the user's own mouse left the pointer, if it has
     /// since autoplay last moved it: the page's pointer is there now, and a
     /// move from anywhere else would start with a jump.

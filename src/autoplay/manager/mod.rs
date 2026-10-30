@@ -515,7 +515,7 @@ mod admission_tests {
         ));
         assert_eq!(
             manager.turn.lock().unwrap().phase(),
-            Some(crate::autoplay::transaction::Phase::Preparing)
+            Some(crate::autoplay::transaction::Phase::Aiming)
         );
         let mut stale = reply;
         stale.request.as_mut().unwrap().context.event_seq -= 1;
@@ -601,7 +601,7 @@ mod admission_tests {
         ));
         assert_eq!(
             manager.turn.lock().unwrap().phase(),
-            Some(crate::autoplay::transaction::Phase::Preparing)
+            Some(crate::autoplay::transaction::Phase::Aiming)
         );
         assert_eq!(manager.state.last_self_tsumo.as_deref(), Some("N"));
     }

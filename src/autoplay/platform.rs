@@ -20,8 +20,11 @@ pub struct TargetIdentity {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputTarget {
     pub identity: TargetIdentity,
-    /// Actual target bounds and containing play surface in viewport CSS pixels.
+    /// Where a press is aimed, in viewport CSS pixels: a safe interior of `hit`.
     pub bounds: CanvasRect,
+    /// The whole rendered control. The final probe requires the pointer here.
+    pub hit: CanvasRect,
+    /// The containing play surface.
     pub viewport: CanvasRect,
 }
 

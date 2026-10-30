@@ -221,7 +221,7 @@ fn unclickable_target_keeps_the_real_clock_without_creating_input_permission() {
 fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_is_gone() {
     use crate::autoplay::context::CanvasRect;
     use crate::autoplay::transaction::{
-        Binding, Effect, Facts, Owner, Phase as TurnPhase, Settings, TurnController,
+        Binding, Effect, Facts, Observed, Owner, Phase as TurnPhase, Settings, TurnController,
     };
     use crate::autoplay::verify::{InputKind, InputWatch};
     let now = Instant::now();
@@ -256,6 +256,7 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
             control: "native-reach-button".into(),
         },
         bounds: rect,
+        hit: rect,
         viewport: raw.viewport,
     });
     observation.ready = true;
@@ -303,17 +304,23 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
         },
         now
     ));
+    // The first read only shows the button; the second shows it at rest.
     assert!(matches!(
-        controller.next(&facts, Some(&observation), now),
+        controller.next(&facts, Observed::Seen(&observation), now),
+        Effect::Observe
+    ));
+    assert!(matches!(
+        controller.next(&facts, Observed::Seen(&observation), now),
         Effect::Pace { .. }
     ));
     assert!(controller.paced(now));
-    let Effect::Press { permit, .. } = controller.next(&facts, Some(&observation), now) else {
+    let Effect::Press { permit, .. } = controller.next(&facts, Observed::Seen(&observation), now)
+    else {
         panic!("declaration target must be permitted");
     };
-    assert!(controller.consume(permit, &facts, &observation, (125.0, 420.0), 100, now));
+    assert!(controller.consume(permit, &facts, Some(&observation), (125.0, 420.0), 100, now));
     assert!(controller.dispatched(permit, true, &facts, now));
-    assert_eq!(controller.phase(), Some(TurnPhase::WaitingDeclaration));
+    assert_eq!(controller.phase(), Some(TurnPhase::AwaitingDeclaration));
     assert_eq!(controller.intent().unwrap().role, PressRole::Declaration);
     // Real own REACH, not an invented follow-up event; no declaration button
     // remains in the new native input window.
@@ -347,11 +354,11 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
         },
     ));
     assert!(matches!(
-        controller.next(&facts, Some(&observation), now),
+        controller.next(&facts, Observed::Seen(&observation), now),
         Effect::Observe
     ));
     assert_eq!(controller.intent().unwrap().role, PressRole::Discard);
-    assert_ne!(controller.phase(), Some(TurnPhase::WaitingDeclaration));
+    assert_ne!(controller.phase(), Some(TurnPhase::AwaitingDeclaration));
     // The declaring discard receives its own permit under the real step-1
     // window, with no acceptance flag and no second decision source.
     facts.command = false;
@@ -364,16 +371,22 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
             control: "native-tile-19".into(),
         },
         bounds: rect,
+        hit: rect,
         viewport: raw.viewport,
     });
-    let Effect::Press { permit, .. } = controller.next(&facts, Some(&discard), now) else {
+    assert!(matches!(
+        controller.next(&facts, Observed::Seen(&discard), now),
+        Effect::Observe
+    ));
+    let Effect::Press { permit, .. } = controller.next(&facts, Observed::Seen(&discard), now)
+    else {
         panic!("declaring discard permit")
     };
-    assert!(controller.consume(permit, &facts, &discard, (125.0, 420.0), 100, now));
+    assert!(controller.consume(permit, &facts, Some(&discard), (125.0, 420.0), 100, now));
     assert!(controller.dispatched(permit, true, &facts, now));
     assert!(
         matches!(
-            controller.next(&facts, Some(&discard), now),
+            controller.next(&facts, Observed::Seen(&discard), now),
             Effect::Observe
         ),
         "dispatch alone does not prove acceptance"
@@ -382,7 +395,7 @@ fn real_declaration_facts_advance_the_common_owner_while_the_declaration_target_
     facts.input = watch.ticket();
     facts.command = true;
     assert!(matches!(
-        controller.next(&facts, Some(&discard), now),
+        controller.next(&facts, Observed::Seen(&discard), now),
         Effect::Finished {
             outcome: crate::autoplay::transaction::Outcome::ClientAccepted,
             ..
