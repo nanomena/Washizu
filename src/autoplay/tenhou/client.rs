@@ -80,6 +80,9 @@ pub struct InputSnapshot {
     #[serde(rename = "client")]
     _client: ClientTag,
     pub ready: bool,
+    /// The first native input gate that failed, when not ready. For logs only.
+    #[serde(deserialize_with = "required_nullable")]
+    pub blocked: Option<String>,
     #[serde(deserialize_with = "required_nullable")]
     pub window: Option<String>,
     pub hand: Vec<u32>,
@@ -436,6 +439,7 @@ mod tests {
         let input = InputSnapshot {
             _client: ClientTag::Web3,
             ready: true,
+            blocked: None,
             window: Some("doc:1".into()),
             hand: vec![16, 17, 18, 19],
             clock: None,
@@ -509,7 +513,7 @@ mod tests {
 
     #[test]
     fn geometry_and_probe_contracts_are_required_and_bounded() {
-        let value = json!({"client":"web3","ready":false,"window":null,"clock":null,"hand":[16],"tiles":[
+        let value = json!({"client":"web3","ready":false,"blocked":"no-hand","window":null,"clock":null,"hand":[16],"tiles":[
             {"identity":"tile:16","tile":16,"drawn":false,"legal":false,"bounds":{"x":10,"y":20,"width":30,"height":40}}
         ],"offers":[],"viewport":{"x":0,"y":0,"width":800,"height":600},"nextDraw":null,"rest":null});
         assert!(serde_json::from_value::<InputSnapshot>(value.clone())

@@ -83,11 +83,21 @@ pub fn window_identity(proof: crate::bot::control::WindowProof) -> String {
 
 pub struct SiteObservation {
     pub ready: bool,
+    /// Why no target is reported, for logs only. It grants or denies nothing.
+    pub blocked: Option<String>,
     pub target_kind: TargetKind,
     pub target: Option<InputTarget>,
     pub layout: Option<PointerLayout>,
     pub clock: Option<TurnClockFacts>,
     pub continuation: Option<DeclarationFacts>,
+}
+
+impl SiteObservation {
+    /// This observation without a target, and why.
+    pub fn because(mut self, reason: impl Into<String>) -> Self {
+        self.blocked = Some(reason.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

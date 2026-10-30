@@ -55,18 +55,21 @@
   function inputSnapshot() {
     const epoch = native.epoch();
     const hand = live() ? handSnapshot() : null;
-    const unavailable = { client: 'web3', ready: false, window: null, hand: hand || [], offers: [] };
-    if (!live() || !hand || !native.input.phaseReady() || native.modal() || popupBlocksInput() || !native.clock.mounted()) return { dto: unavailable, entries: [] };
+    // `blocked` names the first input gate that failed, for the host's logs only.
+    const unavailable = { client: 'web3', ready: false, blocked: null, window: null, hand: hand || [], offers: [] };
+    const gate = !live() ? 'not-live' : !hand ? 'no-hand' : !native.input.phaseReady() ? 'phase'
+      : native.modal() ? 'modal' : popupBlocksInput() ? 'popup' : !native.clock.mounted() ? 'no-clock' : null;
+    if (gate) return { dto: { ...unavailable, blocked: gate }, entries: [] };
     const target = native.clock.target();
     const source = native.menu.offers();
-    if (!source || typeof source !== 'object') return { dto: unavailable, entries: [] };
+    if (!source || typeof source !== 'object') return { dto: { ...unavailable, blocked: 'no-menu' }, entries: [] };
     // A real timer is independent of whether a tile is currently clickable.
     // Keep its identity while waiting for native input readiness; this grants
     // no input permission and must never restart the clock on a later probe.
     const window = documentId + ':input:' + epoch;
     const discardReady = ownTarget(target);
     const responseReady = target === native.menu.responseTarget() && Object.prototype.hasOwnProperty.call(source, '2360326');
-    if (!discardReady && !responseReady) return { dto: { ...unavailable, window }, entries: [] };
+    if (!discardReady && !responseReady) return { dto: { ...unavailable, blocked: 'not-our-input', window }, entries: [] };
     const entries = [];
     for (const [key, original] of Object.entries(source)) {
       if (!/^[0-9]+$/.test(key) || !u32(Number(key))) continue;
@@ -74,9 +77,9 @@
       if (!payload) continue;
       entries.push({ code: Number(key), original, payload, identity: window + ':offer:' + key + ':' + canonical(payload) });
     }
-    if (native.epoch() !== epoch) return { dto: unavailable, entries: [] };
+    if (native.epoch() !== epoch) return { dto: { ...unavailable, blocked: 'epoch' }, entries: [] };
     return {
-      dto: { client: 'web3', ready: true, window, hand, offers: entries.map(({ identity, payload }) => ({ identity, payload })) },
+      dto: { client: 'web3', ready: true, blocked: null, window, hand, offers: entries.map(({ identity, payload }) => ({ identity, payload })) },
       entries, discardReady, epoch,
     };
   }
