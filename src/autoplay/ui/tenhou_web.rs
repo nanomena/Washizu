@@ -318,8 +318,8 @@ impl Run {
             {
                 return None;
             }
-            let account = self.resume_account.as_ref()?;
-            if observation.account.as_ref() != Some(account) {
+            let account = self.resume_account.clone()?;
+            if observation.account.as_ref() != Some(&account) {
                 self.resume_account = None;
                 self.stop(WaitingReason::OwnershipChanged);
                 return None;
@@ -333,15 +333,15 @@ impl Run {
             }
             return Some(Control::ConfirmDisconnect {
                 identity: dialog.identity.clone(),
-                account: account.clone(),
+                account,
             });
         }
         if let Some(title) = &observation.title {
             if observation.popup.is_some() || observation.lobby.is_some() {
                 return None;
             }
-            let account = self.resume_account.as_ref()?;
-            if observation.account.as_ref() != Some(account) {
+            let account = self.resume_account.clone()?;
+            if observation.account.as_ref() != Some(&account) {
                 self.resume_account = None;
                 self.stop(WaitingReason::OwnershipChanged);
                 return None;
@@ -352,7 +352,7 @@ impl Run {
             }
             return Some(Control::Resume {
                 identity: title.identity.clone(),
-                account: account.clone(),
+                account,
             });
         }
         if let Some(popup) = &observation.popup {
