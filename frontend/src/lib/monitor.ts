@@ -347,9 +347,9 @@ function triggerLabel(e: MjaiEvent, t: Table): string {
 /** Why a suggestion that never met a contradicting move is no longer current. */
 function staleReason(s: MonitorSnapshot): string {
   if (s.sync_error) return tr('牌局同步异常，已作废')
-  if (s.service === 'error') return tr('模型服务异常，已作废')
+  if (s.service === 'error') return tr('引擎异常，已作废')
   if (s.capture.state !== 'running') return tr('采集未运行，已作废')
-  if (s.bot.state !== 'ready') return tr('Bot 未就绪，已作废')
+  if (s.bot.state !== 'ready') return tr('引擎连接未就绪，已作废')
   if (s.round_ended) return tr('本局已结束，不再有效')
   return tr('牌局已推进，不再有效')
 }
@@ -426,11 +426,11 @@ export function healthOf(s: MonitorSnapshot | null): Health[] {
   return [
     { key: 'capture', name: tr('采集'), detail: capture.state === 'error' ? capture.error : null,
       ...({ running: { tone: 'ok', state: tr('运行中') }, stopped: { tone: 'idle', state: tr('未运行') }, error: { tone: 'bad', state: tr('异常') } } as const)[capture.state] },
-    { key: 'bot', name: 'Bot', detail: bot.state === 'error' ? bot.error : null,
+    { key: 'bot', name: tr('引擎连接'), detail: bot.state === 'error' ? bot.error : null,
       ...({ ready: { tone: 'ok', state: tr('就绪') }, loading: { tone: 'busy', state: tr('加载中') }, idle: { tone: 'idle', state: tr('未启动') }, stopped: { tone: 'idle', state: tr('已停止') }, error: { tone: 'bad', state: tr('异常') } } as const)[bot.state] },
-    // A ready Bot process says nothing about the model behind it. The server
-    // not being up comes first; once it is, what the bot reports decides.
-    { key: 'service', name: tr('模型'), detail: server.state === 'failed' ? server.error : service === 'error' ? s?.service_error ?? null : null,
+    // A connected account says nothing about the engine behind it. The engine
+    // not being up comes first; once it is, what the connection reports decides.
+    { key: 'service', name: tr('引擎'), detail: server.state === 'failed' ? server.error : service === 'error' ? s?.service_error ?? null : null,
       ...(server.state === 'failed' ? { tone: 'bad', state: tr('未运行') } as const
         : server.state === 'installing' ? { tone: 'busy', state: tr('安装中') } as const
         : server.state === 'starting' ? { tone: 'busy', state: tr('加载中') } as const
@@ -469,9 +469,9 @@ export function alertsOf(s: MonitorSnapshot | null, local: { ui: string | null; 
   if (!s) return out
   const standby = s.control?.source === 'native_standby'
   if (s.capture.state === 'error') out.push({ key: 'capture', title: tr('采集异常'), message: s.capture.error })
-  if (s.bot.state === 'error') out.push({ key: 'bot', title: tr('Bot 进程异常'), message: s.bot.error })
-  if (!standby && s.server.state === 'failed') out.push({ key: 'server', title: tr('模型服务未运行'), message: s.server.error, hint: tr('应用会自动重新启动它。') })
-  else if (!standby && s.service === 'error') out.push({ key: 'service', title: tr('模型服务断开'), message: s.service_error ?? tr('模型服务没有应答。') })
+  if (s.bot.state === 'error') out.push({ key: 'bot', title: tr('引擎连接异常'), message: s.bot.error })
+  if (!standby && s.server.state === 'failed') out.push({ key: 'server', title: tr('引擎未运行'), message: s.server.error, hint: tr('应用会自动重新启动它。') })
+  else if (!standby && s.service === 'error') out.push({ key: 'service', title: tr('引擎断开'), message: s.service_error ?? tr('引擎没有应答。') })
   if (s.sync_error || (!standby && s.sync_fault)) out.push({ key: 'sync', title: tr('牌局同步异常'), message: s.sync_error || s.sync_fault!, hint: tr('自动操作等待模型恢复；确认有效建议后，此故障状态才会消失。') })
   return out
 }
@@ -488,7 +488,7 @@ export function serverLine(s: MonitorSnapshot | null, now: number, named = true)
     case 'starting': return tr('已启动 {0}，正在加载', seconds(now - server.since_ms))
     case 'failed': return tr('{0}后重新启动', seconds(server.retry_at_ms - now))
     case 'ready': return named ? tr('{0} · 应用托管 · 启动 {1}', server.label ?? server.bot, seconds(server.startup_ms)) : tr('应用托管 · 启动 {0}', seconds(server.startup_ms))
-    case 'none': return tr('收到第一份候选后确认，与 Bot 进程状态无关')
+    case 'none': return tr('收到第一份候选后确认，与引擎连接状态无关')
   }
 }
 
