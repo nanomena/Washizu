@@ -251,7 +251,7 @@
       if (!cardEntry) return response('unavailable');
       if (request.kind === 'discard') {
         if (typeof request.window !== 'string' || typeof request.tsumogiri !== 'boolean') return response('unavailable');
-        if (!current.dto.ready || current.dto.window !== request.window || !current.discardReady || !cardEntry.legal
+        if (!current.dto.ready || current.dto.window !== request.window || !current.discardReady
           || request.tsumogiri !== cardEntry.drawn) return response('changed');
       } else if (request.identity !== cardEntry.identity) return response('changed');
       target = { identity: cardEntry.identity + ':' + request.kind + (request.kind === 'discard' ? ':' + Number(request.tsumogiri) : ''),

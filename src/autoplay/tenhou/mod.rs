@@ -198,6 +198,18 @@ fn layout(input: &client::InputSnapshot) -> Option<PointerLayout> {
     layout.valid().then_some(layout)
 }
 
+/// Whether the page shows the protocol's chosen copy, the drawn tile or one
+/// from the hand. Whether it may be thrown is the protocol's question, already
+/// answered by the legal-action check: the client's own per-card flags follow
+/// its UI state, which a stray manual click can leave in a selection or
+/// tsumogiri-only state, and are not consulted.
+fn on_the_page(input: &client::InputSnapshot, tile: u32, tsumogiri: bool) -> bool {
+    input
+        .tiles
+        .iter()
+        .any(|candidate| candidate.tile == tile && candidate.drawn == tsumogiri)
+}
+
 /// A full physical hand match is required even for buttons and candidates.
 fn same_hand(input: &client::InputSnapshot, state: &TenhouState) -> bool {
     let mut expected = state.hand.clone();
@@ -261,10 +273,8 @@ impl SiteAdapter for TenhouAutoplay {
             let Some((tile, tsumogiri)) = discard_tile(&intent.action, &state) else {
                 return Ok(observation.because("selected discard is not in the protocol hand"));
             };
-            if !input.tiles.iter().any(|candidate| {
-                candidate.tile == tile && candidate.legal && candidate.drawn == tsumogiri
-            }) {
-                return Ok(observation.because("selected tile is not legal on the page"));
+            if !on_the_page(&input, tile, tsumogiri) {
+                return Ok(observation.because("selected tile is not in the page hand"));
             }
             client::TargetRequest::Discard {
                 window: window.clone(),
