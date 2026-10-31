@@ -56,7 +56,7 @@ pub struct DelayModelConfig {
     /// Which policy is active: `legacy` (old fixed model) or `lua`.
     pub mode: DelayMode,
     /// Explicit profile script override. Relative paths are rooted at the
-    /// profile directory; absent means use the active bot's declared policy.
+    /// profile directory; absent means Washizu's bundled pacing policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_override: Option<std::path::PathBuf>,
     /// Preferred minimum total decision time, ms. Actual target readiness

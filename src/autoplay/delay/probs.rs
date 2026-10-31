@@ -82,6 +82,15 @@ pub fn candidates(meta: Option<&Value>) -> Vec<Candidate> {
     found
 }
 
+/// The engine's difficulty reading of a decision, `meta.pace`, when it gave
+/// one inside `[0, 1]`. Anything else is not a reading.
+pub fn pace(meta: Option<&Value>) -> Option<f64> {
+    meta?
+        .get("pace")
+        .and_then(Value::as_f64)
+        .filter(|pace| (0.0..=1.0).contains(pace))
+}
+
 impl DecisionProbs {
     /// `top - second`; `None` for a single-candidate decision.
     pub fn margin(&self) -> Option<f64> {
@@ -250,5 +259,14 @@ mod tests {
         // show.items without raw probs (old format) — no fabricated numbers.
         let old = json!({ "show": { "items": [{ "label": "Discard", "value": "62%" }] } });
         assert!(normalize_meta(Some(&old)).is_none());
+    }
+
+    #[test]
+    fn a_pace_is_read_only_inside_its_range() {
+        assert_eq!(pace(Some(&json!({ "pace": 0.4 }))), Some(0.4));
+        for meta in [json!({}), json!({ "pace": 1.5 }), json!({ "pace": -0.1 }), json!({ "pace": "high" })] {
+            assert_eq!(pace(Some(&meta)), None, "{meta}");
+        }
+        assert_eq!(pace(None), None);
     }
 }

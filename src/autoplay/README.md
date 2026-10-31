@@ -204,34 +204,33 @@ and cleanup acknowledged; it performs no login or gameplay action.
 Layers, in order:
 
 1. **Policy** — selected by `autoplay.delay.mode`. `lua` (default):
-   `delay.lua` next to the config file, generated from
-   `assets/delay_default.lua` (embedded as `script::DEFAULT_SCRIPT`) on
-   first use and hot-reloaded. An existing `delay.lua` that is an
-   unmodified copy of an *older* bundled default is replaced by the
-   current one on start; user-edited scripts are never touched. This
-   works by verbatim comparison against every previously shipped
-   default, embedded from `assets/delay_default_superseded/` — **when
-   changing `assets/delay_default.lua`, copy the version being replaced
-   into that directory and add it to `script::SUPERSEDED_DEFAULT_SCRIPTS`**,
-   or existing installs will keep the old behaviour. The built-in model
-   (per-decision-kind
+   Washizu's own pacing policy, `assets/delay_default.lua` (embedded as
+   `script::DEFAULT_SCRIPT`), the same for both sites and every engine.
+   An account may name its own script instead
+   (`autoplay.delay.policy_override`), hot-reloaded on save; nothing is
+   generated into an account. **When changing `assets/delay_default.lua`,
+   copy the version being replaced into `assets/delay_default_superseded/`
+   and add it to `script::SUPERSEDED_DEFAULT_SCRIPTS`**, so an old copy
+   can still be told from a user edit. The built-in model (per-decision-kind
    log-normal + decision-type bonuses, `delay/mod.rs`) is the fallback
    when the script fails. `legacy`: the historical uniform draw — the
    distribution is forced to Uniform and the script is not consulted.
    The default log-normal parameters are **calibrated against real
    ranked-game records** (think times measured on the server-side
    action clock of decoded game records); change them only with new
-   measurements. Both default policies deliberately **ignore the bot's
-   probability distribution**: measured bot policies can be nearly flat
-   (top ~0.11 on most decisions), which turned every confidence-based
-   rule into a permanent bias instead of a signal. Normalized probs
-   (`delay/probs.rs`: native-bot `show.items[].prob` raw, Mortal-style
-   `q_values` softmaxed — never feed raw Q values to a probability
-   threshold) are still exposed to user Lua scripts as
-   `ctx.top_prob`/`ctx.second_prob`/`ctx.margin`/`ctx.entropy` for
-   custom rules tuned to a specific bot. `entropy` is over the
-   candidates the bot listed, with whatever they leave short of 1
-   counted as one more: a floor on the true figure.
+   measurements. Which decisions get the long thinks is read from three
+   things: the built-in bot's share of people making the move
+   (`ctx.human_*`), the engine's own difficulty reading `meta.pace`
+   (`ctx.pace`, in `[0, 1]`: the engine knows its policy, so Washizu does
+   not interpret its probabilities), and the table (loose tiles, safety
+   against riichi). Normalized probs (`delay/probs.rs`: `show.items[].prob`
+   raw, Mortal-style `q_values` softmaxed — never feed raw Q values to a
+   probability threshold) are exposed as
+   `ctx.top_prob`/`ctx.second_prob`/`ctx.margin`/`ctx.entropy`; the
+   bundled policy uses only the second candidate's probability, to tell
+   whether a runner-up is worth a look. `entropy` is over the candidates
+   the bot listed, with whatever they leave short of 1 counted as one
+   more: a floor on the true figure.
 2. **Budget caps** (`budget_cap`) — `soft = time_fixed - safety_margin -
    click_overhead`; `hard = soft + bounded bank spend`, bank only when
    the policy returned `allow_bank`. Unconditional: overrunning the

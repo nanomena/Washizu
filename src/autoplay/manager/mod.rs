@@ -236,7 +236,7 @@ impl AutoplayManager {
         let Some(decision) = self.read_decision(&resp).await else {
             return;
         };
-        self.load_pacing_policy(&decision).await;
+        self.load_pacing_policy(&decision);
         if decision.platform == Platform::RiichiCity {
             if let Some(frame) = self.riichi.plan(&decision.context(&resp.action)) {
                 if let Ok(pacing) = self.pacing(&decision, &resp.action, None, false, 0) {
