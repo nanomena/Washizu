@@ -192,8 +192,8 @@ fn raw_layout_retains_real_red_and_drawn_geometry_and_full_hand_identity() {
         "viewport":{"x":0,"y":0,"width":900,"height":600},"offers":[],"nextDraw":null,
         "rest":{"x":400,"y":400,"width":50,"height":20},
         "tiles":[
-          {"identity":"red-copy","tile":16,"drawn":false,"legal":true,"bounds":{"x":100,"y":500,"width":40,"height":60}},
-          {"identity":"drawn-copy","tile":19,"drawn":true,"legal":true,"bounds":{"x":200,"y":500,"width":40,"height":60}}
+          {"identity":"red-copy","tile":16,"drawn":false,"bounds":{"x":100,"y":500,"width":40,"height":60}},
+          {"identity":"drawn-copy","tile":19,"drawn":true,"bounds":{"x":200,"y":500,"width":40,"height":60}}
         ]
     })).unwrap();
     let layout = layout(&input).unwrap();
@@ -204,6 +204,26 @@ fn raw_layout_retains_real_red_and_drawn_geometry_and_full_hand_identity() {
     assert_eq!(layout.tiles[1].bounds.x, 200.0);
     assert!(same_hand(&input, &state(&[19, 16])));
     assert!(!same_hand(&input, &state(&[19, 17])));
+}
+#[test]
+fn the_chosen_copy_is_found_on_the_page_whatever_the_client_marks_playable() {
+    // A stray manual click can leave the client marking cards unplayable on our
+    // own turn; the protocol's legal check already chose the tile.
+    let input: client::InputSnapshot = serde_json::from_value(serde_json::json!({
+        "client":"web3","ready":true,"blocked":null,"window":"native-7","clock":null,"hand":[16,19],
+        "viewport":{"x":0,"y":0,"width":900,"height":600},"offers":[],"nextDraw":null,"rest":null,
+        "tiles":[
+          {"identity":"red-copy","tile":16,"drawn":false,"bounds":{"x":100,"y":500,"width":40,"height":60}},
+          {"identity":"drawn-copy","tile":19,"drawn":true,"bounds":{"x":200,"y":500,"width":40,"height":60}}
+        ]
+    }))
+    .unwrap();
+    assert!(on_the_page(&input, 16, false));
+    assert!(on_the_page(&input, 19, true));
+    // The other physical copy is never substituted, and a tile not shown is not found.
+    assert!(!on_the_page(&input, 16, true));
+    assert!(!on_the_page(&input, 19, false));
+    assert!(!on_the_page(&input, 20, false));
 }
 #[test]
 fn native_clock_is_stable_and_bank_is_the_actual_grant_at_that_window_start() {

@@ -50,7 +50,6 @@ pub struct TileGeometry {
     /// Actual physical tile id, including its red/plain copy.
     pub tile: u32,
     pub drawn: bool,
-    pub legal: bool,
     pub bounds: CanvasRect,
 }
 
@@ -514,7 +513,7 @@ mod tests {
     #[test]
     fn geometry_and_probe_contracts_are_required_and_bounded() {
         let value = json!({"client":"web3","ready":false,"blocked":"no-hand","window":null,"clock":null,"hand":[16],"tiles":[
-            {"identity":"tile:16","tile":16,"drawn":false,"legal":false,"bounds":{"x":10,"y":20,"width":30,"height":40}}
+            {"identity":"tile:16","tile":16,"drawn":false,"bounds":{"x":10,"y":20,"width":30,"height":40}}
         ],"offers":[],"viewport":{"x":0,"y":0,"width":800,"height":600},"nextDraw":null,"rest":null});
         assert!(serde_json::from_value::<InputSnapshot>(value.clone())
             .unwrap()
