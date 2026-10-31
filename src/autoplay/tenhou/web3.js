@@ -216,8 +216,8 @@
       const bounds = tileBounds(g, entry);
       if (!bounds) continue;
       const identity = documentId + ':tile:' + native.epoch() + ':' + canonical(current.dto.hand) + ':' + tile + ':' + slot + ':' + canonical(bounds);
-      const raw = { identity, tile, drawn: tile === drawn, legal: !!current.dto.ready && !!current.discardReady && entry.card.legal && !entry.card.blocked
-        && (!native.input.riichi() || tile === drawn), bounds };
+      // Which tile may be thrown is the protocol's; the client's per-card flags follow its UI state.
+      const raw = { identity, tile, drawn: tile === drawn, bounds };
       dto.tiles.push(raw); tileEntries.push({ ...raw, entry });
     }
     dto.offers = current.entries.map(entry => {

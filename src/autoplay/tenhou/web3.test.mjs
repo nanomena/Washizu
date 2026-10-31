@@ -210,10 +210,10 @@ test('final point check rejects a changed viewport, layout, native window, hand 
     assert.notEqual(f.api.probeTarget({ ...first.request, targetIdentity: first.probe.target.identity, point: middle(first.probe.target.bounds) }).status, 'ready');
   }
 });
-test('nonlegal visible cards provide hover facts without input permission', () => {
+test('cards the client marks unplayable still provide hover facts without input permission', () => {
   const f = fixture(); f.state.ready = false; f.state.mounted = false; f.state.cards[4].legal = false;
   const snapshot = f.api.readInput(); const tile = snapshot.tiles.find(tile => tile.tile === 16);
-  assert.equal(snapshot.ready, false); assert.equal(tile.legal, false);
+  assert.equal(snapshot.ready, false); assert.equal('legal' in tile, false);
   assert.equal(f.api.probeTarget({ kind: 'hover', hand: snapshot.hand, tile: 16, identity: tile.identity }).status, 'ready');
   assert.notEqual(f.api.probeTarget({ kind: 'discard', window: 'old', hand: snapshot.hand, tile: 16, tsumogiri: false }).status, 'ready');
 });

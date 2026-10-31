@@ -192,8 +192,8 @@ fn raw_layout_retains_real_red_and_drawn_geometry_and_full_hand_identity() {
         "viewport":{"x":0,"y":0,"width":900,"height":600},"offers":[],"nextDraw":null,
         "rest":{"x":400,"y":400,"width":50,"height":20},
         "tiles":[
-          {"identity":"red-copy","tile":16,"drawn":false,"legal":true,"bounds":{"x":100,"y":500,"width":40,"height":60}},
-          {"identity":"drawn-copy","tile":19,"drawn":true,"legal":true,"bounds":{"x":200,"y":500,"width":40,"height":60}}
+          {"identity":"red-copy","tile":16,"drawn":false,"bounds":{"x":100,"y":500,"width":40,"height":60}},
+          {"identity":"drawn-copy","tile":19,"drawn":true,"bounds":{"x":200,"y":500,"width":40,"height":60}}
         ]
     })).unwrap();
     let layout = layout(&input).unwrap();
@@ -213,8 +213,8 @@ fn the_chosen_copy_is_found_on_the_page_whatever_the_client_marks_playable() {
         "client":"web3","ready":true,"blocked":null,"window":"native-7","clock":null,"hand":[16,19],
         "viewport":{"x":0,"y":0,"width":900,"height":600},"offers":[],"nextDraw":null,"rest":null,
         "tiles":[
-          {"identity":"red-copy","tile":16,"drawn":false,"legal":false,"bounds":{"x":100,"y":500,"width":40,"height":60}},
-          {"identity":"drawn-copy","tile":19,"drawn":true,"legal":true,"bounds":{"x":200,"y":500,"width":40,"height":60}}
+          {"identity":"red-copy","tile":16,"drawn":false,"bounds":{"x":100,"y":500,"width":40,"height":60}},
+          {"identity":"drawn-copy","tile":19,"drawn":true,"bounds":{"x":200,"y":500,"width":40,"height":60}}
         ]
     }))
     .unwrap();
