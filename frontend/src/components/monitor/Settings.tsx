@@ -42,11 +42,11 @@ function ViewRows({ options, onObsOutput }: Props) {
 
 const ago = (ms: number) => (ms < 60_000 ? tr('{0} 秒前', (ms / 1000).toFixed(ms < 10_000 ? 1 : 0)) : tr('{0} 分钟前', Math.floor(ms / 60_000)))
 
-const LINK_NAME: Record<Health['key'], string> = localized({ capture: '采集', bot: 'Bot 进程', service: '模型服务', sync: '牌局同步' })
+const LINK_NAME: Record<Health['key'], string> = localized({ capture: '采集', bot: '引擎连接', service: '引擎', sync: '牌局同步' })
 
-/** Capture, Bot process, model service and game-state sync are four separate
- *  things and are reported as such: a ready process does not vouch for the
- *  model behind it, and a quiet table is not a broken link. A line a link: its
+/** Capture, this account's engine connection, the shared engine and game-state
+ *  sync are four separate things and are reported as such: a connected account
+ *  does not vouch for the engine behind it, and a quiet table is not a broken link. A line a link: its
  *  light, its name, its state, and what it is doing — or the error it gave,
  *  whole on hover and there to be copied. */
 function LinkRows({ snapshot: s, health, now }: Props) {
@@ -60,30 +60,32 @@ ${hint}` : h.detail}>{h.detail}</p> : <p title={about}>{about}</p>}
   </div>
   return <>
     {row(capture, s && s.capture.state !== 'stopped' ? tr('游戏视图{0}', s.capture.descriptor ? ` · ${s.capture.descriptor}` : '') : tr('没有正在运行的采集'))}
-    {row(bot, s && 'bot' in s.bot ? `${s.bot.bot}${s.bot.state === 'ready' ? tr(' · 座位 {0}', s.bot.actor_id + 1) : s.bot.state === 'loading' ? ` · ${s.bot.stage === 'syncing_deps' ? tr('同步依赖') : tr('启动进程')}` : ''}` : tr('进程就绪不代表模型已连接'))}
+    {row(bot, s && 'bot' in s.bot ? `${s.bot.bot}${s.bot.state === 'ready' ? tr(' · 座位 {0}', s.bot.actor_id + 1) : s.bot.state === 'loading' ? ` · ${s.bot.stage === 'syncing_deps' ? tr('同步依赖') : tr('启动进程')}` : ''}` : tr('对局开始时连接'))}
     {row(service, serverLine(s, now), s?.server.state === 'failed' ? tr('应用会自动重新启动它 · {0}', serverLine(s, now)) : undefined)}
-    {row(sync, s?.game && !s.game_ended ? tr('对局 {0} · 局序 {1} · 事件 {2}', s.context.game, s.context.round, s.context.event_seq) : tr('对局开始后跟踪牌局'), tr('自动操作等待模型恢复；确认有效建议后，此故障状态才会消失。'))}
+    {row(sync, s?.game && !s.game_ended ? tr('对局 {0} · 局序 {1} · 事件 {2}', s.context.game, s.context.round, s.context.event_seq)
+      + tr(' · {0} 人', s.game.num_players) + (s.red_fives == null ? '' : s.red_fives ? tr(' · 有赤牌') : tr(' · 无赤牌'))
+      + (s.last_event_ms ? ` · ${ago(Math.max(0, now - s.last_event_ms))}` : '') : tr('对局开始后跟踪牌局'), tr('自动操作等待模型恢复；确认有效建议后，此故障状态才会消失。'))}
   </>
 }
 
-/** The model and its service, as the service tells them (the application runs
- *  both), and what this window measures of them. Twelve places. */
-function ModelLines({ snapshot: s, now }: Props) {
+/** The engine every account shares, this account's connection to it, and what
+ *  this window measures; then what the engine says about itself, in its own
+ *  words. Twelve places. */
+function EngineLines({ snapshot: s, now }: Props) {
   const server = s?.server ?? { state: 'none' as const }
-  const bot = s && 'bot' in s.bot ? s.bot.bot : null
-  // The model service runs from the app's start; the bot itself joins each game as it starts.
-  const waiting = !bot && server.state !== 'none' ? server.bot : null
+  const bot = s?.bot ?? { state: 'idle' as const }
   const d = s?.decision ?? s?.previous_decision ?? null
+  const name = server.state === 'none' ? ('bot' in bot ? bot.bot : '—') : server.state === 'ready' && server.label ? `${server.bot} · ${server.label}` : server.bot
+  const connection = bot.state === 'ready' ? tr('已连接 · 座位 {0}', bot.actor_id + 1)
+    : bot.state === 'loading' ? tr('连接中') : bot.state === 'error' ? tr('异常') : tr('对局开始时连接')
   return <>
-    <Line name={tr('模型')} value={server.state === 'ready' ? server.label ?? '—' : '—'} />
-    {/* Longer than its cell once the server is up: the whole of it is there on hover. */}
-    <Line name={tr('模型服务')} value={serverLine(s, now, false)} note={serverLine(s, now, false)} />
-    <Line name="Bot" value={bot ?? (waiting ? tr('{0} · 对局开始时连接', waiting) : tr('未启动'))} />
-    <Line name={tr('决策往返')} value={d?.reaction_ms != null ? `${d.reaction_ms} ms` : '—'} note={tr('完整的 Bot 往返，立直时含后续请求')} />
-    <Line name={tr('最近牌局事件')} value={s?.last_event_ms ? ago(Math.max(0, now - s.last_event_ms)) : tr('尚未收到')} note={tr('没有新事件不等于断线')} />
-    <Line name={tr('规则')} value={s?.game ? tr('{0} 人{1}', s.game.num_players, s.red_fives == null ? '' : s.red_fives ? tr(' · 有赤牌') : tr(' · 无赤牌')) : '—'} />
-    {/* What the bot says about itself, its latest reply first, then what the service was started with. */}
-    {factsOf(s, 6).map(fact => <Line key={fact.name} name={fact.name} value={fact.value} note={fact.note} />)}
+    <Line name={tr('名称')} value={name} note={name} />
+    {/* Longer than its cell once the engine is up: the whole of it is there on hover. */}
+    <Line name={tr('状态')} value={serverLine(s, now, false)} note={serverLine(s, now, false)} />
+    <Line name={tr('本号连接')} value={connection} />
+    <Line name={tr('决策往返')} value={d?.reaction_ms != null ? `${d.reaction_ms} ms` : '—'} note={tr('完整的引擎往返，立直时含后续请求')} />
+    {/* What the engine says about itself, its latest reply first, then what it said when it started. */}
+    {factsOf(s, 8).map(fact => <Line key={fact.name} name={fact.name} value={fact.value} note={fact.note} />)}
   </>
 }
 
@@ -106,11 +108,11 @@ function AppLines({ snapshot: s, options, onProfiles }: Props) {
  *  sight and the rest a scroll away, each with the line about it. The links are a group of their own, and the
  *  tab carries their one light. */
 export function Settings({ group, onGroup, ...props }: Props & { group: Group; onGroup: (group: Group) => void }) {
-  const names: Record<Group, string> = { autoplay: tr('自动操作'), view: tr('画面与输出'), link: tr('连接'), model: tr('模型与服务'), app: tr('应用') }
+  const names: Record<Group, string> = { autoplay: tr('自动操作'), view: tr('画面与输出'), link: tr('连接'), model: tr('引擎'), app: tr('应用') }
   return <SettingsLayout groups={GROUPS} group={group} names={names} onGroup={onGroup} badges={{ link: <i className="mdot" data-tone={linkOf(props.health).tone} /> }}>
       {group === 'autoplay' ? <div className="mset-grid"><AutoplayRows {...props} level={levelOf(props.snapshot, props.options)} /></div>
         : group === 'view' ? <div className="mset-grid"><ViewRows {...props} /></div>
         : group === 'link' ? <div className="mset-links"><LinkRows {...props} /></div>
-        : <dl className="mset-facts">{group === 'model' ? <ModelLines {...props} /> : <AppLines {...props} />}</dl>}
+        : <dl className="mset-facts">{group === 'model' ? <EngineLines {...props} /> : <AppLines {...props} />}</dl>}
   </SettingsLayout>
 }

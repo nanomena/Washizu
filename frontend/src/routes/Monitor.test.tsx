@@ -240,15 +240,15 @@ describe('monitor user states', () => {
     expect(within(decision()).queryByText('#1')).toBeNull()
   })
 
-  it('does not mistake a ready Bot process for a connected model service', () => {
+  it('does not mistake a connected account for a connected engine', () => {
     fixture.snapshot!.service = 'error'; fixture.snapshot!.service_error = 'Socket closed'
     fixture.snapshot!.decision!.state = 'expired'
     render(<Monitor />)
     // The links have one light, on the settings' tab, and it says which link is down.
     const links = screen.getByRole('tab', { name: '设置' })
     expect(links.querySelector('.mdot')?.getAttribute('data-tone')).toBe('bad')
-    expect(links.title).toBe('连接：模型断开')
-    expect(screen.getByRole('alert').textContent).toContain('模型服务断开')
+    expect(links.title).toBe('连接：引擎断开')
+    expect(screen.getByRole('alert').textContent).toContain('引擎断开')
     // The permanent status slot explains the fault on every tab.
     expect(screen.queryByRole('status')).toBeNull()
     expect(candidates()).toHaveLength(0)
@@ -680,8 +680,9 @@ describe('the settings', () => {
     // What autoplay does is the group that opens first.
     expect(screen.getByRole('button', { name: '自动操作' }).getAttribute('aria-pressed')).toBe('true')
     expect(screen.queryByText('Model A')).toBeNull()
-    group('模型与服务')
-    expect(line('模型')).toBe('Model A')
+    group('引擎')
+    expect(line('名称')).toBe('demo · Model A')
+    expect(line('本号连接')).toMatch(/^已连接 · 座位 \d$|^对局开始时连接$/)
     expect(line('Device')).toBe('CPU')
     expect(screen.queryByRole('switch', { name: '快速确认' })).toBeNull()
     group('应用')
@@ -697,7 +698,7 @@ describe('the settings', () => {
     const links = screen.getByRole('button', { name: '连接' })
     expect(links.getAttribute('aria-pressed')).toBe('true')
     expect(links.querySelector('.mdot')?.getAttribute('data-tone')).toBe('bad')
-    const service = screen.getByText('模型服务').closest('.mset-link')!
+    const service = screen.getAllByText('引擎').map(text => text.closest('.mset-link')).find(Boolean)!
     expect(service.getAttribute('data-tone')).toBe('bad')
     expect(service.textContent).toContain('断开')
     expect(service.textContent).toContain('Socket closed')
@@ -878,7 +879,7 @@ describe('another language', () => {
       expect(left, `on the ${name} tab`).toEqual([])
     }
     // Every group of the settings, the links among them.
-    for (const name of ['Display & output', 'Link', 'Model & service', 'App']) {
+    for (const name of ['Display & output', 'Link', 'Engine', 'App']) {
       fireEvent.click(screen.getByRole('button', { name }))
       expect(shown().split('\n').filter(line => chinese.test(line)), `in ${name}`).toEqual([])
     }

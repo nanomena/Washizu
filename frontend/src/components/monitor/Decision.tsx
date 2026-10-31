@@ -81,7 +81,7 @@ export function DecisionCard({ view, decision: d, elapsed, past, control }: Card
       {control && <span className="mdec-source" data-source={control.source}
         title={control.primary.state === 'ready' || control.primary.state === 'direct_ready' ? controlLabel(control) : control.primary.reason}>{controlLabel(control)}</span>}
       <span title={view.message}>{d && (view.action || thinking || view.phase === 'failed') ? view.message : ''}</span>
-      {d?.reaction_ms != null && <span className="mdec-ms" title={tr('完整的 Bot 往返耗时，立直时包含后续请求')}>{tr('往返')} {d.reaction_ms} ms</span>}
+      {d?.reaction_ms != null && <span className="mdec-ms" title={tr('完整的引擎往返耗时，立直时包含后续请求')}>{tr('往返')} {d.reaction_ms} ms</span>}
     </p>
   </section>
 }

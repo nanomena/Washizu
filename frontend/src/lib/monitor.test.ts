@@ -250,8 +250,8 @@ describe('links', () => {
     expect(line({ state: 'ready', bot: 'demo', label: 'Model A', facts: [], since_ms: 0, startup_ms: 19_400 })).toBe('Model A · 应用托管 · 启动 19 秒')
     // A service that names nothing goes by its bot's name.
     expect(line({ state: 'ready', bot: 'demo', label: null, facts: [], since_ms: 0, startup_ms: 600 })).toBe('demo · 应用托管 · 启动 1 秒')
-    expect(line({ state: 'none' })).toBe('收到第一份候选后确认，与 Bot 进程状态无关')
-    expect(serverLine(null, 0)).toBe('收到第一份候选后确认，与 Bot 进程状态无关')
+    expect(line({ state: 'none' })).toBe('收到第一份候选后确认，与引擎连接状态无关')
+    expect(serverLine(null, 0)).toBe('收到第一份候选后确认，与引擎连接状态无关')
   })
 })
 
