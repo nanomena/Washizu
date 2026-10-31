@@ -103,8 +103,10 @@ impl AppState {
         }
     }
 
-    /// Change the configuration and write it back to the file it was loaded
-    /// from, leaving everything else in that file as it is.
+    /// Change the configuration and write the keys the change touched back to
+    /// the file it was loaded from. Everything else in that file stays as it
+    /// is on disk, including what another writer changed after this core
+    /// loaded it.
     pub async fn save_config(
         &self,
         change: impl FnOnce(&mut AppConfig),
@@ -112,7 +114,8 @@ impl AppState {
         let mut config = self.config.write().await;
         let mut next = config.clone();
         change(&mut next);
-        let saved = crate::config::merge_into(
+        let saved = crate::config::merge_changes(
+            &*config,
             &next,
             &std::fs::read_to_string(&*self.config_path).unwrap_or_default(),
         )

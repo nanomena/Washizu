@@ -10,7 +10,7 @@ pub use autoplay::{AutoplayConfig, DelayDistribution, DelayMode, DelayModelConfi
 pub use bot::{BotConfig, NativeApiConfig};
 pub use capture::{CaptureConfig, HttpCaptureConfig};
 pub use logging::LoggingConfig;
-pub use merge::merge_into;
+pub use merge::{merge_changes, merge_into};
 pub use monitor::MonitorConfig;
 pub use platform::{Platform, PlatformConfig};
 
