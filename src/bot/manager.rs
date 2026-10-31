@@ -661,7 +661,7 @@ impl BotManager {
             }
         };
         // Registry keeps malformed bots visible for settings repair, but a
-        // bad declared transport must never silently become plain MJAI.
+        // manifest that does not parse must never start a runner.
         entry.manifest = match manifest::Manifest::load(&entry.dir) {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -1771,13 +1771,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_transport_manifest_cannot_silently_start_a_direct_runner() {
+    async fn malformed_manifest_cannot_silently_start_a_runner() {
         let root = tempfile::tempdir().unwrap();
         let bot = root.path().join("broken");
         std::fs::create_dir(&bot).unwrap();
         std::fs::write(bot.join("bot.py"), "").unwrap();
         std::fs::write(bot.join("pyproject.toml"), "").unwrap();
-        std::fs::write(bot.join("manifest.toml"), "[bot]\nprotocol = 'unknown'\n").unwrap();
+        std::fs::write(bot.join("manifest.toml"), "manifest_version = 'one'\n").unwrap();
         let mut mgr = BotManager::new(
             Some(dummy_runtime()),
             root.path().into(),
