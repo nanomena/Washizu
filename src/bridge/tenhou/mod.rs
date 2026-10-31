@@ -342,11 +342,13 @@ impl TenhouBridge {
     fn on_go(&mut self, msg: &JsonValue) -> Vec<MjaiEvent> {
         self.state.go_type = parse_u32(msg, "type");
         self.state.lobby = parse_u32(msg, "lobby");
-        // The public lobby publishes normal/fast clocks. GO may carry a
-        // custom csrule (including clock overrides); private/unknown rules
-        // must not inherit a guessed standard allowance.
+        // A standard rule set has the published normal/fast clock in any
+        // lobby: a private L-lobby without a csrule plays the public rules.
+        // GO carries a csrule when a lobby customises them (clock overrides
+        // included); custom or unknown rules must not inherit a guessed
+        // standard allowance.
         self.state.clock = match (self.state.go_type, self.state.lobby) {
-            (Some(rules), Some(0))
+            (Some(rules), Some(_))
                 if rules & !0xff == 0
                     && msg
                         .get("csrule")
@@ -2340,7 +2342,19 @@ mod tests {
                 serde_json::json!({"tag":"GO","type":65,"lobby":0}),
                 Some(TurnClock::FAST),
             ),
-            (serde_json::json!({"tag":"GO","type":65,"lobby":123}), None),
+            (
+                serde_json::json!({"tag":"GO","type":65,"lobby":123}),
+                Some(TurnClock::FAST),
+            ),
+            // A private L-lobby as Tenhou sends it: standard rules, no csrule.
+            (
+                serde_json::json!({"tag":"GO","type":9,"lobby":1943,"gpid":"976CF863-1AA627A7"}),
+                Some(TurnClock::NORMAL),
+            ),
+            (
+                serde_json::json!({"tag":"GO","type":9,"lobby":1943,"csrule":"0,0,0,0"}),
+                None,
+            ),
             (serde_json::json!({"tag":"GO","type":65}), None),
             (
                 serde_json::json!({"tag":"GO","type":65,"lobby":0,"csrule":"0,0,0,0"}),
