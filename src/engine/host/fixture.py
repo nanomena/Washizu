@@ -17,6 +17,7 @@ if Path(sys.argv[0]).name == "sync":
 else:
     with (root / "runs").open("a") as handle:
         handle.write(str(os.getpid()) + "\n")
+    (root / "told").write_text(os.environ["WASHIZU_ENGINE_DIR"] + chr(10) + os.environ["WASHIZU_ENGINE_ENDPOINT"])
     if phase == "retry":
         raise SystemExit(7)
     with socket.socket() as listener:

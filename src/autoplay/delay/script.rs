@@ -1032,9 +1032,15 @@ mod tests {
         };
         let (easy, easy_looks) = run(0.05);
         let (hard, hard_looks) = run(0.95);
-        assert!(hard > easy, "hard median {hard} not above easy median {easy}");
+        assert!(
+            hard > easy,
+            "hard median {hard} not above easy median {easy}"
+        );
         assert_eq!(easy_looks, 0, "an easy decision looked at its runner-up");
-        assert!(hard_looks > 0, "a hard decision never looked at its runner-up");
+        assert!(
+            hard_looks > 0,
+            "a hard decision never looked at its runner-up"
+        );
     }
 
     #[test]

@@ -38,10 +38,10 @@ actionable model reply or displayed PASS in a valid hand confirms recovery.
   `<bot>/.akagi/synced.stamp`. See "Bundled runtime" below for how the
   bundled binaries are fetched and shipped.
 - `sync_guard` — `SyncGuard`: per-bot mutual exclusion for `uv sync`.
-  Both `BotManager::spawn_runner` (game-start sync) and `service::run` (a
-  bot's service, which may share the environment) acquire-or-bail on the
-  bot name through a shared `Arc<Mutex<HashSet<String>>>` so two parallel
-  syncs against the same venv can't trample each other.
+  `BotManager::spawn_runner` (game-start sync) and the Reinstall
+  environment command acquire-or-bail on the bot name through a shared
+  `Arc<Mutex<HashSet<String>>>` so two parallel syncs against the same venv
+  can't trample each other.
 - `runner` — `BotRunner` async trait + `SubprocessBot` impl. Talks JSONL
   over stdin/stdout, pumps stderr into `tracing` (`bot=<name>` field),
   enforces a 60 s default react timeout, and `kill_on_drop(true)` so a
@@ -85,9 +85,6 @@ actionable model reply or displayed PASS in a valid hand confirms recovery.
   `REACT_TIMEOUT` because it blocks the bot's turn. Building an `ApiClient`
   builds a fresh connection pool, so hold one and reuse it. Consumed by
   `NativeBot` while cloud inference is on (`[bot.api]`).
-- `service` — `service::start`: the resident process a bot may declare in its
-  manifest (`[service]`), run for as long as the app is open. See
-  [A bot's service](#a-bots-service) and [shutdown ownership](SERVICE-LIFETIME.md).
 - `supervisor` — `run_bot_manager`: constructs the `BotManager` and drives
   its run loop off the `PostTrackerBus`. Tolerates a missing Python runtime
   — the built-in `native` bots need none.
@@ -286,43 +283,18 @@ OS keychain integration is on the roadmap; until then, treat
 Updating settings does **not** restart the running bot subprocess. The
 new values take effect on the next `start_game` event.
 
-## A bot's service
+## Decision engines
 
-`bot.py` lives for one game. A bot that needs something to outlive its games
-— a model server that takes seconds to load, or that follows a whole game —
-declares it:
-
-```toml
-[service]
-entry = "service/service.py"
-```
-
-```
-mjai_bot/<name>/
-├── bot.py
-└── service/
-    ├── service.py        # the entry
-    └── pyproject.toml    # its own environment, not the bot's
-```
-
-While the bot is the active one (four-player first, else three-player),
-Akagi installs the environment the entry's directory declares, runs the entry
-there with `AKAGI_BOT_CONFIG` pointing at the bot's resolved settings, and
-starts it again when it exits: after 2 s, doubling up to 60 s for each start
-that never became ready. The entry's side of the contract:
-
-- **stdout** — one JSON line `{"type":"ready"}` once it can serve. A `label`
-  string and a `facts` list on it are shown to the user as they are (see
-  [What a bot says about itself](#what-a-bot-says-about-itself)).
-- **stderr** — its log; every line is copied into Akagi's with `service=<bot>`.
-- **stdin** — never written. Akagi holds it open; the entry exits when it
-  closes. That is how the service is stopped, and why it cannot outlive the
-  app however the app ends. On Windows a read left pending on the pipe stalls
-  other threads of the interpreter, so poll it (`PeekNamedPipe`) instead.
-
-The state — none, installing, starting, ready, failed — is `server` on the
-monitor snapshot, separate from `service`, which is whether the bot has
-reached its server.
+A slot may name an installed engine package instead of an mjai bot: a
+separate program that owns its model and every inference parameter, shared
+by every open account and run once for the whole application by the
+launcher's engine host. Washizu speaks a positioned line protocol to it over
+loopback TCP; it stores and forwards no inference setting. The contract —
+packages, endpoint, host state, greeting, positioned events, forecasts — is
+[`src/engine/PROTOCOL.md`](../engine/PROTOCOL.md). The engine's state —
+none, installing, starting, ready, failed — is `server` on the monitor
+snapshot, separate from `service`, which is whether this account has reached
+it.
 
 ## What a bot says about itself
 
@@ -333,9 +305,9 @@ words, and the window shows the words as written:
 - **`meta.facts`** on a reply — `[{"name": "...", "value": "...", "note": "..."}]`,
   `note` optional. Shown in the window's list of facts, the note on demand.
   The latest reply that carries the key replaces what stood before; a reply
-  without it changes nothing. A service's `ready` line may carry `facts` too,
+  without it changes nothing. An engine's `ready` line may carry `facts` too,
   for what does not change while it runs.
-- **`label`** on a service's `ready` line — the name the service goes by.
+- **`label`** on an engine's `ready` line — the name the engine goes by.
 - **`caption`** and **`hint`** on the `meta.show` card — what the rows' values
   are, in a word or two, and a sentence about them. Without a caption the
   values stand unexplained.
@@ -344,7 +316,8 @@ words, and the window shows the words as written:
   (`"step 187"`; ten characters at most). The window numbers the decision by
   it. Without one, the decision goes by its place among the game's decisions,
   `#1` onwards, which starts again with every game.
-- The window is named after the active bot's `display` in its manifest.
+- The window is named after the active bot's `display` in its manifest, or
+  the active engine's in its `engine.toml`.
 
 Card rows are read by their `label`: `Discard`, `Riichi`, `Chi`, `Pon`, `Kan`,
 `Ankan`, `Kakan`, `Hora`, `Ron`, `Tsumo`, `Ryukyoku`, `Kita` and `Pass` are
@@ -416,8 +389,9 @@ picks the slot matching `start_game.num_players` (3 → `active_3p`, else
 The slots are set in `config.toml` (`[bot] active_4p`, `active_3p`), by hand
 or by a bot's installer. A bot whose Python environment is not installed yet
 gets it installed at its first spawn (`uv sync`), which the react time limit
-has room for only if the environment is small; a bot with a service has it
-installed when the application starts instead.
+has room for only if the environment is small. A slot may also name an
+installed engine package (see [Decision engines](#decision-engines)); its
+environment is the engine host's to install.
 
 Pre-3p config files with a single `[bot] active = "..."` key are
 migrated on load: the legacy value is moved to `active_4p` once via
@@ -432,46 +406,47 @@ without the legacy field on the next persist.
 - Anything drawn. `BotResponse`s land on the broadcast bus and in the
   monitor snapshot; the interface (`frontend/`) draws them.
 
-## Positioned primary recovery
+## Engine recovery
 
-A bot declaring `[bot] protocol = "positioned_mjai"` uses the single recovery
-coordinator when the runtime monitor and bridge clock are available. It must
-supply `meta.delivery.through` on every stdout answer. The coordinator owns one
-confirmed journal, independent primary/local workers and one source selection
-per real input window. Plain `mjai` remains the default active protocol.
+An engine runner (`engine::EngineRunner`) is run by the single recovery
+coordinator when the runtime monitor and bridge clock are available. Every
+answer carries `meta.delivery.through` from the engine's receipt. The
+coordinator owns one confirmed journal, independent primary/local workers and
+one source selection per real input window. Plain mjai bots run directly.
 See [recovery design](RECOVERY.md), [shared control contract](CONTROL.md), and
-[offline qualification](RECOVERY-TESTS.md). Matching relay/server and core changes
+[offline qualification](RECOVERY-TESTS.md). Matching engine and core changes
 must be installed together; source changes alone are not a deployment.
 
-Direct Native/API and plain MJAI responses now carry the same core-owned
-original request as positioned responses. Direct `delivered` is separate from
-positioned acknowledged `through`; unavailable direct responses never report
-ready. Incomplete executable riichi is withheld, without speculative feeding
-or suppressing its later real echo.
+Direct Native/API and plain MJAI responses carry the same core-owned original
+request as engine responses. Direct `delivered` is separate from the engine's
+acknowledged `through`; unavailable direct responses never report ready.
+Incomplete executable riichi is withheld, without speculative feeding or
+suppressing its later real echo.
 
 ## Optional forecast channel
 
-A positioned bot can declare `[forecast] entry = "forecast.py"`. This lightweight
-JSONL relay uses the bot's existing Python environment and resolved settings;
-it connects to the existing model service, without creating a second model.
-Formal event requests never compute forecasts. Their replies may reference a
-committed snapshot in `meta.forecast = {session, through, position}`, where
-`through` must equal the validated `meta.delivery.through` and the actual
-delivered prefix. `session` is an opaque reference owned by the formal connection.
+An engine session greeted with `lean: true` may reference a committed snapshot
+in a reply's `meta.forecast = {session, through, position}`, where `through`
+must equal the validated `meta.delivery.through` and the actual delivered
+prefix. `session` is an opaque reference owned by the decision connection.
+Formal event requests never compute forecasts.
 
-The separate relay receives `{session, through, position}` and returns
-`{type:"forecast", session, through, position, status:"ready"|"obsolete"|"unavailable",
-lean?:{lines, options}, reason?:string}`. The core checks the result against its
-original request before considering it. There is one request in flight and
-only the latest pending snapshot. Every real context change immediately revokes
-the old result; old stdout is consumed without rebinding it to a new request.
+`bot::forecast::ForecastWorker` asks for the snapshot on a separate
+connection to the same engine (`{type:"forecast", token, session, through,
+position}`) and receives `{type:"forecast", session, through, position,
+status:"ready"|"obsolete"|"unavailable", lean?:{lines, options},
+reason?:string}`. The core checks the result against its original request
+before considering it. There is one request in flight and only the latest
+pending snapshot. Every real context change immediately revokes the old
+result; an old answer is consumed without rebinding it to a new request.
 
-The managed bot owns this relay. Its close cancels pending work and reaps only
-its child. Formal recovery revokes old session references; optional transport
-failures never reset the formal runner or alter decision-source health. Forecasts
-only supply pointer looks, with context/owner checks at receipt and execution.
-Runners without this channel report unsupported instead of peeking on the formal
-pipe. `bot::forecast::subscribe_status()` exposes the separate serializable
+The game seat's owner holds this connection. Its close cancels pending work
+and drops only its own connection. Formal recovery revokes old session
+references; optional transport failures never reset the formal runner or
+alter decision-source health. Forecasts only supply pointer looks, with
+context/owner checks at receipt and execution. Other bots report unsupported
+instead of peeking on the formal connection.
+`bot::forecast::subscribe_status()` exposes the separate serializable
 `ForecastStatus` (`disabled`, `unsupported`, `waiting`, `running`, `ready`, or
 `unavailable`); opaque sessions stay out of this public status.
 After a committed action, `meta.forecast_error` reports snapshot capture failure

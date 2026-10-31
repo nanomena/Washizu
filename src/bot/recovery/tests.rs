@@ -124,8 +124,9 @@ pub(crate) fn opening() -> Vec<MjaiEvent> {
     .unwrap()
 }
 
-/// Windows test binary -> real WSL Python relay/socket/tiny JAX model ->
-/// coordinator + embedded NativeBot. The barrier changes latency only.
+/// Windows test binary -> engine runner -> real WSL engine socket/tiny JAX
+/// model -> coordinator + embedded NativeBot. The barrier changes latency
+/// only. The test engine's ready file names its port and token.
 #[cfg(target_os = "windows")]
 #[tokio::test]
 #[ignore = "requires own nanogamekits venv; set AKAGI_RECOVERY_WSL_ROOT"]
@@ -149,9 +150,8 @@ async fn offline_python_snapshot_primary_recovers_in_this_hand_across_processes(
 
 #[cfg(target_os = "windows")]
 async fn real_cross_process_recovery(failures: u32, restored: bool) {
-    use crate::bot::runner::SubprocessBot;
-    use crate::bot::runtime::{PythonRuntime, RuntimeMode};
     use crate::bridge::{Bridge, Direction, TenhouBridge};
+    use crate::engine::runner::{EngineRunner, Greeting};
     use std::path::{Path, PathBuf};
     use tokio::process::Command;
 
@@ -211,37 +211,26 @@ async fn real_cross_process_recovery(failures: u32, restored: bool) {
     let guard = ServiceStop(stop);
     wait_file(&ready, 180).await;
     let info: serde_json::Value = serde_json::from_slice(&std::fs::read(&ready).unwrap()).unwrap();
-    let settings = files.path().join("settings.json");
+    let package = crate::engine::tests::package(files.path(), "recovery");
     std::fs::write(
-        &settings,
-        serde_json::to_vec(&json!({"port":info["port"],"timeout":20})).unwrap(),
+        package.endpoint().0,
+        serde_json::to_vec(
+            &json!({"protocol": crate::engine::PROTOCOL, "host": "127.0.0.1",
+                                   "port": info["port"], "token": info["token"]}),
+        )
+        .unwrap(),
     )
     .unwrap();
-    let config_arg = format!("AKAGI_BOT_CONFIG={}", wsl_path(&settings));
-    let mut command = Command::new("wsl.exe");
-    command.args([
-        "-d",
-        "Ubuntu",
-        "--cd",
-        &root,
-        "--",
-        "env",
-        &config_arg,
-        ".venv/bin/python",
-        "tools/riichi/akagi/bot/bot.py",
-        "0",
-    ]);
-    let runtime =
-        PythonRuntime::from_paths("wsl.exe".into(), "unused-uv".into(), RuntimeMode::System);
-    let primary = SubprocessBot::spawn_with_command(
-        command,
-        runtime,
-        files.path(),
-        0,
+    let primary = EngineRunner::new(
+        &package,
+        Greeting {
+            account: "recovery-test".into(),
+            seat: 0,
+            lean: false,
+            game: None,
+        },
         crate::event_bus::notify_bus(),
-    )
-    .await
-    .unwrap();
+    );
     let mut rig = Rig::with_runner(Box::new(primary));
     rig.budget_ms = 3_000; // includes Windows/WSL process startup, then a real inference timeout
     let mut bridge =

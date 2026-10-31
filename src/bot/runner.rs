@@ -97,7 +97,7 @@ pub struct SubprocessBot {
 /// including AKAGI_GAME and resolved bot settings. No dependency install
 /// runs inside recovery and no application configuration is rewritten.
 #[derive(Clone)]
-pub(super) struct CommandSpec {
+struct CommandSpec {
     program: std::ffi::OsString,
     args: Vec<std::ffi::OsString>,
     env: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
@@ -105,7 +105,7 @@ pub(super) struct CommandSpec {
 }
 
 impl CommandSpec {
-    pub(super) fn capture(command: &Command) -> Self {
+    fn capture(command: &Command) -> Self {
         let command = command.as_std();
         Self {
             program: command.get_program().to_owned(),
@@ -117,7 +117,7 @@ impl CommandSpec {
             cwd: command.get_current_dir().map(Into::into),
         }
     }
-    pub(super) fn build(&self) -> Command {
+    fn build(&self) -> Command {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
         if let Some(cwd) = &self.cwd {
@@ -138,38 +138,6 @@ impl CommandSpec {
 }
 
 impl SubprocessBot {
-    /// A declared optional relay uses this bot's runtime and exact resolved
-    /// environment; it never installs dependencies or starts another service.
-    pub(super) fn forecast_command(&self, entry: &str) -> Result<Command> {
-        let relative = Path::new(entry);
-        if relative.is_absolute()
-            || relative.components().any(|c| {
-                !matches!(
-                    c,
-                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                )
-            })
-        {
-            bail!("forecast entry must stay inside the bot directory");
-        }
-        let root = std::fs::canonicalize(&self.bot_dir)?;
-        let script = std::fs::canonicalize(self.bot_dir.join(relative))?;
-        if !script.starts_with(&root) || !script.is_file() {
-            bail!("forecast entry must be a file inside the bot directory");
-        }
-        let mut command = self.runtime.command_for(&self.bot_dir, &[entry]);
-        for (key, value) in &self.command.env {
-            match value {
-                Some(value) => {
-                    command.env(key, value);
-                }
-                None => {
-                    command.env_remove(key);
-                }
-            }
-        }
-        Ok(command)
-    }
     /// Production spawn: `uv sync` if needed, then launch under the venv
     /// interpreter.
     pub async fn spawn(
@@ -411,50 +379,6 @@ for line in sys.stdin:
             crate::event_bus::notify_bus(),
         )
         .await
-    }
-
-    #[tokio::test]
-    async fn forecast_command_uses_the_bot_environment_and_rejects_an_escaping_entry() {
-        let py = system_python().expect("forecast qualification requires Python");
-        let tmp = TempDir::new().unwrap();
-        write_echo_bot(tmp.path());
-        std::fs::write(tmp.path().join("forecast.py"), "pass\n").unwrap();
-        let mut command = Command::new(&py);
-        command
-            .current_dir(tmp.path())
-            .arg("bot.py")
-            .env("AKAGI_GAME", "configured-game")
-            .env("AKAGI_PLAYER_ID", "2")
-            .env("AKAGI_BOT_CONFIG", "resolved-settings-path")
-            .env_remove("PYTHONPATH");
-        let mut bot = SubprocessBot::spawn_with_command(
-            command,
-            dummy_runtime(&py),
-            tmp.path(),
-            2,
-            crate::event_bus::notify_bus(),
-        )
-        .await
-        .unwrap();
-        let forecast = bot.forecast_command("forecast.py").unwrap();
-        let forecast = forecast.as_std();
-        assert_eq!(forecast.get_current_dir(), Some(tmp.path()));
-        assert_eq!(
-            forecast.get_args().collect::<Vec<_>>(),
-            vec![std::ffi::OsStr::new("forecast.py")]
-        );
-        assert!(std::path::Path::new(forecast.get_program())
-            .starts_with(tmp.path().join(".akagi").join("venv")));
-        for (name, value) in &bot.command.env {
-            assert!(forecast
-                .get_envs()
-                .any(|(key, expected)| key == name && expected == value.as_deref()));
-        }
-        assert!(bot.forecast_command("../forecast.py").is_err());
-        assert!(bot
-            .forecast_command(tmp.path().join("forecast.py").to_str().unwrap())
-            .is_err());
-        bot.react(&[MjaiEvent::end_game()]).await.unwrap();
     }
 
     #[tokio::test]

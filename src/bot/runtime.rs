@@ -97,7 +97,7 @@ impl PythonRuntime {
 
     /// A cancelled install owns and reaps its uv process before returning.
     /// `false` means cancellation, and never writes a successful sync stamp.
-    pub(super) async fn ensure_synced_until(
+    pub(crate) async fn ensure_synced_until(
         &self,
         bot_dir: &Path,
         stop: &mut watch::Receiver<bool>,

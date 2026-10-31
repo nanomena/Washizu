@@ -264,7 +264,12 @@ mod tests {
     #[test]
     fn a_pace_is_read_only_inside_its_range() {
         assert_eq!(pace(Some(&json!({ "pace": 0.4 }))), Some(0.4));
-        for meta in [json!({}), json!({ "pace": 1.5 }), json!({ "pace": -0.1 }), json!({ "pace": "high" })] {
+        for meta in [
+            json!({}),
+            json!({ "pace": 1.5 }),
+            json!({ "pace": -0.1 }),
+            json!({ "pace": "high" }),
+        ] {
             assert_eq!(pace(Some(&meta)), None, "{meta}");
         }
         assert_eq!(pace(None), None);

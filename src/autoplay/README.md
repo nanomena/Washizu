@@ -158,7 +158,7 @@ sits on its clock until it has both, and nothing prompts a second bot
 decision here — the `reach` the server echoes back is our own action coming
 home, not a new question.
 
-`Reach.pai` is a V3 extension. The primary miai and native standby resolve
+`Reach.pai` is a V3 extension. The primary engine and native standby resolve
 their declaring tile internally before returning a combined response. A
 third-party bare `reach` is declined as a whole: no synthetic declaration is
 fed to a stateful runner, and real bridge echoes are never suppressed.

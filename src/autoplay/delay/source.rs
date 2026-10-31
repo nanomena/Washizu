@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 pub enum PolicySource {
     /// Washizu's own pacing policy, the same for every site and engine.
     Bundled,
-    Profile { path: PathBuf },
+    Profile {
+        path: PathBuf,
+    },
 }
 
 impl PolicySource {

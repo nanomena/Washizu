@@ -635,7 +635,7 @@ mod tests {
         }
         assert_eq!(decisions, 2);
         assert!(
-            !relay.files.path().join("release").exists(),
+            !relay.released(),
             "forecast is still blocked when both decisions finish"
         );
         assert_eq!(

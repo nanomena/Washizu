@@ -7,6 +7,7 @@ pub mod bot;
 pub mod bridge;
 pub mod capture;
 pub mod config;
+pub mod engine;
 pub mod event_bus;
 pub mod game_state;
 pub mod headless;

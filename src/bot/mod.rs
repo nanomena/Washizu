@@ -10,7 +10,7 @@
 pub mod api;
 pub mod control;
 pub mod forecast;
-mod lifecycle;
+pub(crate) mod lifecycle;
 pub mod manager;
 pub mod manifest;
 pub mod native;
@@ -18,7 +18,6 @@ pub mod recovery;
 pub mod registry;
 pub mod runner;
 pub mod runtime;
-pub mod service;
 pub mod supervisor;
 pub mod sync_guard;
 #[cfg(test)]
@@ -26,11 +25,10 @@ pub mod test_http;
 pub mod types;
 
 pub use manager::BotManager;
-pub use manifest::{BotSource, FieldKind, FieldSpec, Manifest, ManifestBot, ServiceSpec};
+pub use manifest::{BotSource, FieldKind, FieldSpec, Manifest, ManifestBot};
 pub use registry::{BotEntry, BotRegistry};
 pub use runner::{BotRunner, SubprocessBot};
 pub use runtime::{PythonRuntime, RuntimeMode};
-pub use service::ServiceStatus;
 pub use supervisor::run_bot_manager;
 pub use sync_guard::SyncGuard;
 pub use types::BotResponse;

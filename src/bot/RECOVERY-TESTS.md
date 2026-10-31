@@ -28,7 +28,9 @@ fail the build. This change adds source text to the existing status row; it
 does not add source-selection commands or effects to the frontend.
 
 Reproduce the cross-process tests with the matching Python checkout's own
-`.venv` containing its service dependencies, then run the Windows core tests:
+`.venv` containing its engine dependencies, then run the Windows core tests.
+They reach the test engine through the engine runner (`src/engine/PROTOCOL.md`);
+its ready file names the port and token:
 
 ```powershell
 $env:AKAGI_RECOVERY_WSL_ROOT = '/mnt/d/Games/Mahjong/dev/nanogamekits-recovery'
