@@ -123,10 +123,8 @@ impl EngineRunner {
             .context("the engine's reply meta is not an object")?;
         meta.insert("delivery".into(), json!({ "through": self.cursor }));
         // The card goes by the package's own name.
-        if let Some(show) = meta.get_mut("show").and_then(Value::as_object_mut) {
-            if show.contains_key("title") {
-                show.insert("title".into(), Value::String(self.display.clone()));
-            }
+        if let Some(title) = meta.get_mut("show").and_then(|show| show.get_mut("title")) {
+            *title = Value::String(self.display.clone());
         }
         serde_json::from_value(reply).context("the engine's reply is not an mjai reaction")
     }
