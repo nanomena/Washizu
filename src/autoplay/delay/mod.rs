@@ -132,6 +132,10 @@ pub struct Reading {
     /// riichi on the table.
     pub safe: Option<bool>,
     pub human: Option<HumanView>,
+    /// The engine's own reading of the decision: where it falls among the
+    /// engine's decisions by difficulty, in `[0, 1]` (`meta.pace`). The
+    /// engine knows its policy; Washizu does not interpret its numbers.
+    pub pace: Option<f64>,
 }
 
 /// Copy of the server time budget taken at planning time.

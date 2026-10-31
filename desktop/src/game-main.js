@@ -668,7 +668,7 @@ async function start() {
   // Before the game's page opens: its service worker is let run from its first start (see `workers.js`).
   void keepWorkersRunning(cdpPort, note)
 
-  const child = core = new Core(CORE, ['--home', DATA], { cwd: DATA })
+  const child = core = new Core(CORE, ['--home', DATA, '--engines', path.resolve(option('data'), 'engines'), '--account', PROFILE.id], { cwd: DATA })
   let gameEnded = true
   child.on('event', (name, payload) => {
     // The pointer's marks are the trail's alone, and come many a second. They

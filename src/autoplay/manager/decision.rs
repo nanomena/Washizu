@@ -142,9 +142,10 @@ impl AutoplayManager {
             (our_seat, legal_actions, snapshot, num_players)
         };
 
-        let reading = snapshot.as_ref().map_or_else(Reading::default, |snapshot| {
+        let mut reading = snapshot.as_ref().map_or_else(Reading::default, |snapshot| {
             self.reading(resp, snapshot, our_seat)
         });
+        reading.pace = crate::autoplay::delay::probs::pace(resp.meta.as_ref());
         // One line a decision, for measuring a pace against afterwards.
         info!(action = ?resp.action, ?probs, ?reading, "autoplay: decision read");
 
@@ -215,6 +216,7 @@ impl AutoplayManager {
             runner_up_loose,
             safe,
             human: self.advisor.view(&resp.action),
+            pace: None,
         }
     }
 }

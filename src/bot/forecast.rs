@@ -1,24 +1,25 @@
-//! Optional display prediction has a separate pipe, owner and latest-only
-//! mailbox. It cannot publish an action or delay primary event delivery.
+//! Optional display prediction has a separate engine connection, owner and
+//! latest-only mailbox. It cannot publish an action or delay primary event
+//! delivery.
 
 #[cfg(test)]
 pub(crate) mod tests;
 
-use super::runner::CommandSpec;
 use crate::autoplay::pointer::lean::{self, Lean};
 use crate::bot::BotResponse;
 use crate::config::AppConfig;
+use crate::engine::EndpointFile;
 use crate::event_bus::NotifyBus;
 use crate::monitor::DecisionContext;
 use crate::schema::Notification;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
 use tokio::sync::{watch, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,19 +377,19 @@ pub struct ForecastWorker {
 }
 
 impl ForecastWorker {
+    /// `endpoint` is the engine whose snapshots this owner may ask about;
+    /// any other bot has no forecast connection.
     pub fn spawn(
-        command: Result<Option<Command>>,
+        endpoint: Option<EndpointFile>,
         config: Arc<RwLock<AppConfig>>,
         notify: NotifyBus,
         name: String,
     ) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let owner = NEXT.fetch_add(1, Ordering::Relaxed);
-        let (spec, unsupported) = match command {
-            Ok(Some(command)) => (Some(CommandSpec::capture(&command)), None),
-            Ok(None) => (None, Some("当前 Bot 不支持独立预推理通道。".into())),
-            Err(error) => (None, Some(format!("预推理入口不可用：{error:#}"))),
-        };
+        let unsupported = endpoint
+            .is_none()
+            .then(|| "当前 Bot 不支持独立预推理通道。".to_owned());
         let (jobs, receiver) = watch::channel(None);
         let (stop, stopping) = watch::channel(false);
         let input = ForecastInput {
@@ -405,8 +406,8 @@ impl ForecastWorker {
             notify,
             name,
         };
-        let task =
-            spec.map(|spec| tokio::spawn(run(spec, input.clone(), receiver, stopping, config)));
+        let task = endpoint
+            .map(|endpoint| tokio::spawn(run(endpoint, input.clone(), receiver, stopping, config)));
         Self { input, stop, task }
     }
     pub fn stop(&self) {
@@ -486,62 +487,61 @@ impl WireReply {
     }
 }
 
-struct Pipe {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+/// One forecast connection to the engine, opened when first needed and
+/// dropped on any transport error. Its own requests carry the endpoint's
+/// token; an engine restart publishes a new one.
+struct Socket {
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
+    token: String,
     line: Vec<u8>,
 }
 
-impl Pipe {
-    fn spawn(spec: &CommandSpec) -> Result<Self> {
-        let mut command = spec.build();
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        #[cfg(target_os = "windows")]
-        command.creation_flags(0x08000000);
-        let mut child = command.spawn().context("start optional forecast relay")?;
-        let stdin = child.stdin.take().context("forecast stdin missing")?;
-        let stdout = child.stdout.take().context("forecast stdout missing")?;
+impl Socket {
+    async fn connect(endpoint: &EndpointFile) -> Result<Self> {
+        let published = endpoint.read()?;
+        let address = format!("{}:{}", published.host, published.port);
+        let stream = tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(&address))
+            .await
+            .map_err(|_| anyhow::anyhow!("connecting to the engine timed out"))?
+            .with_context(|| format!("connect to the engine at {address}"))?;
+        let _ = stream.set_nodelay(true);
+        let (reader, writer) = stream.into_split();
         Ok(Self {
-            child,
-            stdin: Some(stdin),
-            stdout: BufReader::new(stdout),
+            reader: BufReader::new(reader),
+            writer,
+            token: published.token,
             line: vec![],
         })
     }
     async fn ask(&mut self, key: &ForecastKey) -> Result<WireReply> {
-        let bytes = serde_json::to_vec(&key.snapshot)?;
-        let stdin = self.stdin.as_mut().context("forecast pipe is closed")?;
-        stdin.write_all(&bytes).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
+        let request = serde_json::json!({
+            "type": "forecast",
+            "token": self.token,
+            "session": key.snapshot.session,
+            "through": key.snapshot.through,
+            "position": key.snapshot.position,
+        });
+        let mut bytes = serde_json::to_vec(&request)?;
+        bytes.push(b'\n');
+        self.writer.write_all(&bytes).await?;
+        self.writer.flush().await?;
         self.line.clear();
-        if self.stdout.read_until(b'\n', &mut self.line).await? == 0 {
-            bail!("forecast relay closed without a result");
+        if self.reader.read_until(b'\n', &mut self.line).await? == 0 {
+            bail!("the engine closed the forecast connection without a result");
         }
         WireReply::parse(&self.line, &key.snapshot)
-    }
-    async fn close(mut self) {
-        if let Err(error) =
-            super::lifecycle::stop_child(&mut self.child, self.stdin.take(), "forecast relay").await
-        {
-            tracing::warn!(%error, "optional forecast release failed");
-        }
     }
 }
 
 async fn run(
-    spec: CommandSpec,
+    endpoint: EndpointFile,
     input: ForecastInput,
     mut jobs: watch::Receiver<Option<ForecastKey>>,
     mut stop: watch::Receiver<bool>,
     config: Arc<RwLock<AppConfig>>,
 ) {
-    let mut pipe: Option<Pipe> = None;
+    let mut socket: Option<Socket> = None;
     loop {
         tokio::select! {
             biased;
@@ -574,9 +574,14 @@ async fn run(
         ) {
             continue;
         }
-        if pipe.is_none() {
-            match Pipe::spawn(&spec) {
-                Ok(child) => pipe = Some(child),
+        if socket.is_none() {
+            let connected = tokio::select! {
+                biased;
+                _ = super::lifecycle::cancelled(&mut stop) => break,
+                connected = Socket::connect(&endpoint) => connected,
+            };
+            match connected {
+                Ok(connected) => socket = Some(connected),
                 Err(error) => {
                     input.fail_key(&key, format!("{error:#}"));
                     continue;
@@ -586,13 +591,13 @@ async fn run(
         let result = tokio::select! {
             biased;
             _ = super::lifecycle::cancelled(&mut stop) => break,
-            result = tokio::time::timeout(Duration::from_secs(30), pipe.as_mut().unwrap().ask(&key)) => {
-                result.map_err(|_| anyhow::anyhow!("optional forecast relay exceeded its transport watchdog")).and_then(|r| r)
+            result = tokio::time::timeout(Duration::from_secs(30), socket.as_mut().unwrap().ask(&key)) => {
+                result.map_err(|_| anyhow::anyhow!("optional forecast connection exceeded its transport watchdog")).and_then(|r| r)
             }
         };
         match result {
             Err(error) => {
-                pipe.take().unwrap().close().await;
+                socket = None;
                 input.fail_key(&key, format!("{error:#}"));
             }
             Ok(reply) => {
@@ -615,7 +620,5 @@ async fn run(
             }
         }
     }
-    if let Some(pipe) = pipe {
-        pipe.close().await;
-    }
+    drop(socket);
 }

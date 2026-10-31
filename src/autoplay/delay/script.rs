@@ -38,8 +38,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, warn};
 
-/// Embedded default when a Bot declares no policy. Never generated in each
-/// account: declared Bot policies and explicit overrides own their provenance.
+/// Washizu's own pacing policy, embedded. Never generated in each account:
+/// an explicit profile override owns its own provenance.
 pub const DEFAULT_SCRIPT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/delay_default.lua"
@@ -78,6 +78,10 @@ const SUPERSEDED_DEFAULT_SCRIPTS: &[&str] = &[
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/assets/delay_default_superseded/68bb28c.lua"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/delay_default_superseded/75df66b.lua"
     )),
 ];
 
@@ -316,6 +320,9 @@ impl DelayScript {
         }
         if let Some(safe) = reading.safe {
             ctx.set("safe", safe)?;
+        }
+        if let Some(pace) = reading.pace {
+            ctx.set("pace", pace)?;
         }
         if let Some(human) = reading.human {
             ctx.set("human_top", human.top)?;
@@ -567,10 +574,12 @@ mod tests {
             function decide_delay(ctx)
               if ctx.loose == nil then
                 assert(ctx.runner_up_loose == nil and ctx.safe == nil and ctx.human_top == nil)
+                assert(ctx.pace == nil)
                 return { delay_ms = 1000 }
               end
               assert(ctx.loose == true and ctx.runner_up_loose == false and ctx.safe == false)
               assert(ctx.human_top == 0.5 and ctx.human_second == 0.25 and ctx.human_chosen == 0.125)
+              assert(ctx.pace == 0.75)
               return { delay_ms = 2000 }
             end
             "#,
@@ -590,6 +599,7 @@ mod tests {
                 second: Some(0.25),
                 chosen: 0.125,
             }),
+            pace: Some(0.75),
         };
         assert_eq!(s.try_decide(&i).unwrap().total_target_ms, 2000);
     }
@@ -992,6 +1002,47 @@ mod tests {
         );
     }
 
+    /// The engine's difficulty reading moves a decision's think time: the
+    /// same discard read as one of the hardest takes longer than one read as
+    /// one of the easiest, and only a hard one with a real runner-up looks
+    /// at it first.
+    #[test]
+    fn bundled_default_follows_the_engines_reading() {
+        let s = DelayScript::compile(DEFAULT_SCRIPT, "delay_default.lua").unwrap();
+        let cfg = InputConfig::default();
+        let d = DelayModelConfig::default();
+        let run = |pace: f64| {
+            let mut looks = 0;
+            let mut samples: Vec<u32> = (0..400)
+                .map(|_| {
+                    let mut i = base_input(&cfg, &d);
+                    i.reading.pace = Some(pace);
+                    i.probs = Some(crate::autoplay::delay::DecisionProbs {
+                        top: 0.45,
+                        second: Some(0.40),
+                        entropy: 0.0,
+                    });
+                    let decision = s.try_decide(&i).unwrap();
+                    looks += usize::from(decision.hesitate);
+                    decision.total_target_ms
+                })
+                .collect();
+            samples.sort_unstable();
+            (samples[samples.len() / 2], looks)
+        };
+        let (easy, easy_looks) = run(0.05);
+        let (hard, hard_looks) = run(0.95);
+        assert!(
+            hard > easy,
+            "hard median {hard} not above easy median {easy}"
+        );
+        assert_eq!(easy_looks, 0, "an easy decision looked at its runner-up");
+        assert!(
+            hard_looks > 0,
+            "a hard decision never looked at its runner-up"
+        );
+    }
+
     #[test]
     fn host_hot_reloads_and_reports_missing_declared_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1046,8 +1097,8 @@ mod tests {
     #[test]
     fn source_switch_and_failure_cannot_reuse_a_previous_accounts_script() {
         let dir = tempfile::tempdir().unwrap();
-        let bot = PolicySource::Bot {
-            path: dir.path().join("bot.lua"),
+        let bot = PolicySource::Profile {
+            path: dir.path().join("first.lua"),
         };
         std::fs::write(
             bot.path().unwrap(),

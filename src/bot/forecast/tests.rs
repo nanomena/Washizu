@@ -1,7 +1,6 @@
 use super::*;
 use crate::autoplay::pointer::{lean::Spot, PointerController, PointerLayout, TileTarget};
 use serde_json::json;
-use std::path::Path;
 use tempfile::TempDir;
 
 pub(crate) fn context(seq: u64) -> DecisionContext {
@@ -22,64 +21,107 @@ pub(crate) fn receipt(through: u64, session: &str) -> BotResponse {
     }
 }
 
-pub(crate) async fn wait_file(path: &Path) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !path.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("scripted relay reached its barrier");
+/// A loopback engine answering forecasts, with an observable barrier on its
+/// first request. Not a model.
+pub(crate) struct Relay {
+    _root: TempDir,
+    pub worker: ForecastWorker,
+    state: Arc<RelayState>,
 }
 
-/// A stdlib-only relay with an observable barrier, not a model/service.
-pub(crate) struct Relay {
-    pub files: TempDir,
-    pub worker: ForecastWorker,
+#[derive(Default)]
+struct RelayState {
+    requests: Mutex<Vec<SnapshotRef>>,
+    has_entered: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
+    connections: std::sync::atomic::AtomicUsize,
+    open: std::sync::atomic::AtomicUsize,
+    first_fault: bool,
+}
+
+async fn relay_connection(stream: TcpStream, state: Arc<RelayState>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let mut request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["type"], "forecast");
+        assert_eq!(request["token"], "secret");
+        let fields = request.as_object_mut().unwrap();
+        fields.remove("type");
+        fields.remove("token");
+        let mut key: SnapshotRef = serde_json::from_value(request).unwrap();
+        let first = {
+            let mut all = state.requests.lock().unwrap();
+            all.push(key.clone());
+            all.len() == 1
+        };
+        if first {
+            state.has_entered.store(true, SeqCst);
+            while !state.released.load(SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            if state.first_fault {
+                key.session = "wrong-session".into();
+            }
+        }
+        let mut reply = serde_json::to_value(&key).unwrap();
+        reply["type"] = json!("forecast");
+        reply["status"] = json!("ready");
+        reply["lean"] =
+            json!({"lines": 12, "options": [{"discard": true, "pai": "6s", "share": 1.0}]});
+        let mut bytes = serde_json::to_vec(&reply).unwrap();
+        bytes.push(b'\n');
+        if writer.write_all(&bytes).await.is_err() {
+            break;
+        }
+    }
+    state.open.fetch_sub(1, SeqCst);
 }
 
 impl Relay {
     pub fn new(first_fault: bool) -> Self {
-        let files = tempfile::tempdir().unwrap();
-        std::fs::write(files.path().join("relay.py"), r#"import json, os, pathlib, sys, time
-root = pathlib.Path('.')
-(root / 'pid').write_text(str(os.getpid()))
-for line in sys.stdin:
-    key = json.loads(line)
-    with (root / 'requests').open('a') as out:
-        out.write(json.dumps(key) + '\n')
-    first = not (root / 'entered').exists()
-    if first:
-        (root / 'entered').touch()
-        while not (root / 'release').exists():
-            time.sleep(0.01)
-    if first and os.environ['FIRST_FAULT'] == '1':
-        key['session'] = 'wrong-session'
-    print(json.dumps(dict(type='forecast', **key, status='ready', lean=dict(lines=12, options=[dict(discard=True, pai='6s', share=1.0)]))), flush=True)
-"#).unwrap();
-        let python = std::env::var_os("AKAGI_TEST_PYTHON")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                which::which("python3")
-                    .or_else(|_| which::which("python"))
-                    .ok()
-            })
-            .expect("forecast subprocess tests require a Python interpreter");
-        let mut command = Command::new(python);
-        command
-            .current_dir(files.path())
-            .args(["-u", "relay.py"])
-            .env("FIRST_FAULT", if first_fault { "1" } else { "0" });
+        let root = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let endpoint = EndpointFile(root.path().join("endpoint.json"));
+        std::fs::write(
+            &endpoint.0,
+            json!({"protocol": crate::engine::PROTOCOL, "host": "127.0.0.1", "port": port, "token": "secret"})
+                .to_string(),
+        )
+        .unwrap();
+        let state = Arc::new(RelayState {
+            first_fault,
+            ..RelayState::default()
+        });
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                use std::sync::atomic::Ordering::SeqCst;
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                while let Ok((stream, _)) = listener.accept().await {
+                    state.connections.fetch_add(1, SeqCst);
+                    state.open.fetch_add(1, SeqCst);
+                    tokio::spawn(relay_connection(stream, state.clone()));
+                }
+            });
+        }
         let mut config = AppConfig::default();
         config.monitor.pointer_lean = true;
         config.autoplay.enabled = true;
         let worker = ForecastWorker::spawn(
-            Ok(Some(command)),
+            Some(endpoint),
             Arc::new(RwLock::new(config)),
             crate::event_bus::notify_bus(),
             "scripted".into(),
         );
-        Self { files, worker }
+        Self {
+            _root: root,
+            worker,
+            state,
+        }
     }
     pub fn submit(&self, seq: u64, session: &str) {
         self.worker.input.advance(context(seq), true);
@@ -88,16 +130,42 @@ for line in sys.stdin:
             .offer(context(seq), &receipt(seq, session), seq);
     }
     pub async fn entered(&self) {
-        wait_file(&self.files.path().join("entered")).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !self
+                .state
+                .has_entered
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the engine reached its barrier");
     }
     pub fn release(&self) {
-        std::fs::write(self.files.path().join("release"), "").unwrap();
+        self.state
+            .released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn released(&self) -> bool {
+        self.state
+            .released
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Whether this owner ever connected to the engine.
+    pub fn connected(&self) -> bool {
+        self.state
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
     }
     pub fn positions(&self) -> Vec<u64> {
-        std::fs::read_to_string(self.files.path().join("requests"))
+        self.state
+            .requests
+            .lock()
             .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<SnapshotRef>(line).unwrap().position)
+            .iter()
+            .map(|key| key.position)
             .collect()
     }
     pub async fn result(
@@ -140,7 +208,10 @@ async fn optional_snapshot_capture_error_is_reported_without_changing_the_formal
         notifications.try_recv().unwrap().body.as_deref(),
         Some("snapshot capture failed")
     );
-    assert!(!relay.files.path().join("pid").exists());
+    assert!(
+        !relay.connected(),
+        "a capture failure starts no optional work"
+    );
     relay.worker.close().await;
 }
 
@@ -200,7 +271,7 @@ fn forecast_wire_requires_exact_identity_and_the_payload_for_its_status() {
 }
 
 #[tokio::test]
-async fn latest_pending_replaces_intermediate_jobs_and_old_stdout_is_drained() {
+async fn latest_pending_replaces_intermediate_jobs_and_the_old_answer_is_drained() {
     let relay = Relay::new(false);
     let mut rx = lean::subscribe();
     relay.submit(1, "session-a");
@@ -270,7 +341,7 @@ async fn forecast_reference_requires_the_validated_formal_receipt() {
         OwnerState::Open { key: None, .. }
     ));
     assert!(
-        !relay.files.path().join("pid").exists(),
+        !relay.connected(),
         "invalid reference cannot start optional work"
     );
     relay.submit(1, "session-a");
@@ -339,16 +410,8 @@ async fn a_received_forecast_loses_pointer_permission_on_context_change() {
     relay.worker.close().await;
 }
 
-#[cfg(target_os = "windows")]
 #[tokio::test]
-async fn owner_close_reaps_only_its_blocked_relay_and_cancels_pending_work() {
-    use std::ffi::c_void;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
-        fn WaitForSingleObject(handle: *mut c_void, millis: u32) -> u32;
-        fn CloseHandle(handle: *mut c_void) -> i32;
-    }
+async fn owner_close_drops_only_its_own_connection_and_cancels_pending_work() {
     let first = Relay::new(false);
     let other = Relay::new(false);
     let mut rx = lean::subscribe();
@@ -357,38 +420,31 @@ async fn owner_close_reaps_only_its_blocked_relay_and_cancels_pending_work() {
     first.entered().await;
     other.entered().await;
     first.submit(2, "first");
-    let pid = std::fs::read_to_string(first.files.path().join("pid"))
-        .unwrap()
-        .parse::<u32>()
-        .unwrap();
-    let handle = unsafe { OpenProcess(0x00100000, 0, pid) };
-    assert!(!handle.is_null());
-    drop(first.worker);
+    let Relay {
+        worker,
+        state,
+        _root,
+    } = first;
+    drop(worker);
+    state
+        .released
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(6), async {
-        while unsafe { WaitForSingleObject(handle, 0) } != 0 {
+        while state.open.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("dropping the owner reaps its process");
+    .expect("dropping the owner closes its connection");
     assert_eq!(
-        unsafe { WaitForSingleObject(handle, 0) },
-        0,
-        "close waits for the owned process to exit"
+        state.requests.lock().unwrap().len(),
+        1,
+        "pending work was cancelled"
     );
-    unsafe {
-        CloseHandle(handle);
-    }
-    let positions: Vec<SnapshotRef> = std::fs::read_to_string(first.files.path().join("requests"))
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(positions.len(), 1, "pending work was cancelled");
     other.release();
     assert!(
         other.result(&mut rx).await.is_current(Some(context(1))),
-        "the other owner's process remains usable"
+        "the other owner's connection remains usable"
     );
     other.worker.close().await;
 }

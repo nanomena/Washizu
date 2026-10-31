@@ -71,10 +71,7 @@ async fn facts(
 }
 
 impl AutoplayManager {
-    pub(super) async fn load_pacing_policy(&mut self, decision: &Decision) {
-        let cfg = self.cfg.read().await;
-        let root = crate::util::resolve_dir(std::path::Path::new(&cfg.bot.dir));
-        let directory = root.join(cfg.bot.active_for(decision.num_players));
+    pub(super) fn load_pacing_policy(&mut self, decision: &Decision) {
         let profile = decision.delay_cfg.policy_override.as_ref().map(|path| {
             if path.is_absolute() {
                 path.clone()
@@ -82,23 +79,7 @@ impl AutoplayManager {
                 self.config_dir.join(path)
             }
         });
-        drop(cfg);
-        let manifest = match crate::bot::manifest::Manifest::load(&directory) {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                self.pacing_policy_error(format!("pacing manifest unavailable: {error:#}"));
-                return;
-            }
-        };
-        let source = delay::source::resolve_policy_source(
-            &directory,
-            manifest
-                .as_ref()
-                .and_then(|manifest| manifest.pacing.as_ref())
-                .map(|pacing| pacing.entry.as_str()),
-            profile.as_deref(),
-        );
-        match source {
+        match delay::source::resolve_policy_source(profile.as_deref()) {
             Ok(source) => {
                 if let Err(reason) = self.delay_script.reload(
                     &source,

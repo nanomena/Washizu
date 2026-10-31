@@ -51,9 +51,9 @@
 //!
 //! The core lives as long as its stdin is open. The shell holds the other end
 //! and never has to remember to stop anything: when it goes, for whatever
-//! reason, the core stops capture, cancels and reaps its resident service,
-//! flushes `shutdown-complete`, and exits. Missing or failed cleanup must keep
-//! the shell's account ownership held. See `bot/SERVICE-LIFETIME.md`.
+//! reason, the core stops capture, flushes `shutdown-complete`, and exits. A
+//! core owns no model process: an engine is shared by every account and run
+//! by the launcher's engine host (`engine::host`).
 
 use crate::capture::cdp::EmbeddedPage;
 use crate::capture::embedded::{self, EmbeddedGame};
@@ -83,6 +83,14 @@ struct Cli {
     /// history beside it. Created if it does not exist.
     #[arg(long)]
     home: PathBuf,
+    /// The installed engine packages, `<data>/engines`. Without it no bot
+    /// name selects an engine.
+    #[arg(long, requires = "account")]
+    engines: Option<PathBuf>,
+    /// The account this core serves, as the launcher identifies it. An engine
+    /// may key its own per-account policy by it.
+    #[arg(long, requires = "engines")]
+    account: Option<String>,
 }
 
 /// One request from the shell.
@@ -163,6 +171,21 @@ pub fn run() -> anyhow::Result<()> {
     info!("Config loaded: {cfg:?}");
     info!("Log session at {}", session.dir().display());
 
+    let engines = match (args.engines, args.account) {
+        (Some(root), Some(account)) => Some(crate::engine::Context {
+            packages: crate::engine::Packages::new(std::path::absolute(root)?),
+            account,
+        }),
+        _ => None,
+    };
+    if let Some(engines) = &engines {
+        info!(
+            "Engine packages at {}; account {}",
+            engines.packages.root().display(),
+            engines.account
+        );
+    }
+
     let history_root = util::resolve_dir(Path::new("./history"));
     let history_store = Arc::new(history::HistoryStore::new(history_root.clone())?);
     info!("History store at {}", history_root.display());
@@ -170,7 +193,7 @@ pub fn run() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(cfg, config_path, session, history_store));
+        .block_on(serve(cfg, config_path, session, history_store, engines));
     Ok(())
 }
 
@@ -179,6 +202,7 @@ async fn serve(
     config_path: PathBuf,
     session: Arc<logger::Session>,
     history_store: Arc<history::HistoryStore>,
+    engines: Option<crate::engine::Context>,
 ) {
     // The executable's own folder is where a package puts the Python runtime.
     let runtime = bot::PythonRuntime::locate(None).ok();
@@ -196,7 +220,7 @@ async fn serve(
 
     TRAIL.store(cfg.monitor.pointer_trail, Ordering::Relaxed);
     let ready = Ready {
-        brand: monitor::brand(&cfg),
+        brand: monitor::brand(&cfg, engines.as_ref().map(|e| &e.packages)),
         platform: cfg.platform.kind,
         monitor: cfg.monitor.clone(),
         version: env!("CARGO_PKG_VERSION"),
@@ -243,10 +267,15 @@ async fn serve(
         mjai_bus.subscribe(),
         state.log_session.inspector(),
     ));
-    let service = if bot_enabled {
-        // A bot's environment is installed by whichever of the two needs it
-        // first, the manager or the service; this keeps them from doing it at once.
+    if bot_enabled {
         let syncs_in_flight = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+        if let Some(engines) = &engines {
+            tokio::spawn(crate::engine::host::mirror_status(
+                engines.clone(),
+                state.config.clone(),
+                state.monitor.clone(),
+            ));
+        }
         let manager = bot::run_bot_manager(
             state.config.clone(),
             post_tracker_bus,
@@ -254,27 +283,18 @@ async fn serve(
             state.bot_status_bus.clone(),
             state.notify_bus.clone(),
             state.log_session.inspector(),
-            runtime.clone(),
-            syncs_in_flight.clone(),
+            runtime,
+            syncs_in_flight,
             Some(state.monitor.clone()),
             state.autoplay_context.clone(),
+            engines,
         );
         tokio::spawn(async move {
             if let Err(e) = manager.await {
                 error!("Bot manager failed: {e:#}");
             }
         });
-        // The process the active bot needs across games lives and dies with
-        // the core.
-        Some(bot::service::start(
-            state.config.clone(),
-            runtime,
-            syncs_in_flight,
-            state.monitor.clone(),
-        ))
-    } else {
-        None
-    };
+    }
     start_autoplay(&state, autoplay_enabled);
 
     // One writer owns stdout, so a reply and an event never share a line.
@@ -313,21 +333,13 @@ async fn serve(
 
     info!("the shell has gone; stopping");
     supervisor::stop_and_wait(&state, LAST_WORDS).await;
-    let cleanup = match service {
-        Some(service) => service.shutdown().await,
-        None => Ok(()),
-    };
-    let ok = cleanup.is_ok();
-    let error = cleanup.err().map(|error| format!("{error:#}"));
-    if let Some(error) = &error {
-        error!(%error, "account service cleanup failed");
-    }
     // The terminal line is flushed by the same stdout owner as every reply.
     // A core crash or a missing acknowledgement must not release an account.
-    let _ = finish
-        .send(json!({ "event": "shutdown-complete", "payload": { "ok": ok, "error": error } }));
+    let _ = finish.send(
+        json!({ "event": "shutdown-complete", "payload": { "ok": true, "error": Value::Null } }),
+    );
     let _ = tokio::time::timeout(Duration::from_millis(500), writer).await;
-    std::process::exit(if ok { 0 } else { 1 });
+    std::process::exit(0);
 }
 
 /// Answer one request. An `Err` is a message the shell's interface shows as is.

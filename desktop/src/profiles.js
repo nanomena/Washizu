@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { saveObsPreference } from './view-preferences.js'
 import { importDefaults, validateDefaults } from './profile-defaults.js'
 import { SYSTEM_PROXY, validateProxy } from './profile-proxy.js'
+import { defaultEngine } from './engines.js'
 
 export const PLATFORMS = Object.freeze({
   Majsoul: { name: '雀魂', url: 'https://game.maj-soul.com/1/' },
@@ -54,11 +55,14 @@ function hasExistingHome(root) {
   return ['config.toml', 'browser', 'history', 'mjai_bot', 'profiles.json'].some(name => fs.existsSync(path.join(root, name)))
 }
 
-/** A new account has no other account's credentials or model service settings.
- * @param {Platform} platform @param {import('./profile-defaults.js').GameDefaults} defaults */
-export function initialConfig(platform, defaults) {
+/** A new account has no other account's credentials, model package or
+ * endpoint. It names the default engine when one is installed: the engine is
+ * shared, so its name is all an account holds of it.
+ * @param {Platform} platform @param {import('./profile-defaults.js').GameDefaults} defaults @param {string | null} [engine] */
+export function initialConfig(platform, defaults, engine = null) {
   const info = PLATFORMS[platformKind(platform)]
-  return `[platform]\nkind = "${platform}"\n\n[capture]\nurl = "${info.url}"\n\n[autoplay]\nenabled = ${defaults.autoplay !== 'off'}\n\n[bot]\nenabled = true\n\n[monitor]\nquick_confirm = ${defaults.quick_confirm}\npointer_lean = ${defaults.pointer_lean}\npointer_trail = ${defaults.pointer_trail}\nauto_win = ${defaults.auto_win}\nauto_continue = ${defaults.autoplay === 'continue'}\n`
+  const bot = engine ? `enabled = true\nactive_4p = ${JSON.stringify(engine)}\n` : 'enabled = true\n'
+  return `[platform]\nkind = "${platform}"\n\n[capture]\nurl = "${info.url}"\n\n[autoplay]\nenabled = ${defaults.autoplay !== 'off'}\n\n[bot]\n${bot}\n[monitor]\nquick_confirm = ${defaults.quick_confirm}\npointer_lean = ${defaults.pointer_lean}\npointer_trail = ${defaults.pointer_trail}\nauto_win = ${defaults.auto_win}\nauto_continue = ${defaults.autoplay === 'continue'}\n`
 }
 
 export class ProfileStore {
@@ -169,7 +173,7 @@ export class ProfileStore {
     const home = path.join(this.root, 'profiles', profile.id)
     fs.mkdirSync(path.dirname(home), { recursive: true })
     fs.mkdirSync(home)
-    fs.writeFileSync(path.join(home, 'config.toml'), initialConfig(platform, defaults), { flag: 'wx' })
+    fs.writeFileSync(path.join(home, 'config.toml'), initialConfig(platform, defaults, defaultEngine(path.join(this.root, 'engines'))), { flag: 'wx' })
     saveObsPreference(home, defaults.obs_output)
     const before = this.registry.profiles
     this.registry.profiles = [...before, profile]

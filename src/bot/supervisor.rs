@@ -40,6 +40,7 @@ pub async fn run_bot_manager(
     syncs_in_flight: Arc<Mutex<HashSet<String>>>,
     monitor: Option<crate::monitor::MonitorHandle>,
     clock: Arc<crate::autoplay::AutoplayContext>,
+    engines: Option<crate::engine::Context>,
 ) -> Result<()> {
     let bot_dir = {
         let cfg = config.read().await;
@@ -52,8 +53,12 @@ pub async fn run_bot_manager(
         for (label, name) in [("4p", &cfg.bot.active_4p), ("3p", &cfg.bot.active_3p)] {
             // Built-in native bots aren't in the `mjai_bot/` registry — don't
             // warn about them being "missing".
+            let engine = engines
+                .as_ref()
+                .is_some_and(|e| matches!(e.packages.find(name), Ok(Some(_))));
             if !name.is_empty()
                 && !crate::bot::native::is_native(name)
+                && !engine
                 && registry.find(name).is_none()
             {
                 warn!(
@@ -89,7 +94,8 @@ pub async fn run_bot_manager(
         syncs_in_flight,
     )
     .with_monitor(monitor)
-    .with_recovery_clock(clock);
+    .with_recovery_clock(clock)
+    .with_engines(engines);
     let rx = events.subscribe();
     manager.run(rx).await
 }

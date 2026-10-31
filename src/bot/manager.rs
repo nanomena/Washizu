@@ -88,6 +88,9 @@ pub struct BotManager {
     /// (see [`game_description`]); set on `start_game`.
     game: Option<serde_json::Value>,
     direct_through: u64,
+    /// Where engine packages are and which account this core serves; `None`
+    /// when this core was told of no engines.
+    engines: Option<crate::engine::Context>,
     out_tx: BotResponseBus,
     status_tx: BotStatusBus,
     notify_tx: NotifyBus,
@@ -121,10 +124,11 @@ impl ManagedBot {
     }
 }
 
-/// What a subprocess bot is told of the game it is started for, in
-/// `AKAGI_GAME`: the platform, the room as the platform numbers it and our
-/// rank on that room's ladder as the game began — what decides the terms the
-/// game is played for, so a bot can play to them. Nothing that identifies the
+/// What a bot is told of the game it is started for — a subprocess bot in
+/// `AKAGI_GAME`, an engine in its greeting's `game`: the platform, the room
+/// as the platform numbers it and our rank on that room's ladder as the game
+/// began — what decides the terms the game is played for, so a bot can play
+/// to them. Nothing that identifies the
 /// game, its record or a player. `None` when the bridge said nothing of the
 /// game, or for a platform it describes no room for.
 fn game_description(num_players: u8, meta: Option<&GameMeta>) -> Option<serde_json::Value> {
@@ -180,6 +184,7 @@ impl BotManager {
             actor_id: None,
             game: None,
             direct_through: 0,
+            engines: None,
             out_tx,
             status_tx,
             notify_tx,
@@ -199,6 +204,11 @@ impl BotManager {
 
     pub fn with_recovery_clock(mut self, clock: Arc<crate::autoplay::AutoplayContext>) -> Self {
         self.recovery_clock = Some(clock);
+        self
+    }
+
+    pub fn with_engines(mut self, engines: Option<crate::engine::Context>) -> Self {
+        self.engines = engines;
         self
     }
 
@@ -595,7 +605,7 @@ impl BotManager {
                         actor_id,
                     });
                     let worker = super::forecast::ForecastWorker::spawn(
-                        Ok(None),
+                        None,
                         self.config.clone(),
                         self.notify_tx.clone(),
                         bot_name.clone(),
@@ -606,6 +616,21 @@ impl BotManager {
                 Err(e) => {
                     let msg = format!("native bot init failed: {e:#}");
                     self.fail_load(&bot_name, &msg, "Built-in bot failed to load");
+                    bail!(msg);
+                }
+            }
+        }
+
+        // An installed engine package under this name: the shared engine,
+        // reached over its own protocol. A package that is invalid fails the
+        // load; it never becomes another kind of bot.
+        if let Some(engines) = &self.engines {
+            match engines.packages.find(&bot_name) {
+                Ok(Some(package)) => return self.spawn_engine(package, game_id, actor_id).await,
+                Ok(None) => {}
+                Err(e) => {
+                    let msg = format!("invalid engine package: {e:#}");
+                    self.fail_load(&bot_name, &msg, "Engine misconfigured");
                     bail!(msg);
                 }
             }
@@ -636,7 +661,7 @@ impl BotManager {
             }
         };
         // Registry keeps malformed bots visible for settings repair, but a
-        // bad declared transport must never silently become plain MJAI.
+        // manifest that does not parse must never start a runner.
         entry.manifest = match manifest::Manifest::load(&entry.dir) {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -768,18 +793,7 @@ impl BotManager {
         // child via AKAGI_BOT_CONFIG. Bots without a manifest get no env
         // var — same behaviour as v3 before settings existed.
         if let Some(m) = entry.manifest.as_ref() {
-            // What Akagi asks of the bot beyond its settings, in a section
-            // of its own (`akagi`, beside whatever the bot calls its own
-            // keys): `lean`, the preference for a separate forecast relay.
-            let lean = {
-                let config = self.config.read().await;
-                config.monitor.pointer_lean && config.autoplay.enabled
-            };
             match manifest::load_values(&entry.dir, m)
-                .map(|mut values| {
-                    values.insert("akagi".into(), serde_json::json!({ "lean": lean }));
-                    values
-                })
                 .and_then(|values| manifest::write_resolved(&entry.dir, &values))
             {
                 Ok(path) => {
@@ -833,43 +847,71 @@ impl BotManager {
         // Reuse the loading id so the sticky toast is replaced, not
         // duplicated. Frontend treats same-id as a swap.
         self.emit_notify(Notification::success(format!("{bot_name} ready")).id(load_id));
-        let protocol = entry
-            .manifest
-            .as_ref()
-            .map(|m| m.bot.protocol)
-            .unwrap_or_default();
-        let forecast_command = if protocol == manifest::BotProtocol::PositionedMjai
-            && self.recovery_clock.is_some()
-            && self.monitor.is_some()
-        {
-            entry
-                .manifest
-                .as_ref()
-                .and_then(|m| m.forecast.as_ref())
-                .map(|spec| bot.forecast_command(&spec.entry))
-                .transpose()
-        } else {
-            Ok(None)
-        };
+        // A plain mjai bot has no forecast connection; the worker reports
+        // that, and the bot runs directly.
         let forecast = super::forecast::ForecastWorker::spawn(
-            forecast_command,
+            None,
             self.config.clone(),
             self.notify_tx.clone(),
             bot_name.clone(),
         );
-        let forecast_input = forecast.input.clone();
-        self.runner = Some(match (protocol, &self.recovery_clock, &self.monitor) {
-            (manifest::BotProtocol::PositionedMjai, Some(clock), Some(monitor)) => {
+        self.runner = Some(ManagedBot::Direct(Box::new(bot), Some(forecast)));
+        Ok(())
+    }
+
+    /// The decision connection to the shared engine for this game seat, run
+    /// by the single recovery coordinator with its local standby.
+    async fn spawn_engine(
+        &mut self,
+        package: crate::engine::Package,
+        game_id: Option<u64>,
+        actor_id: u8,
+    ) -> Result<()> {
+        let bot_name = self.active_name.clone();
+        let account = self
+            .engines
+            .as_ref()
+            .map(|engines| engines.account.clone())
+            .context("an engine needs its account context")?;
+        let lean = {
+            let config = self.config.read().await;
+            config.monitor.pointer_lean && config.autoplay.enabled
+        };
+        let runner = crate::engine::EngineRunner::new(
+            &package,
+            crate::engine::runner::Greeting {
+                account,
+                seat: actor_id,
+                lean,
+                game: self.game.clone(),
+            },
+            self.notify_tx.clone(),
+        );
+        info!(bot = %bot_name, actor_id, engine = %package.display, "engine runner ready");
+        self.emit_status(BotStatus::Ready {
+            bot: bot_name.clone(),
+            actor_id,
+        });
+        let coordinated = self.recovery_clock.clone().zip(self.monitor.clone());
+        let forecast = super::forecast::ForecastWorker::spawn(
+            coordinated.is_some().then(|| package.endpoint()),
+            self.config.clone(),
+            self.notify_tx.clone(),
+            bot_name.clone(),
+        );
+        self.runner = Some(match coordinated {
+            Some((clock, monitor)) => {
+                let forecast_input = forecast.input.clone();
                 ManagedBot::Coordinated {
                     game_id,
                     handle: super::recovery::RecoveryHandle::spawn(
-                        Box::new(bot),
+                        Box::new(runner),
                         actor_id,
                         self.game_num_players,
                         bot_name,
                         self.config.clone(),
-                        clock.clone(),
-                        monitor.clone(),
+                        clock,
+                        monitor,
                         self.out_tx.clone(),
                         self.inspector.clone(),
                         Some(forecast_input),
@@ -877,7 +919,7 @@ impl BotManager {
                     forecast: Some(forecast),
                 }
             }
-            _ => ManagedBot::Direct(Box::new(bot), Some(forecast)),
+            None => ManagedBot::Direct(Box::new(runner), Some(forecast)),
         });
         Ok(())
     }
@@ -1729,13 +1771,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_transport_manifest_cannot_silently_start_a_direct_runner() {
+    async fn malformed_manifest_cannot_silently_start_a_runner() {
         let root = tempfile::tempdir().unwrap();
         let bot = root.path().join("broken");
         std::fs::create_dir(&bot).unwrap();
         std::fs::write(bot.join("bot.py"), "").unwrap();
         std::fs::write(bot.join("pyproject.toml"), "").unwrap();
-        std::fs::write(bot.join("manifest.toml"), "[bot]\nprotocol = 'unknown'\n").unwrap();
+        std::fs::write(bot.join("manifest.toml"), "manifest_version = 'one'\n").unwrap();
         let mut mgr = BotManager::new(
             Some(dummy_runtime()),
             root.path().into(),

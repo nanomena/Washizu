@@ -44,6 +44,60 @@ pub fn merge_into<T: serde::Serialize>(config: &T, existing: &str) -> Result<Str
     Ok(doc.to_string())
 }
 
+/// Write into `existing` only what differs between `before` and `after`.
+///
+/// A running core holds the config it loaded at start. Another writer — an
+/// installer, or the user — may have edited the file since. A save that
+/// rewrote every key from memory would put those keys back the way they were
+/// when the core started; this writes the keys the change touched and leaves
+/// the rest of the file as it is on disk.
+pub fn merge_changes<T: serde::Serialize>(
+    before: &T,
+    after: &T,
+    existing: &str,
+) -> Result<String, String> {
+    let mut doc: DocumentMut = existing.parse().map_err(|e| format!("{e}"))?;
+    let parse = |value: &T| -> Result<DocumentMut, String> {
+        toml::to_string_pretty(value)
+            .map_err(|e| format!("{e}"))?
+            .parse()
+            .map_err(|e| format!("{e}"))
+    };
+    let (old, new) = (parse(before)?, parse(after)?);
+    let mut changes = Table::new();
+    diff_table(
+        old.as_table(),
+        new.as_table(),
+        &mut changes,
+        &mut Vec::new(),
+    );
+    merge_table(doc.as_table_mut(), &changes, &mut Vec::new());
+    Ok(doc.to_string())
+}
+
+/// The keys of `new` whose value differs from `old`, as a table of the same
+/// shape. Both sides come from the same serialiser, so equal values print
+/// equally. Opaque tables count as one value.
+fn diff_table(old: &Table, new: &Table, out: &mut Table, path: &mut Vec<String>) {
+    for (key, item) in new.iter() {
+        path.push(key.to_string());
+        match (old.get(key), item) {
+            (Some(Item::Table(old_sub)), Item::Table(new_sub)) if !is_opaque(path) => {
+                let mut sub = Table::new();
+                diff_table(old_sub, new_sub, &mut sub, path);
+                if !sub.is_empty() {
+                    out.insert(key, Item::Table(sub));
+                }
+            }
+            (Some(old_item), new_item) if old_item.to_string() == new_item.to_string() => {}
+            _ => {
+                out.insert(key, item.clone());
+            }
+        }
+        path.pop();
+    }
+}
+
 /// Copy every key of `fresh` into `target`, recursing into sub-tables so
 /// unknown keys inside a known table survive.
 fn merge_table(target: &mut Table, fresh: &Table, path: &mut Vec<String>) {
@@ -362,5 +416,33 @@ delay.some_future_knob = 1
     #[test]
     fn invalid_existing_document_is_an_error() {
         assert!(merge_into(&cfg(), "this is not = = toml").is_err());
+    }
+
+    /// A save from a core that loaded an older file writes the setting it
+    /// changed and keeps what another writer put in the file since.
+    #[test]
+    fn a_change_writes_only_its_own_keys_over_a_newer_file() {
+        let mut loaded = AppConfig::default();
+        loaded.bot.active_4p = "built-in".into();
+        loaded.monitor.auto_continue = true;
+        // Edited on disk after the core loaded it.
+        let on_disk = "[bot]\nactive_4p = \"installed\"\n\n[monitor]\nauto_continue = true\n";
+        let mut next = loaded.clone();
+        next.monitor.auto_continue = false;
+
+        let out = merge_changes(&loaded, &next, on_disk).unwrap();
+        let back: AppConfig = toml::from_str(&out).unwrap();
+        assert_eq!(
+            back.bot.active_4p, "installed",
+            "the newer edit was overwritten:\n{out}"
+        );
+        assert!(!back.monitor.auto_continue);
+        // Nothing else was written into the file.
+        assert!(
+            !out.contains("pointer_trail"),
+            "untouched keys were written:\n{out}"
+        );
+        // No change, no write.
+        assert_eq!(merge_changes(&next, &next, &out).unwrap(), out);
     }
 }

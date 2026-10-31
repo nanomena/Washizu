@@ -1,4 +1,4 @@
-//! Cancellation and reaping shared by the model service and its installer.
+//! Cancellation and reaping shared by the engine host and its installer.
 
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -10,7 +10,7 @@ const GRACE: Duration = Duration::from_secs(3);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
-pub(super) struct ReleaseFailure(anyhow::Error);
+pub(crate) struct ReleaseFailure(anyhow::Error);
 
 impl std::fmt::Display for ReleaseFailure {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -19,11 +19,11 @@ impl std::fmt::Display for ReleaseFailure {
 }
 impl std::error::Error for ReleaseFailure {}
 
-pub(super) fn stopping(stop: &watch::Receiver<bool>) -> bool {
+pub(crate) fn stopping(stop: &watch::Receiver<bool>) -> bool {
     *stop.borrow() || stop.has_changed().is_err()
 }
 
-pub(super) async fn cancelled(stop: &mut watch::Receiver<bool>) {
+pub(crate) async fn cancelled(stop: &mut watch::Receiver<bool>) {
     while !stopping(stop) {
         if stop.changed().await.is_err() {
             return;
@@ -33,7 +33,7 @@ pub(super) async fn cancelled(stop: &mut watch::Receiver<bool>) {
 
 /// Close the owned pipe, then reap the owned process. A kill request alone is
 /// never evidence that its resources have been released.
-pub(super) async fn stop_child(
+pub(crate) async fn stop_child(
     child: &mut Child,
     stdin: Option<ChildStdin>,
     kind: &str,

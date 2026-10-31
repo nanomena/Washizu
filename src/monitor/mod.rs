@@ -1,7 +1,8 @@
 //! Versioned, read-only observations for the monitoring workspace.
 //! No UI subscriber can start a bot or mutate game state through this cache.
 
-use crate::bot::{BotResponse, ServiceStatus};
+use crate::bot::BotResponse;
+use crate::engine::EngineStatus;
 use crate::game_state::{GameStateSnapshot, MahgenView, MeldSnapshot};
 use crate::schema::{
     AccountLevels, BotStatus, CaptureStatus, MjaiEvent, Notification, NotifyLevel,
@@ -13,7 +14,14 @@ use tokio::sync::watch;
 
 /// The name the window goes by: the active bot's display name, as its
 /// manifest gives it, or Akagi's own when no bot is selected.
-pub fn brand(config: &crate::config::AppConfig) -> String {
+pub fn brand(
+    config: &crate::config::AppConfig,
+    engines: Option<&crate::engine::Packages>,
+) -> String {
+    let active = config.bot.active_for(4);
+    if let Some(Ok(Some(engine))) = engines.map(|packages| packages.find(active)) {
+        return engine.display;
+    }
     let root = crate::util::resolve_dir(std::path::Path::new(&config.bot.dir));
     crate::bot::BotRegistry::scan(&root)
         .ok()
@@ -82,7 +90,7 @@ pub struct RoundResult {
     pub deltas: Option<Vec<i32>>,
 }
 
-/// One thing a bot or its service wants the user to know, shown as it is
+/// One thing a bot or its engine wants the user to know, shown as it is
 /// written: the monitor does not interpret it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fact {
@@ -93,7 +101,7 @@ pub struct Fact {
     pub note: Option<String>,
 }
 
-/// The `facts` list of a reply's `meta` or of a service's `ready` line.
+/// The `facts` list of a reply's `meta` or of an engine's `ready` line.
 /// Anything that is not a well-formed fact is left out.
 pub fn facts_of(value: Option<&serde_json::Value>) -> Vec<Fact> {
     value
@@ -145,9 +153,9 @@ pub struct MonitorSnapshot {
     /// unknown / connected / error; independent of the Bot process state.
     pub service: String,
     pub service_error: Option<String>,
-    /// The process behind `service` when the app runs it: whether it is up,
-    /// not whether the bot has reached it.
-    pub server: ServiceStatus,
+    /// The shared engine behind `service`, when the account uses one: whether
+    /// it is up, not whether this account has reached it.
+    pub server: EngineStatus,
     pub sync_error: Option<String>,
     /// Last unresolved sync fault. Unlike the current hand's `sync_error`,
     /// this survives deals/reconnects until a fresh actionable model reply.
@@ -194,7 +202,7 @@ impl Default for MonitorSnapshot {
             bot: BotStatus::Idle,
             service: "unknown".into(),
             service_error: None,
-            server: ServiceStatus::None,
+            server: EngineStatus::None,
             sync_error: None,
             sync_fault: None,
             brand: "Washizu".into(),
@@ -669,7 +677,7 @@ impl MonitorHandle {
     pub fn set_autoplay(&self, enabled: bool) {
         self.update(|i| i.snapshot.autoplay_enabled = enabled);
     }
-    pub fn set_server(&self, server: ServiceStatus) {
+    pub fn set_server(&self, server: EngineStatus) {
         self.update(|i| i.snapshot.server = server);
     }
     pub fn set_brand(&self, brand: String) {
