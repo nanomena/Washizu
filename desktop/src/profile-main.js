@@ -1,6 +1,7 @@
 // @ts-check
-// The chooser owns no game, core or model. Each account opens in a separate
-// process so Chromium's userData is fixed before Electron becomes ready.
+// The chooser owns no game or core. Each account opens in a separate process
+// so Chromium's userData is fixed before Electron becomes ready. It owns the
+// shared engine hosts: one per engine an open account uses, until it quits.
 import { app, BrowserWindow, dialog, ipcMain, Menu, screen } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -9,6 +10,7 @@ import { ProfileStore } from './profiles.js'
 import { ProfileSessions } from './profile-session.js'
 import { registerDockScheme, serveDock } from './dock.js'
 import { guideSize } from './profile-layout.js'
+import { EngineHosts, accountEngine, corePath } from './engines.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -28,6 +30,8 @@ export async function startProfiles(root) {
   })
   if (app.commandLine.hasSwitch('no-sandbox')) forwarded.push('--no-sandbox')
   const sessions = new ProfileSessions({ executable: process.execPath, entry: app.isPackaged ? [] : [path.resolve(HERE, '..')], root, options: forwarded })
+  const engines = path.join(root, 'engines')
+  const hosts = new EngineHosts({ engines, core: corePath({ value: app.commandLine.getSwitchValue('core') || process.env.AKAGI_CORE || '', packaged: app.isPackaged, resources: process.resourcesPath, here: HERE }) })
   /** @type {BrowserWindow | null} */
   let window = null
   let error = ''
@@ -53,6 +57,9 @@ export async function startProfiles(root) {
   app.on('window-all-closed', () => { if (sessions.liveCount === 0) app.quit() })
   // Quit/close of the chooser never broadcasts shutdown to live clients.
   app.on('before-quit', event => { if (sessions.liveCount > 0) { event.preventDefault(); show() } })
+  // Engine hosts stop their engines and exit before the chooser does.
+  app.on('will-quit', event => { if (!hosts.idle) { event.preventDefault(); void hosts.stopAll().finally(() => app.quit()) } })
+  hosts.on('failure', (name, message) => { error = `引擎 ${name}：${message}`; changed() })
   sessions.on('change', changed)
   sessions.on('show', show)
   sessions.on('ready', id => {
@@ -68,7 +75,13 @@ export async function startProfiles(root) {
       else if (method === 'reorder_profiles') store.reorder(values.ids)
       else if (method === 'delete_profile') { const profile = store.get(values.id); sessions.remove(profile.id, () => store.delete(profile.id)); fitGuide() }
       else if (method === 'save_profile_defaults') store.saveDefaults(values.defaults)
-      else if (method === 'open_profile') { const profile = store.get(values.id); error = ''; sessions.open(profile.id) }
+      else if (method === 'open_profile') {
+        const profile = store.get(values.id)
+        error = ''
+        const engine = accountEngine(store.home(profile.id), engines)
+        if (engine) hosts.ensure(engine)
+        sessions.open(profile.id)
+      }
       else if (method !== 'list_profiles') throw new Error('未知的档案操作。')
       if (method !== 'list_profiles') changed()
       return { ok: true, value: state() }

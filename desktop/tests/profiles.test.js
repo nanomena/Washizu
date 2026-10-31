@@ -74,12 +74,12 @@ function temporary(t) {
 test('adopting and reopening the existing account preserves every original file byte for byte', t => {
   const root = temporary(t)
   const original = {
-    'config.toml': '# Keep my unknown settings too\n[platform]\nkind = "Majsoul"\n[bot]\nactive_4p = "miai"\n',
+    'config.toml': '# Keep my unknown settings too\n[platform]\nkind = "Majsoul"\n[bot]\nactive_4p = "example-bot"\n',
     'browser/Partitions/game/Cookies': 'existing-login-database',
     'browser/Local State': 'existing-encryption-key-reference',
     'browser/Partitions/game/Local Storage/leveldb/000003.log': 'existing-web-storage',
     'history/games/game.jsonl': 'existing-match',
-    'mjai_bot/miai/settings.toml': 'port = 7335\nlead_cap = 20000\n',
+    'mjai_bot/example-bot/settings.toml': 'port = 7335\nlead_cap = 20000\n',
     'window.json': '{"width":1200}',
   }
   for (const [relative, value] of Object.entries(original)) {

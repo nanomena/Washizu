@@ -31,10 +31,12 @@ Settings → App holds the account chooser button and the application's
 About/license details. The game window has no application menu bar. Showing
 the chooser during a game does not stop that client. Closing the chooser while
 clients run minimizes it; Quit is prevented until those clients have closed.
-If the chooser process is lost, its clients continue independently.
+If the chooser process is lost, its clients continue independently, but the
+engine hosts it owned stop with it: those clients' decisions fall to the local
+standby.
 
-Closing an account waits for its core to stop and acknowledge managed-service
-cleanup. The account process then acknowledges release to the chooser. Only
+Closing an account waits for its core to stop and acknowledge its cleanup.
+The account process then acknowledges release to the chooser. Only
 that profile stays occupied until both the acknowledgement and the process's
 close arrive. An abnormal exit or missing cleanup acknowledgement locks only
 that profile and displays the failure. Other profiles remain usable. A proven
@@ -65,11 +67,12 @@ Chooser Settings holds application language and separate Mahjong Soul/Tenhou
 defaults for future profiles. On first use it imports the existing profiles'
 portable controls once; later edits are saved in `launcher/defaults.json` and
 never rewrite an existing profile's configuration. New profiles enable the
-core's built-in bot and inherit the selected autoplay mode, pointer controls,
-result confirmation and OBS preference. Tenhou uses the `/3/` Web client;
-client auto-win remains unavailable there. Credentials, browser storage,
-external model packages, model settings, endpoints and ports are never copied.
-External miai setup remains per profile; the original account keeps its own.
+bot — the default engine when one is installed (`engines/engines.toml`),
+else the core's built-in bot — and inherit the selected autoplay mode,
+pointer controls, result confirmation and OBS preference. Tenhou uses the
+`/3/` Web client; client auto-win remains unavailable there. Credentials,
+browser storage, model packages, model settings, endpoints and ports are
+never copied: an engine is shared, and an account holds only its name.
 
 `main.js` chooses the launcher or account process. `profile-main.js` owns the
 chooser and starts an account with an internal `--profile=<id>` argument;
@@ -116,8 +119,12 @@ only its profile locks while other clients continue or open independently.
 Four-language compact layouts are checked without visiting a game site.
 On bare Xvfb, which has no window manager, the fixture observes the actual
 native minimize request rather than claiming OS iconification was verified.
-The real-process service shutdown regressions and commands are documented in
-[`src/bot/SERVICE-LIFETIME.md`](../src/bot/SERVICE-LIFETIME.md).
+A decision engine is shared by every account: the chooser starts one
+`akagi-core engine-host` per engine when the first account that uses it opens
+(`src/engines.js`), and closes it when the application quits. New accounts
+name `engines/engines.toml`'s default engine when it is installed. The
+contract and its real-process regressions are in
+[`src/engine/PROTOCOL.md`](../src/engine/PROTOCOL.md).
 
 Capture and autoplay both go through the Chrome DevTools Protocol, and of the
 webviews an operating system provides only Windows' is a Chromium. This shell
