@@ -65,7 +65,12 @@ pub fn merge_changes<T: serde::Serialize>(
     };
     let (old, new) = (parse(before)?, parse(after)?);
     let mut changes = Table::new();
-    diff_table(old.as_table(), new.as_table(), &mut changes, &mut Vec::new());
+    diff_table(
+        old.as_table(),
+        new.as_table(),
+        &mut changes,
+        &mut Vec::new(),
+    );
     merge_table(doc.as_table_mut(), &changes, &mut Vec::new());
     Ok(doc.to_string())
 }
@@ -421,23 +426,22 @@ delay.some_future_knob = 1
         loaded.bot.active_4p = "built-in".into();
         loaded.monitor.auto_continue = true;
         // Edited on disk after the core loaded it.
-        let on_disk = "[bot]
-active_4p = \"installed\"
-
-[monitor]
-auto_continue = true
-";
+        let on_disk = "[bot]\nactive_4p = \"installed\"\n\n[monitor]\nauto_continue = true\n";
         let mut next = loaded.clone();
         next.monitor.auto_continue = false;
 
         let out = merge_changes(&loaded, &next, on_disk).unwrap();
         let back: AppConfig = toml::from_str(&out).unwrap();
-        assert_eq!(back.bot.active_4p, "installed", "the newer edit was overwritten:
-{out}");
+        assert_eq!(
+            back.bot.active_4p, "installed",
+            "the newer edit was overwritten:\n{out}"
+        );
         assert!(!back.monitor.auto_continue);
         // Nothing else was written into the file.
-        assert!(!out.contains("pointer_trail"), "untouched keys were written:
-{out}");
+        assert!(
+            !out.contains("pointer_trail"),
+            "untouched keys were written:\n{out}"
+        );
         // No change, no write.
         assert_eq!(merge_changes(&next, &next, &out).unwrap(), out);
     }
