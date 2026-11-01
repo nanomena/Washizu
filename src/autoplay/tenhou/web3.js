@@ -49,7 +49,9 @@
     if (native.input.actor() !== 0 || !native.input.isCard(target)) return false;
     const slot = native.input.targetSlot(target);
     const card = native.input.slot(slot);
-    return Number.isInteger(slot) && slot >= 0 && slot < 14 && card && card.target === target && card.present && card.legal && !card.blocked;
+    // Whose window it is, not which cards the client currently marks playable: those flags follow its UI
+    // state, which a stray manual click can change. The protocol decides what may be thrown.
+    return Number.isInteger(slot) && slot >= 0 && slot < 14 && card && card.target === target && card.present;
   };
 
   function inputSnapshot() {
@@ -110,7 +112,10 @@
   }
   function geometryContext(view) {
     const g = native.geometry.read();
-    if (!g || g.pressed || ![g.ratio, g.left, g.top, g.width, g.height, globalThis.pageXOffset, globalThis.pageYOffset].every(Number.isFinite)
+    // A button the client believes held does not block targets: a stray click whose release never
+    // arrived would otherwise hold the turn until its clock ran out. Manual input is the shared
+    // transaction's to detect, as on every site; our own press releases the client's button state.
+    if (!g || ![g.ratio, g.left, g.top, g.width, g.height, globalThis.pageXOffset, globalThis.pageYOffset].every(Number.isFinite)
       || g.ratio <= 0 || g.width <= 0 || g.height <= 0 || !visible(g.canvas) || !connected(g.menuRoot) || !connected(g.handPanel)
       || globalThis.visualViewport && globalThis.visualViewport.scale !== 1) return null;
     const canvas = g.canvas.getBoundingClientRect();

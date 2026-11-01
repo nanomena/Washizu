@@ -24,7 +24,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 function fixture() {
   const canvas = new Element('CANVAS'), menuRoot = new Element(), handPanel = new Element();
   const state = { epoch: 1, uiEpoch: 1, live: 1, actor: 0, hand: [0, 4, 8, 12, 16, 17, 20, 24, 28, 32, 36, 40, 44, 48], drawn: 48,
-    riichi: false, ready: true, mounted: true, pressed: false, modal: false, popup: { element: null }, controls: {}, offers: {},
+    riichi: false, ready: true, mounted: true, modal: false, popup: { element: null }, controls: {}, offers: {},
     selected: ['1', '9'], loaded: true, reservationRequested: false,
     ratio: 2, left: 20, top: 30, width: 80, height: 120, scrollX: 0, scrollY: 0, overlay: null, effects: [],
     clockFacts: { startedAt: 100, now: 250, fixedMs: 5000, bankMs: 7000, remainingMs: 11850 } };
@@ -198,10 +198,22 @@ test('the protocol decides what may be thrown; the client per-card flags only de
 });
 test('hidden, occluded, overlapping and foreign DOM routes do not become mouse targets', () => {
   for (const change of [f => { f.state.overlay = new Element('BUTTON'); }, f => { f.state.cards[3].x = f.state.cards[4].x; },
-    f => { f.canvas.style.display = 'none'; }, f => { f.state.pressed = true; },
+    f => { f.canvas.style.display = 'none'; },
     f => { f.context.document.elementFromPoint = () => f.handPanel; }]) {
     const f = fixture(); change(f); assert.notEqual(f.probeDiscard().probe.status, 'ready'); assert.deepEqual(f.state.effects, []);
   }
+});
+test('a button the client believes held, or flags on the timed card, never hold our own turn', () => {
+  // A stray click whose release never reached the page leaves the client thinking a button is down;
+  // a stray selection can change its per-card flags. Neither is whose turn it is, so as on Mahjong
+  // Soul the turn still finds its target, and manual input is the shared transaction's to detect.
+  const f = fixture();
+  f.state.pointerBits = 4;
+  f.state.target.legal = false; f.state.target.blocked = true;
+  const snapshot = f.api.readInput();
+  assert.equal(snapshot.ready, true);
+  assert.equal(f.probeDiscard(48, true).probe.status, 'ready');
+  assert.deepEqual(f.state.effects, []);
 });
 test('final point check rejects a changed viewport, layout, native window, hand or actual hit', () => {
   for (const change of [f => { f.state.left += 4; }, f => { f.state.epoch++; }, f => { f.state.hand.pop(); },
