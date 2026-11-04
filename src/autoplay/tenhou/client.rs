@@ -94,6 +94,8 @@ pub struct InputSnapshot {
     pub next_draw: Option<CanvasRect>,
     #[serde(deserialize_with = "required_nullable")]
     pub rest: Option<CanvasRect>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub buttons: Option<(f64, f64)>,
 }
 
 fn required_nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
@@ -146,6 +148,9 @@ impl InputSnapshot {
                 .rest
                 .as_ref()
                 .is_some_and(|bounds| !inside(&self.viewport, bounds))
+            || self
+                .buttons
+                .is_some_and(|(x, y)| !self.viewport.contains(x, y))
         {
             return Err(anyhow!("invalid Tenhou Web3 input snapshot"));
         }
@@ -451,6 +456,7 @@ mod tests {
             tiles: vec![],
             next_draw: None,
             rest: None,
+            buttons: None,
             offers: vec![
                 Offer {
                     identity: "red".into(),
@@ -514,7 +520,7 @@ mod tests {
     fn geometry_and_probe_contracts_are_required_and_bounded() {
         let value = json!({"client":"web3","ready":false,"blocked":"no-hand","window":null,"clock":null,"hand":[16],"tiles":[
             {"identity":"tile:16","tile":16,"drawn":false,"bounds":{"x":10,"y":20,"width":30,"height":40}}
-        ],"offers":[],"viewport":{"x":0,"y":0,"width":800,"height":600},"nextDraw":null,"rest":null});
+        ],"offers":[],"viewport":{"x":0,"y":0,"width":800,"height":600},"nextDraw":null,"rest":null,"buttons":null});
         assert!(serde_json::from_value::<InputSnapshot>(value.clone())
             .unwrap()
             .check()

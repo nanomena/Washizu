@@ -194,6 +194,7 @@ fn layout(input: &client::InputSnapshot) -> Option<PointerLayout> {
             .collect(),
         next_draw: input.next_draw,
         rest: input.rest?,
+        buttons: input.buttons?,
     };
     layout.valid().then_some(layout)
 }

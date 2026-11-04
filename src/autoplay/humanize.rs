@@ -15,7 +15,7 @@
 //! - **Places** are normal about where they aim ([`Spread`]): mostly near, now
 //!   and then further, never past a bound that would put them on something
 //!   else. Where the hand waits between presses has a tail of its own
-//!   ([`rest_spot`]): mostly near the buttons, now and then across the table.
+//!   ([`rest_offset`]): mostly near the buttons, now and then across the table.
 //! - **Choices** are chances ([`chance`], [`one_of`], [`fraction`]).
 //!
 //! The think time before a decision is the delay model's to shape
@@ -442,27 +442,33 @@ pub fn session_lean() -> (f64, f64) {
     })
 }
 
-/// Where the hand waits between presses, as a normalised 16:9 point. Mostly
-/// near one place, a little up and to the left of the buttons; the further
-/// from it, the rarer, now and then across the table. Never over the hand,
-/// which would leave a tile lifted, and never by the edge of the game.
-pub fn rest_spot<R: Rng + ?Sized>(rng: &mut R) -> (f64, f64) {
+/// Where the first button stands on a table with no measured geometry, as a
+/// normalised 16:9 point.
+pub const REST_BUTTONS: (f64, f64) = (10.875, 7.0);
+/// The part of such a table the hand waits in, as normalised 16:9 corners:
+/// never over the hand, which would leave a tile lifted, and never by the edge
+/// of the game.
+pub const REST_AREA: ((f64, f64), (f64, f64)) = ((1.0, 3.0), (15.0, 7.4));
+/// Where the hand mostly waits, in 16:9 units from the first button.
+const REST_HOME: (f64, f64) = (-1.6, -0.7);
+
+/// Where the hand waits between presses, in 16:9 units from the first button.
+/// Mostly near one place, a little up and to the left of it; the further from
+/// it, the rarer, now and then across the table.
+pub fn rest_offset<R: Rng + ?Sized>(rng: &mut R) -> (f64, f64) {
     const NEAR: Tail = Tail {
         median: 0.9,
         spread: 0.75,
         low: 0.0,
         high: 7.5,
     };
-    let (bx, by) = crate::autoplay::majsoul::coords::ACTIONS[0];
-    let home = (bx - 1.6, by - 0.7);
     let reach = NEAR.draw(rng);
     // Mostly to the left and a little up, the way a hand drifts off the buttons.
     let angle = std::f64::consts::PI * (1.1 + Spread { sd: 0.3, most: 0.9 }.draw(rng));
-    let (x, y) = (
-        home.0 + reach * angle.cos(),
-        home.1 + reach * angle.sin() * 0.45,
-    );
-    (x.clamp(1.0, 15.0), y.clamp(3.0, 7.4))
+    (
+        REST_HOME.0 + reach * angle.cos(),
+        REST_HOME.1 + reach * angle.sin() * 0.45,
+    )
 }
 
 /// A unit normal draw.
@@ -568,20 +574,14 @@ mod tests {
     }
 
     /// Where the hand waits: mostly near its home, the further the rarer,
-    /// now and then far; never over the hand or by the edge.
+    /// now and then far.
     #[test]
-    fn the_rest_spot_is_mostly_near_home_and_sometimes_far() {
+    fn the_rest_is_mostly_near_home_and_sometimes_far() {
         let mut rng = StdRng::seed_from_u64(7);
-        let (bx, by) = crate::autoplay::majsoul::coords::ACTIONS[0];
-        let home = (bx - 1.6, by - 0.7);
         let mut far: Vec<f64> = (0..4000)
             .map(|_| {
-                let (x, y) = rest_spot(&mut rng);
-                assert!(
-                    (1.0..=15.0).contains(&x) && (3.0..=7.4).contains(&y),
-                    "{x} {y}"
-                );
-                ((x - home.0).powi(2) + (y - home.1).powi(2)).sqrt()
+                let (x, y) = rest_offset(&mut rng);
+                ((x - REST_HOME.0).powi(2) + (y - REST_HOME.1).powi(2)).sqrt()
             })
             .collect();
         far.sort_by(f64::total_cmp);

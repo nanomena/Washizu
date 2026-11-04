@@ -179,7 +179,14 @@
     const reveal = native.menu.reveal(entry.code);
     return reveal && controlTarget(g, reveal, entry.identity, 'reveal');
   }
-  function restBounds(g) {
+  // Where the client's first button stands, shown or not, as a share of the canvas.
+  const FIRST_BUTTON = { x: 0.695, y: 0.75 };
+  function firstButton(g) {
+    const clipped = intersection(g.canvas, g.viewport);
+    return clipped && { x: clipped.x + clipped.width * FIRST_BUTTON.x, y: clipped.y + clipped.height * FIRST_BUTTON.y };
+  }
+  // The free piece of the table by the buttons: the shared pointer draws where in it the hand waits.
+  function restBounds(g, buttons) {
     const clipped = intersection(g.canvas, g.viewport);
     if (!clipped) return null;
     let pieces = [clipped];
@@ -191,13 +198,19 @@
       pieces = pieces.flatMap(piece => subtract(piece, obstacle));
       if (pieces.length > 128) return null;
     }
-    pieces.sort((a, b) => b.width * b.height - a.width * a.height);
-    return pieces.find(rect => handRoute(g, center(rect)) && !hitCard(g, center(rect))) || null;
+    const free = list => list.filter(rect => handRoute(g, center(rect)) && !hitCard(g, center(rect)));
+    const status = g.statusCanvas && visible(g.statusCanvas) ? g.statusCanvas.getBoundingClientRect() : null;
+    let open = status && validRect(status) ? free(pieces.flatMap(piece => subtract(piece, status))) : [];
+    if (!open.length) open = free(pieces);
+    const unit = g.canvas.width / 16, roomy = open.filter(rect => rect.width >= 3 * unit && rect.height >= unit);
+    const away = rect => Math.hypot(Math.max(rect.x - buttons.x, 0, buttons.x - rect.x - rect.width),
+      Math.max(rect.y - buttons.y, 0, buttons.y - rect.y - rect.height));
+    return (roomy.length ? roomy : open).sort((a, b) => away(a) - away(b) || b.width * b.height - a.width * a.height)[0] || null;
   }
   function geometrySnapshot() {
     const current = inputSnapshot();
     const view = viewport();
-    const dto = { ...current.dto, viewport: view, clock: null, tiles: [], offers: current.dto.offers.map(offer => ({ ...offer, bounds: null, reveal: null })), nextDraw: null, rest: null };
+    const dto = { ...current.dto, viewport: view, clock: null, tiles: [], offers: current.dto.offers.map(offer => ({ ...offer, bounds: null, reveal: null })), nextDraw: null, rest: null, buttons: null };
     if (current.dto.window !== null && native.clock.mounted()) {
       const facts = native.clock.facts();
       if (facts && [facts.startedAt, facts.now, facts.fixedMs, facts.bankMs, facts.remainingMs].every(Number.isFinite)
@@ -231,7 +244,9 @@
         reveal: target?.kind === 'reveal' ? { identity: target.identity, bounds: target.bounds } : null };
     });
     dto.nextDraw = dto.tiles.find(entry => entry.drawn)?.bounds || null;
-    dto.rest = restBounds(g);
+    const buttons = firstButton(g);
+    dto.buttons = buttons && [buttons.x, buttons.y];
+    dto.rest = buttons && restBounds(g, buttons);
     return { ...current, dto, geometry: g, tileEntries };
   }
 

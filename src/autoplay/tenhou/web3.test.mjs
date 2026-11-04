@@ -196,6 +196,22 @@ test('the protocol decides what may be thrown; the client per-card flags only de
   assert.equal(f.probeDiscard(16, false).probe.status, 'ready');
   assert.deepEqual(f.state.effects, []);
 });
+test('the hand waits by the first button, in a free piece clear of the status panel and the controls', () => {
+  const f = fixture(), route = f.context.document.elementFromPoint;
+  const status = new Element('CANVAS', { x: 250, y: 150, width: 300, height: 200 });
+  f.state.statusCanvas = status;
+  f.context.document.elementFromPoint = (x, y) => contains(status.rect, { x, y }) ? status : route(x, y);
+  assert.deepEqual(plain(f.api.readInput().buttons), [556, 450]);
+  assert.deepEqual(plain(f.api.readInput().rest), { x: 0, y: 350, width: 800, height: 80 });
+  f.control(3, { x: 500, y: 360, width: 100, height: 60 });
+  const rest = f.api.readInput().rest;
+  assert.ok(rest.x + rest.width <= 500 || rest.x >= 600 || rest.y + rest.height <= 360 || rest.y >= 420, 'clear of the control');
+});
+test('a table with nothing free but the status panel still has somewhere to wait', () => {
+  const f = fixture();
+  f.state.statusCanvas = new Element('CANVAS', { x: 0, y: 0, width: 800, height: 600 });
+  assert.ok(f.api.readInput().rest);
+});
 test('hidden, occluded, overlapping and foreign DOM routes do not become mouse targets', () => {
   for (const change of [f => { f.state.overlay = new Element('BUTTON'); }, f => { f.state.cards[3].x = f.state.cards[4].x; },
     f => { f.canvas.style.display = 'none'; },

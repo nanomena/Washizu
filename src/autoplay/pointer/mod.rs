@@ -13,7 +13,7 @@
 //!   appearing, mostly settles on its target before pressing it, and may
 //!   first rest on the runner-up when the bot was torn between two discards;
 //! - [`leave`] — once the press has registered the pointer leaves the hand
-//!   for where it waits, by the buttons (`humanize::rest_spot`);
+//!   for where it waits, by the buttons (`humanize::rest_offset`);
 //! - [`lean`] — between the seat's turns it looks, at its own pace, at the
 //!   tiles the bot expects to throw next;
 //! - [`aim`] — where in its target a press lands: scattered in the target's
