@@ -201,11 +201,11 @@ test('the hand waits by the first button, in a free piece clear of the status pa
   const status = new Element('CANVAS', { x: 250, y: 150, width: 300, height: 200 });
   f.state.statusCanvas = status;
   f.context.document.elementFromPoint = (x, y) => contains(status.rect, { x, y }) ? status : route(x, y);
-  assert.deepEqual(plain(f.api.readInput().buttons), [556, 450]);
-  assert.deepEqual(plain(f.api.readInput().rest), { x: 0, y: 350, width: 800, height: 80 });
-  f.control(3, { x: 500, y: 360, width: 100, height: 60 });
+  assert.deepEqual(plain(f.api.readInput().buttons).map(Math.round), [659, 450]);
+  assert.deepEqual(plain(f.api.readInput().rest), { x: 593, y: 430, width: 207, height: 60 });
+  f.control(3, { x: 610, y: 435, width: 100, height: 50 });
   const rest = f.api.readInput().rest;
-  assert.ok(rest.x + rest.width <= 500 || rest.x >= 600 || rest.y + rest.height <= 360 || rest.y >= 420, 'clear of the control');
+  assert.ok(rest.x + rest.width <= 610 || rest.x >= 710 || rest.y + rest.height <= 435 || rest.y >= 485, 'clear of the control');
 });
 test('a table with nothing free but the status panel still has somewhere to wait', () => {
   const f = fixture();

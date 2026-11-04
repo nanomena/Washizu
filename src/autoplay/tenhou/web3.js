@@ -180,7 +180,7 @@
     return reveal && controlTarget(g, reveal, entry.identity, 'reveal');
   }
   // Where the client's first button stands, shown or not, as a share of the canvas.
-  const FIRST_BUTTON = { x: 0.695, y: 0.75 };
+  const FIRST_BUTTON = { x: 0.824, y: 0.75 };
   function firstButton(g) {
     const clipped = intersection(g.canvas, g.viewport);
     return clipped && { x: clipped.x + clipped.width * FIRST_BUTTON.x, y: clipped.y + clipped.height * FIRST_BUTTON.y };
