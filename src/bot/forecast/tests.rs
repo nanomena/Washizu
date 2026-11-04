@@ -369,6 +369,7 @@ async fn a_received_forecast_loses_pointer_permission_on_context_change() {
     };
     assert!(hand.set_layout(PointerLayout {
         viewport: rect,
+        buttons: (1000.0, 700.0),
         tiles: vec![TileTarget {
             tile: "6s".into(),
             drawn: false,

@@ -176,7 +176,8 @@ fn layout(view: &ClientView, ctx: &ActionContext<'_>) -> Option<PointerLayout> {
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    let (x, y) = view.viewport.pixel(7.5, 7.55);
+    let (x, y) = view.viewport.pixel(1.0, 3.0);
+    let (first_x, first_y) = coords::ACTIONS[0];
     let result = PointerLayout {
         viewport: view.viewport,
         tiles,
@@ -184,9 +185,10 @@ fn layout(view: &ClientView, ctx: &ActionContext<'_>) -> Option<PointerLayout> {
         rest: CanvasRect {
             x,
             y,
-            width: view.viewport.width * 0.3 / 16.0,
-            height: view.viewport.height * 0.15 / 9.0,
+            width: view.viewport.width * 14.0 / 16.0,
+            height: view.viewport.height * 4.4 / 9.0,
         },
+        buttons: view.viewport.pixel(first_x, first_y),
     };
     result.valid().then_some(result)
 }

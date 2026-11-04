@@ -18,8 +18,12 @@ pub struct PointerLayout {
     pub tiles: Vec<TileTarget>,
     /// A measured empty draw slot, never an invented future tile.
     pub next_draw: Option<CanvasRect>,
-    /// A site-observed region clear of actionable tiles and controls.
+    /// A site-observed region clear of actionable tiles and controls: where
+    /// the hand may wait.
     pub rest: CanvasRect,
+    /// Where the site's first button stands, shown or not: what the hand
+    /// waits by ([`super::spots::rest`]).
+    pub buttons: Point,
 }
 
 pub fn center(rect: CanvasRect) -> Point {
@@ -45,6 +49,7 @@ impl PointerLayout {
         };
         valid(self.viewport)
             && inside(self.rest)
+            && self.viewport.contains(self.buttons.0, self.buttons.1)
             && self.next_draw.is_none_or(inside)
             && self
                 .tiles
@@ -98,6 +103,7 @@ mod tests {
         let layout = PointerLayout {
             viewport: rect(0.0, 0.0, 900.0, 600.0),
             rest: rect(200.0, 400.0, 100.0, 30.0),
+            buttons: (250.0, 450.0),
             next_draw: None,
             tiles: vec![
                 TileTarget {

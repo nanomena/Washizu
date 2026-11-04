@@ -170,7 +170,10 @@ impl PointerController {
         let mut rng = rand::rng();
         // A pointer that has not been anywhere yet starts from where it
         // would have been resting.
-        let from = *self.at.get_or_insert_with(|| spots::rest(rect, &mut rng));
+        let layout = self.layout.as_ref();
+        let from = *self
+            .at
+            .get_or_insert_with(|| spots::rest(rect, layout, &mut rng));
         // The runner-up is rested on where a tile is: high on it, as a press.
         match (looked_at, pressed_spot(action)) {
             (Some(old), Some(new)) if old != new => {
@@ -424,10 +427,7 @@ impl PointerController {
     fn queue_rest(&mut self, from: Point, rect: CanvasRect, settle: bool) {
         let leg = {
             let mut rng = rand::rng();
-            let to = self
-                .layout
-                .as_ref()
-                .map_or_else(|| spots::rest(rect, &mut rng), |layout| center(layout.rest));
+            let to = spots::rest(rect, self.layout.as_ref(), &mut rng);
             leave(from, to, rect.width / 16.0, &mut rng)
         };
         self.queue.push(Motion {
@@ -718,7 +718,10 @@ impl PointerController {
         self.sync_with_user();
         let leg = {
             let mut rng = rand::rng();
-            let from = *self.at.get_or_insert_with(|| spots::rest(rect, &mut rng));
+            let layout = self.layout.as_ref();
+            let from = *self
+                .at
+                .get_or_insert_with(|| spots::rest(rect, layout, &mut rng));
             if distance(from, to) < 1.0 {
                 return true;
             }
