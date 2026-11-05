@@ -172,6 +172,7 @@ fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_po
     for invalid in [
         r#"{"client":"web3"}"#,
         r#"{"client":"web3","popup":null,"lobby":null}"#,
+        r#"{"client":"web3","account":null,"disconnect":null,"title":null,"popup":null,"lobby":null}"#,
         r#"{"client":"web4","popup":null,"lobby":null}"#,
         r#"{"client":"web3","popup":{"identity":"x","tag":"AGARI","enabled":true,"closing":false},"lobby":null}"#,
     ] {
@@ -180,7 +181,7 @@ fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_po
             "{invalid}"
         );
     }
-    let unknown: Web3Observation = serde_json::from_str(r#"{"client":"web3","account":null,"disconnect":null,"title":null,"popup":{"identity":"login","tag":"LOGIN","enabled":true,"closing":false,"queued":0},"lobby":null}"#).unwrap();
+    let unknown: Web3Observation = serde_json::from_str(r#"{"client":"web3","live":false,"account":null,"disconnect":null,"title":null,"popup":{"identity":"login","tag":"LOGIN","enabled":true,"closing":false,"queued":0},"lobby":null}"#).unwrap();
     assert_eq!(unknown.popup.as_ref().unwrap().tag, PopupTag::Other);
     let mut h = Harness::new(Some(target()));
     h.observe_only(&unknown, 10);
