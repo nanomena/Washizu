@@ -24,6 +24,9 @@ const END_LIMIT: Duration = Duration::from_secs(180);
 const START_LIMIT: Duration = Duration::from_secs(60);
 /// A reconnect outlasts a proxy's failover (health checks run every 120 s).
 const RECONNECT_LIMIT: Duration = Duration::from_secs(300);
+/// A reconnecting page that shows no client for this long is reloaded. A slow
+/// client boots well inside it; about six reloads fit in one reconnect.
+const BLANK_LIMIT: Duration = Duration::from_secs(45);
 /// Observed own queues reach about 13 minutes; past this an own reservation
 /// is presumed lost with its socket and the client is reloaded once.
 const RESERVATION_LIMIT: Duration = Duration::from_secs(15 * 60);

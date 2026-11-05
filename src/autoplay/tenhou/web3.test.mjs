@@ -94,8 +94,10 @@ test('title resume exposes only the saved-account control with a fresh physical 
   assert.equal(f.api.readUi().title.enabled, false);
   f.state.popup.tag = 'AUTOLOGIN';
   assert.equal(f.api.readUi().title.enabled, false, 'native auto-login is observed without another press');
+  assert.equal(f.api.readUi().live, false);
   root.style.display = '';f.state.live = 1;
   assert.equal(f.api.readUi().title, null, 'an underlying title cannot cover a live table');
+  assert.equal(f.api.readUi().live, true);
   assert.equal(f.api.pressUi, undefined);
   assert.deepEqual(f.state.effects, []);
 });

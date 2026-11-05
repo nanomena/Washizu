@@ -251,6 +251,16 @@ the UI to `Table` and clears the deadline; a click or a disappearing title is
 not proof of a restored table. The model source coordinator separately
 validates and restores Primary context.
 
+A reload during a line outage can leave a blank page: the client's assets fail
+and it never reaches its title or draws anything, while the line itself comes
+back within the deadline. The Web3 observation therefore requires an explicit
+`live` fact (the client runs its table or lobby). A `Reconnecting` page with no
+`live` client and no disconnect dialog, title, popup or lobby, or with no
+observation at all, for 45 s issues one `ReloadWeb` through `consume_reload`;
+the wait starts afresh after each reload, and the 300 s deadline ends the
+episode with `ReconnectTimeout`. A live table keeps reconnecting without a
+reload, so a lost observation at a running table never interrupts it.
+
 ## Stalled own match
 
 A socket can stall without closing: the client then shows no disconnect modal

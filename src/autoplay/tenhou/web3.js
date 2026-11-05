@@ -291,7 +291,7 @@
     const session = native.title.read();
     const current = native.popup.read();
     const account = typeof session.account === 'string' && /^ID[0-9A-F]{8}$/.test(session.account) ? session.account : null;
-    const dto = { client: 'web3', account, disconnect: null, title: null, popup: null, lobby: null };
+    const dto = { client: 'web3', live: live(), account, disconnect: null, title: null, popup: null, lobby: null };
     const closed = native.disconnect.read();
     // Only the native dialog whose current confirmation callback came from
     // this client's own socket-close event. Unknown modals are never targets.

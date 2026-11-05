@@ -57,7 +57,7 @@ impl AutoplayManager {
                     if let (true, Some(page)) = (allowed, page) {
                         let _ = self.notify.send(
                             crate::schema::Notification::warn("Reloading the game").body(
-                                "The reserved match never reached the table; reconnecting to recover.",
+                                "The game page stopped responding; reconnecting to recover.",
                             ),
                         );
                         self.ctx.invalidate_ui();

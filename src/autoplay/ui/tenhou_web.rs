@@ -4,7 +4,8 @@
 
 use super::{
     Client, Effect, Environment, Input, Machine, State, Suspension, Ticket, WaitingReason,
-    END_LIMIT, LOOK, PRESS_LIMIT, RECONNECT_LIMIT, RESERVATION_LIMIT, RESULT_LIMIT, START_LIMIT,
+    BLANK_LIMIT, END_LIMIT, LOOK, PRESS_LIMIT, RECONNECT_LIMIT, RESERVATION_LIMIT, RESULT_LIMIT,
+    START_LIMIT,
 };
 use crate::autoplay::humanize;
 use crate::autoplay::tenhou::client::Dispatch;
@@ -87,6 +88,8 @@ pub struct DisconnectDialog {
 #[serde(deny_unknown_fields)]
 pub struct Web3Observation {
     pub client: ClientTag,
+    /// The client runs its table or lobby, not its title or an unbooted page.
+    pub live: bool,
     #[serde(deserialize_with = "required_nullable")]
     pub account: Option<String>,
     #[serde(deserialize_with = "required_nullable")]
@@ -97,6 +100,17 @@ pub struct Web3Observation {
     pub popup: Option<Popup>,
     #[serde(deserialize_with = "required_nullable")]
     pub lobby: Option<Lobby>,
+}
+
+impl Web3Observation {
+    /// No running client and nothing it drew: the page never finished booting.
+    fn blank(&self) -> bool {
+        !self.live
+            && self.disconnect.is_none()
+            && self.title.is_none()
+            && self.popup.is_none()
+            && self.lobby.is_none()
+    }
 }
 
 fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -189,8 +203,11 @@ pub(super) struct Run {
     spent: HashSet<String>,
     until: Option<Instant>,
     attempts: u32,
-    /// An expired own reservation asked for one client reload.
+    /// An expired own reservation or a blank reconnecting page asked for one
+    /// client reload.
     reload: bool,
+    /// When this reconnect's page last started showing no client.
+    blank_since: Option<Instant>,
 }
 
 impl Default for Run {
@@ -205,6 +222,7 @@ impl Default for Run {
             until: None,
             attempts: 0,
             reload: false,
+            blank_since: None,
         }
     }
 }
@@ -233,6 +251,22 @@ impl Run {
             self.until = Some(now + RECONNECT_LIMIT);
             self.attempts = 0;
         }
+    }
+
+    /// Tracks a reconnecting page with no client; true asks for a reload. The
+    /// reconnect's own deadline bounds how many of these one episode can ask.
+    fn page_lost(&mut self, blank: bool, now: Instant) -> bool {
+        if !blank || self.stage != Stage::Reconnecting {
+            self.blank_since = None;
+            return false;
+        }
+        let since = *self.blank_since.get_or_insert(now);
+        if now < since + BLANK_LIMIT {
+            return false;
+        }
+        self.blank_since = None;
+        self.reload = true;
+        true
     }
 
     /// Returns true when the expiry asks for a client reload.
@@ -663,7 +697,11 @@ impl Machine {
             if run.resume_account.is_some() {
                 run.candidate = None;
                 run.reconnect(now);
-                self.effects.schedule(now + LOOK, Input::WebObserve);
+                if run.page_lost(true, now) {
+                    self.effects.schedule(now, Input::WebReload);
+                } else {
+                    self.effects.schedule(now + LOOK, Input::WebObserve);
+                }
             } else {
                 run.stop(WaitingReason::ObservationUnavailable);
             }
@@ -699,6 +737,11 @@ impl Machine {
         let control = run
             .control(&observation, now)
             .filter(|control| run.allowed(control, env));
+        if run.page_lost(observation.blank(), now) {
+            run.candidate = None;
+            self.effects.schedule(now, Input::WebReload);
+            return;
+        }
         if let Some(control) = control {
             let ready_at = match &run.candidate {
                 Some(old) if old.control == control && old.observation == observation => {
