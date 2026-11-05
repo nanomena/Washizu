@@ -124,6 +124,7 @@ fn target() -> TableSpec {
 fn popup(identity: &str, tag: PopupTag, queued: u32) -> Web3Observation {
     Web3Observation {
         client: ClientTag::Web3,
+        live: true,
         account: None,
         disconnect: None,
         title: None,
@@ -141,6 +142,7 @@ fn popup(identity: &str, tag: PopupTag, queued: u32) -> Web3Observation {
 fn lobby() -> Web3Observation {
     Web3Observation {
         client: ClientTag::Web3,
+        live: true,
         account: None,
         disconnect: None,
         title: None,
@@ -170,6 +172,7 @@ fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_po
     for invalid in [
         r#"{"client":"web3"}"#,
         r#"{"client":"web3","popup":null,"lobby":null}"#,
+        r#"{"client":"web3","account":null,"disconnect":null,"title":null,"popup":null,"lobby":null}"#,
         r#"{"client":"web4","popup":null,"lobby":null}"#,
         r#"{"client":"web3","popup":{"identity":"x","tag":"AGARI","enabled":true,"closing":false},"lobby":null}"#,
     ] {
@@ -178,7 +181,7 @@ fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_po
             "{invalid}"
         );
     }
-    let unknown: Web3Observation = serde_json::from_str(r#"{"client":"web3","account":null,"disconnect":null,"title":null,"popup":{"identity":"login","tag":"LOGIN","enabled":true,"closing":false,"queued":0},"lobby":null}"#).unwrap();
+    let unknown: Web3Observation = serde_json::from_str(r#"{"client":"web3","live":false,"account":null,"disconnect":null,"title":null,"popup":{"identity":"login","tag":"LOGIN","enabled":true,"closing":false,"queued":0},"lobby":null}"#).unwrap();
     assert_eq!(unknown.popup.as_ref().unwrap().tag, PopupTag::Other);
     let mut h = Harness::new(Some(target()));
     h.observe_only(&unknown, 10);
@@ -193,6 +196,7 @@ fn strict_dto_rejects_missing_facts_wrong_client_and_accepts_explicit_unknown_po
 fn title(identity: &str, account: &str) -> Web3Observation {
     Web3Observation {
         client: ClientTag::Web3,
+        live: false,
         account: Some(account.into()),
         disconnect: None,
         title: Some(Title {
@@ -212,10 +216,21 @@ fn authenticated() -> Harness {
         event_seq: 1,
     });
     h.ui.table_started(None);
-    let mut observation = title("unused", "ID1234ABCD");
-    observation.title = None;
-    h.observe_only(&observation, 1);
+    h.observe_only(&at_table("ID1234ABCD"), 1);
     h
+}
+
+fn at_table(account: &str) -> Web3Observation {
+    Web3Observation {
+        live: true,
+        ..blank_page(account)
+    }
+}
+
+fn blank_page(account: &str) -> Web3Observation {
+    let mut observation = title("unused", account);
+    observation.title = None;
+    observation
 }
 
 fn disconnected(identity: &str, account: &str) -> Web3Observation {
@@ -937,6 +952,109 @@ fn a_match_that_never_reaches_the_table_reloads_the_client_once_then_resumes() {
     h.ui.web_game_started(Some(1), Some(target()), h.now);
     h.ui.table_started(None);
     assert_eq!(h.ui.phase(), Phase::Web(Stage::Table));
+}
+
+/// Watches one page until it asks for a reload, or None once it stops.
+fn reload_after(h: &mut Harness, page: &Web3Observation) -> Option<Ticket> {
+    for _ in 0..10_000 {
+        match h.next()? {
+            Effect::ReloadWeb(ticket) => return Some(ticket),
+            Effect::ObserveWeb(ticket) => {
+                h.ui.web_observed(ticket, Some(page.clone()), h.now, &mut h.rng)
+            }
+            other => panic!("a blank page offers no other effect: {other:?}"),
+        }
+    }
+    panic!("the reconnect never ended")
+}
+
+fn reload(h: &mut Harness, ticket: Ticket) {
+    h.sync();
+    assert!(h.ui.consume_reload(ticket));
+    h.env.generation.session += 1; // the executor's invalidation, then the reload
+    h.sync();
+    h.ui.web_reloaded(ticket, true, h.now); // retired with the old session
+}
+
+#[test]
+fn a_page_left_blank_by_a_reload_is_reloaded_again_until_it_resumes() {
+    let mut h = authenticated();
+    h.press(&disconnected("dialog", "ID1234ABCD"));
+    h.env.generation.session += 1; // the client's own reload, into a dead line
+    h.sync();
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    let page = blank_page("ID1234ABCD");
+    for _ in 0..2 {
+        let blank_from = h.now;
+        let ticket = reload_after(&mut h, &page).expect("a blank page is reloaded");
+        assert!(h.now >= blank_from + BLANK_LIMIT);
+        assert!(h.now < blank_from + BLANK_LIMIT + Duration::from_secs(5));
+        assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+        reload(&mut h, ticket);
+    }
+    assert!(matches!(
+        h.press(&title("back", "ID1234ABCD")),
+        Control::Resume { .. }
+    ));
+    h.ui.web_game_started(Some(1), Some(target()), h.now);
+    h.ui.table_started(None);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Table));
+}
+
+#[test]
+fn a_missing_document_is_reloaded_like_a_blank_page() {
+    let mut h = authenticated();
+    let lost = h.now;
+    let ticket = loop {
+        match h.next().expect("pending Web effect") {
+            Effect::ReloadWeb(ticket) => break ticket,
+            Effect::ObserveWeb(ticket) => h.ui.web_observed(ticket, None, h.now, &mut h.rng),
+            other => panic!("unexpected effect: {other:?}"),
+        }
+    };
+    assert!(h.now >= lost + BLANK_LIMIT);
+    reload(&mut h, ticket);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+}
+
+#[test]
+fn blank_pages_reload_only_until_the_reconnect_deadline() {
+    let mut h = authenticated();
+    h.press(&disconnected("dialog", "ID1234ABCD"));
+    let page = blank_page("ID1234ABCD");
+    let mut reloads = 0;
+    while let Some(ticket) = reload_after(&mut h, &page) {
+        reload(&mut h, ticket);
+        reloads += 1;
+    }
+    assert!(reloads >= 2);
+    assert!(reloads as u64 <= RECONNECT_LIMIT.as_secs() / BLANK_LIMIT.as_secs());
+    assert_eq!(h.ui.waiting_reason(), Some(WaitingReason::ReconnectTimeout));
+}
+
+#[test]
+fn a_running_table_is_never_reloaded_after_a_lost_observation() {
+    let mut h = authenticated();
+    let Some(Effect::ObserveWeb(ticket)) = h.next() else {
+        panic!("a table keeps being read")
+    };
+    h.ui.web_observed(ticket, None, h.now, &mut h.rng);
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+    let looks = BLANK_LIMIT.as_millis() * 2 / LOOK.as_millis();
+    h.observe_only(&at_table("ID1234ABCD"), looks as usize); // panics on a reload
+    assert_eq!(h.ui.phase(), Phase::Web(Stage::Reconnecting));
+}
+
+#[test]
+fn a_slow_client_that_boots_inside_the_limit_is_left_alone() {
+    let mut h = authenticated();
+    h.press(&disconnected("dialog", "ID1234ABCD"));
+    let looks = (BLANK_LIMIT.as_millis() - 2_000) / LOOK.as_millis();
+    h.observe_only(&blank_page("ID1234ABCD"), looks as usize);
+    assert!(matches!(
+        h.press(&title("booted", "ID1234ABCD")),
+        Control::Resume { .. }
+    ));
 }
 
 #[test]
