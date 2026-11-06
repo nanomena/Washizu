@@ -43,7 +43,7 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: akagi-desktop-linux-x64.tar.gz
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             archive: akagi-desktop-macos-arm64.zip
           - os: windows-latest
