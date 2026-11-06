@@ -171,10 +171,15 @@ impl Coordinator {
     }
 
     async fn observe(&mut self, tracked: TrackedEvent) -> bool {
-        self.interrupted |= matches!(
-            tracked.event,
-            MjaiEvent::InterruptedKyoku { .. } | MjaiEvent::RestoreKyoku { .. }
-        );
+        // The hand a rejoin restored ends at the next `start_game`, which the
+        // tracker takes back to a complete trace for that deal.
+        match tracked.event {
+            MjaiEvent::InterruptedKyoku { .. } | MjaiEvent::RestoreKyoku { .. } => {
+                self.interrupted = true;
+            }
+            MjaiEvent::StartGame { .. } => self.interrupted = false,
+            _ => {}
+        }
         let Some(context) = tracked.context else {
             self.monitor.gap(
                 "A real event lacked its tracked identity; no recovery decision can be validated."

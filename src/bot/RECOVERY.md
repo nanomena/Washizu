@@ -128,9 +128,10 @@ of this work.
 Same-game reconnect requires the provider's identical game id, seat and player
 count. The coordinator reconciles the restored current-hand prefix against its
 canonical journal and skips those already-applied events in both workers. Only
-the new suffix advances them. A missing game id starts a fresh session. A rejoin
-that omits an unknown completed hand or contradicts the known prefix is an
-explicit gap: neither the model cache nor hidden events are fabricated. A real
+the new suffix advances them. A rejoin may instead go on from what is known: a
+`restore_kyoku` position of the hand in progress, or the deal of a later hand,
+extends the journal. A missing game id starts a fresh session. The same hand
+dealt differently contradicts the known prefix and is an explicit gap. A real
 tracker gap expires both sources. This boundary remains separate from a primary
 model failure, for which an independently valid local standby can continue.
 
@@ -138,10 +139,16 @@ See [qualification](RECOVERY-TESTS.md) for evidence, commands and limits. The in
 mouse-down check. Offline composed regression covers its identity contract; the
 parent owns final release/client qualification. This worktree is not deployment.
 
-Public-position reconnect (Tenhou REINIT) imports `restore_kyoku.snapshot` rather
-than fabricating a deal or an ordered action prefix. The main service explicitly
-acknowledges the restored viewer, absent history fields and new temporal origin
-in `meta.restoration`; a positioned receipt alone cannot certify this capability.
+Public-position reconnect (Tenhou REINIT) delivers `restore_kyoku.snapshot` as
+it is: the core fabricates neither a deal nor an ordered action prefix. The
+snapshot joins the same session's confirmed events, so the engine has the
+earlier hands and this hand's real events. The main service states what it did
+in `meta.restoration`, with the restored viewer: either a named belief completed
+the hand on the existing temporal cache (`temporal_prefix: "kept"`,
+`missing_history: "belief:<name>"`), or the history is absent and the cache
+starts anew (`"reset"`, `"unknown_fields"`). A positioned receipt alone cannot
+certify this capability. The coordinator and the standby leave the restored
+hand at the next `start_game`, the standby on a fresh game state.
 The independent rules tracker imports the known hand and public registers with
 no concealed opponent tiles or wall. Each subsequent real step is delivered as
 `observed_decision {event, legal}` with the original producer window, context

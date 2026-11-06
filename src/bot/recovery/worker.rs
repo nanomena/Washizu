@@ -275,8 +275,13 @@ async fn replay(
 }
 
 fn validate_restoration(reply: BotResponse, events: &[MjaiEvent]) -> Result<BotResponse, String> {
+    // A reply speaks for the hand it ends in; a replay crosses finished ones.
+    let hand = events
+        .rsplit(|e| matches!(e, MjaiEvent::StartKyoku { .. }))
+        .next()
+        .unwrap_or(events);
     if reply.unavailable_reason().is_some()
-        || !events.iter().any(|e| {
+        || !hand.iter().any(|e| {
             matches!(
                 e,
                 MjaiEvent::RestoreKyoku { .. } | MjaiEvent::ObservedDecision { .. }
@@ -287,13 +292,14 @@ fn validate_restoration(reply: BotResponse, events: &[MjaiEvent]) -> Result<BotR
     }
     let meta = reply.meta.as_ref().and_then(|m| m.get("restoration"));
     if !meta.is_some_and(|m| {
-        m["origin"] == "public_snapshot"
-            && m["temporal_prefix"] == "reset"
-            && m["missing_history"] == "unknown_fields"
+        let missing = m["missing_history"].as_str().unwrap_or_default();
+        let unknown = m["temporal_prefix"] == "reset" && missing == "unknown_fields";
+        let named = m["temporal_prefix"] == "kept" && missing.starts_with("belief:");
+        m["origin"] == "public_snapshot" && (unknown || named)
     }) {
         return Err("Primary did not acknowledge the public-position restore contract; no incomplete or ignored snapshot can become ready.".into());
     }
-    for event in events {
+    for event in hand {
         if let MjaiEvent::RestoreKyoku { snapshot } = event {
             if meta.unwrap()["seat"].as_u64() != Some(u64::from(snapshot.seat)) {
                 return Err("Primary restore acknowledged a different viewer.".into());
@@ -333,7 +339,22 @@ impl StandbyWorker {
             let mut through = 0;
             let mut policy_error: Option<String> = None;
             let mut interrupted = false;
+            let mut opening = None;
             while let Some(work) = observations.blocking_recv() {
+                if let Some(event @ MjaiEvent::StartGame { .. }) = &work.event {
+                    opening = Some(event.clone());
+                }
+                if interrupted && work.interrupted_legal.is_none() {
+                    // It missed the restored hand, so it starts over at the deal.
+                    interrupted = false;
+                    policy_error = None;
+                    engine = LocalStandby::new(seat, players)
+                        .and_then(|mut bot| {
+                            opening.iter().try_for_each(|event| bot.observe(event))?;
+                            Ok(bot)
+                        })
+                        .map_err(|e| format!("{e:#}"));
+                }
                 interrupted |= matches!(
                     work.event,
                     Some(MjaiEvent::InterruptedKyoku { .. } | MjaiEvent::RestoreKyoku { .. })
@@ -426,7 +447,26 @@ mod tests {
         };
         assert!(validate_restoration(reply.clone(), std::slice::from_ref(&event)).is_err());
         reply.meta.as_mut().unwrap()["restoration"] = json!({"origin":"public_snapshot", "temporal_prefix":"reset", "missing_history":"unknown_fields", "seat":0});
-        assert!(validate_restoration(reply, &[event]).is_ok());
+        assert!(validate_restoration(reply.clone(), std::slice::from_ref(&event)).is_ok());
+        reply.meta.as_mut().unwrap()["restoration"] = json!({"origin":"public_snapshot", "temporal_prefix":"kept", "missing_history":"belief:named", "seat":0});
+        assert!(validate_restoration(reply.clone(), std::slice::from_ref(&event)).is_ok());
+        reply.meta.as_mut().unwrap()["restoration"] = json!({"origin":"public_snapshot", "temporal_prefix":"kept", "missing_history":"unknown_fields", "seat":0});
+        assert!(validate_restoration(reply, &[event]).is_err());
+    }
+
+    #[test]
+    fn a_reply_answers_for_the_hand_it_ends_in() {
+        let position = MjaiEvent::ObservedDecision {
+            event: Box::new(MjaiEvent::None),
+            legal: vec![],
+        };
+        let deal: MjaiEvent = serde_json::from_value(json!({"type":"start_kyoku","bakaze":"E","kyoku":2,"honba":0,"kyotaku":0,"oya":1,"dora_marker":"C","scores":[25000,25000,25000,25000],"tehais":[[],[],[],[]]})).unwrap();
+        let reply = BotResponse {
+            request: None,
+            action: MjaiEvent::None,
+            meta: Some(json!({"delivery":{"through":2}})),
+        };
+        assert!(validate_restoration(reply, &[position, deal]).is_ok());
     }
 
     #[tokio::test]

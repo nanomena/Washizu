@@ -26,11 +26,11 @@ out any deliberate divergence.
 |---|---|---|
 | `<Z/>` | heartbeat | (none) |
 | `HELO` / `REJOIN` / `SAIKAI` / `BYE` / `SHUFFLE` | session control | (none) |
-| `GO` | rules / room, before `TAIKYOKU` | (none; stashed for `MatchInfo`, bit `0x10` = sanma) |
+| `GO` | rules / room / game name, before `TAIKYOKU` | (none; stashed for `MatchInfo`, bit `0x10` = sanma, `gpid` = `game_id`) |
 | `UN` | roster, wire-relative names | (none; consumed by `start_game`, an empty slot = sanma) |
 | `TAIKYOKU` | start of game | `start_game` (resolves our seat from `oya`) |
 | `INIT` | start of kyoku | `start_kyoku` (sanma detected via 0-score slot) |
-| `REINIT` | rejoin: snapshot of the hand in progress | (none — see *Reconnecting mid-hand*) |
+| `REINIT` | rejoin: snapshot of the hand in progress | `start_game` + `restore_kyoku` — see *Reconnecting mid-hand* |
 | `T<n>` / `U<n>` / `V<n>` / `W<n>` | tsumo (rel seats 0..3) | `tsumo` |
 | `D<n>` / `E<n>` / `F<n>` / `G<n>` (uppercase) | tedashi (discard from the hand) | `dahai { tsumogiri: false }` |
 | `d<n>` / `e<n>` / `f<n>` / `g<n>` (lowercase) | tsumogiri (discard of the just-drawn tile) | `dahai { tsumogiri: true }` |
@@ -222,7 +222,7 @@ When the web client rejoins a game it opens a fresh socket, so the bridge
 that sees the rejoin is a fresh one. The captured sequence is
 
 ```
-↑ HELO            ↓ GO (type, lobby)      ↓ UN (full roster)
+↑ HELO            ↓ GO (type, lobby, gpid) ↓ UN (full roster)
 ↑ GOK             ↓ SAIKAI (ba, oya, sc)  ↓ REINIT …   then live play
 ```
 
@@ -231,38 +231,46 @@ that sees the rejoin is a fresh one. The captured sequence is
 (comma-separated `<N m=…/>` bitfields; absent otherwise) and `kawa<rel>`
 (tile indices, with `255` marking the riichi declaration — the next entry is
 the riichi tile). It is a *snapshot*, not a log — nothing says when a call
-happened relative to the discards — so the mjai event stream for the hand in
-progress cannot be reconstructed. (Majsoul's `GameRestore` is an ordered
-action log, which is why the Majsoul bridge can replay and this one cannot.)
+happened relative to the discards, and no discard says whether it was the
+draw. (Majsoul's `GameRestore` is an ordered action log of the current hand,
+which is why the Majsoul bridge can replay and this one does not.)
+
+The server names the game on every connection: `<GO/>`'s `gpid` is the same on
+the rejoin as on the first flow, and new for every game. Its key is
+`start_game.game_meta.game_id`, so a rejoin is told apart from a new game
+without looking at the table, and the bot manager keeps the game's session.
 
 The bridge therefore:
 
 1. resolves our seat and the player count from the frame (see above), so the
    rest of the game is attributed correctly even though `<TAIKYOKU/>` was
    never seen on this flow;
-2. rebuilds only what this flow itself needs — our hand (`hai`), our calls
-   (`m0`), riichi (`255` in `kawa0`) and whether a draw is in hand (tile
-   count) — so autoplay and `Bridge::build` keep working for the remainder of
-   the hand;
-3. emits **nothing** and sets `State::suspended`: every handler still runs
-   (the hand and window keep tracking), but `dispatch` drops their events
-   until the next `<INIT/>`. Feeding them to the tracker would apply live
-   play to a hand it last saw several turns ago (or, with a seat-0 bridge, to
-   the wrong seats), and each `?` draw that lands on our seat renders as 1m;
-4. posts a warning toast (via `BridgeHooks::notify`) and owes a fresh
-   `start_game` at the next `<INIT/>`, which reopens the game for the
-   tracker, bots and history on the right seat and player count.
+2. rebuilds what this flow itself needs — our hand (`hai`), our calls (`m0`),
+   riichi (`255` in `kawa0`) and whether a draw is in hand (tile count) — so
+   autoplay and `Bridge::build` keep working for the remainder of the hand;
+3. emits `start_game` and `restore_kyoku`: the position as the server gave it,
+   with each seat's river, melds and riichi place. It invents nothing and does
+   not order the events. What stands between that position and what the engine
+   has already been given is the engine's to complete or to call unknown, and
+   its `meta.restoration` says which (`src/engine/PROTOCOL.md`);
+4. posts a warning toast (via `BridgeHooks::notify`);
+5. owes a `start_game` at the next `<INIT/>`. With the same game name it is
+   the same session, and the tracker, the coordinator and the second opinion
+   are back on a complete trace from that deal.
 
-The game's end is the one event that still passes while suspended, so the
-tracker closes the game, the bot manager stops its runner and History resets.
-Whether it arrives during the suspended hand or after play resumed, the
-`end_game` of a game this flow joined mid-way is emitted as *terminated*
-(`MjaiEvent::terminated_game`): the hands before the rejoin were never seen
-here, so History drops the game instead of filing the remainder as a complete
-one with its own per-hand stats. The flag clears at the next `<TAIKYOKU/>`,
-or at an E1H0 `<INIT/>` — the first deal is a game start whether or not a
-`TAIKYOKU` announced it, and it re-seats the flow the same way `TAIKYOKU`
-would.
+A position that cannot be imported (a sanma table, a frame that does not add
+up) goes out as `interrupted_kyoku`, and its `start_game` names no game: the
+session stops at the observation gap and the next deal opens a new one. So
+does a game whose `<GO/>` carried no `gpid`.
+
+The game's end is the one event that always passes, so the tracker closes the
+game and the bot manager stops its runner. The `end_game` of a game this flow
+joined mid-way is emitted as *terminated* (`MjaiEvent::terminated_game`): the
+hands before the rejoin were never seen here, so History drops the game
+instead of filing the remainder as a complete one with its own per-hand stats.
+The flag clears at the next `<TAIKYOKU/>`, or at an E1H0 `<INIT/>` — the first
+deal is a game start whether or not a `TAIKYOKU` announced it, and it re-seats
+the flow the same way `TAIKYOKU` would.
 
 ## Adding a new tag handler
 

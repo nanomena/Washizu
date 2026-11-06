@@ -72,6 +72,10 @@ pub struct State {
     pub clock: Option<crate::autoplay::tenhou_state::TurnClock>,
     /// `<TAIKYOKU log=…/>` paifu id; reassigned by every `<TAIKYOKU/>`.
     pub log_id: Option<String>,
+    /// The key of `<GO/>`'s `gpid`, the server's name for this game. Every
+    /// connection to one game receives the same one, so it is what a rejoin
+    /// is told apart from a new game by.
+    pub game_id: Option<u64>,
     /// `<UN/>` roster names, percent-decoded, in wire-*relative* order
     /// (index 0 = us). `<UN/>` arrives before `<TAIKYOKU/>` resolves our
     /// seat, so the remap to wire-absolute happens at `start_game` emission.
@@ -106,6 +110,7 @@ impl Default for State {
             lobby: None,
             clock: None,
             log_id: None,
+            game_id: None,
             un_names: None,
             dan: None,
             window: None,

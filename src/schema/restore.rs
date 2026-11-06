@@ -25,6 +25,8 @@ pub struct RestorePlayer {
     pub river: Vec<String>,
     pub melds: Vec<RestoreMeld>,
     pub riichi: bool,
+    /// Where the declaration stands in `river`: the provider marks it there.
+    pub riichi_at: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

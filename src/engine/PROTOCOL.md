@@ -154,6 +154,28 @@ request, so it can never answer a later one. A lost connection is opened
 again at the next batch, on a fresh session that receives the whole real
 stream from 0.
 
+A rejoin that the provider states as a position, not a log, arrives as one
+event of the real stream, `{"type": "restore_kyoku", "snapshot": {...}}`: seat,
+round, scores, own hand, dora indicators, and for each seat `river`, `melds`,
+`riichi` and `riichi_at`, the place of the declaration in `river`. It follows
+the events already committed, or opens a fresh session. Until the next
+`start_kyoku`, each real event comes as `{"type": "observed_decision", "event":
+{...}, "legal": [...]}`, with the legal set the provider and the rules allow.
+What lies between the committed events and the position is the engine's to
+state: every reply in that hand carries `meta.restoration`.
+
+```json
+{"origin": "public_snapshot", "seat": 0,
+ "temporal_prefix": "kept", "missing_history": "belief:<name>"}
+```
+
+`temporal_prefix` is `"kept"` when the engine goes on from the committed events,
+with `missing_history` naming the belief that completed the rest, or `"reset"`
+when it starts anew with `missing_history: "unknown_fields"`. Any other reply
+leaves the primary unready for that position. A completion must be
+deterministic: a lost connection replays the stream from 0 and has to reach the
+same place.
+
 The reply is one mjai reaction (`{"type": "none"}` when nothing is owed) with:
 
 - `receipt: {"start": S, "end": E, "through": T}` — the committed prefix.
