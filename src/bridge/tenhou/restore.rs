@@ -28,7 +28,10 @@ pub(super) fn snapshot(state: &State, msg: &JsonValue) -> Result<KyokuRestore> {
         let seat = state.rel_to_abs(rel) as usize;
         for t in parse_csv_u32(msg, &format!("kawa{rel}")) {
             match t {
-                255 => players[seat].riichi = true,
+                255 => {
+                    players[seat].riichi = true;
+                    players[seat].riichi_at = Some(players[seat].river.len());
+                }
                 254 => {} // Missing tags are not treated as tedashi proof.
                 0..=135 => players[seat].river.push(tenhou_to_mjai_one(t)),
                 _ => anyhow::bail!("Invalid REINIT river tile"),

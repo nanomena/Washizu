@@ -561,6 +561,98 @@ async fn valid_reinit_restores_primary_in_the_same_hand_and_retires_the_old_wind
 }
 
 #[tokio::test]
+async fn a_rejoin_of_the_same_game_keeps_its_session_into_the_next_hand() {
+    use crate::bridge::{Bridge, Direction, TenhouBridge};
+    let primary = Primary::new(None);
+    let calls = primary.calls.clone();
+    let mut rig = Rig::new(primary);
+    let flow = |clock: &Arc<AutoplayContext>| {
+        TenhouBridge::new(None, None).with_shared_state(Some(clock.tenhou_state.clone()))
+    };
+    let go = r#"{"tag":"GO","type":"1","lobby":"0","gpid":"AAAAAAAA-BBBBBBBB"}"#;
+    let mut first = flow(&rig.clock);
+    for frame in [
+        go,
+        r#"{"tag":"TAIKYOKU","oya":"0"}"#,
+        r#"{"tag":"INIT","seed":"0,0,0,3,0,23","ten":"250,250,250,250","oya":"0","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96"}"#,
+        r#"{"tag":"T1"}"#,
+    ] {
+        for captured in first
+            .parse(Direction::Down, frame.as_bytes())
+            .into_captured()
+        {
+            rig.captured(captured);
+        }
+    }
+    rig.reply().await;
+    for captured in first
+        .parse(Direction::Down, br#"{"tag":"D1"}"#)
+        .into_captured()
+    {
+        rig.captured(captured);
+    }
+    // The socket drops; a new flow rejoins the same game.
+    let mut rejoined = flow(&rig.clock);
+    for frame in [
+        go,
+        r#"{"tag":"REINIT","seed":"0,0,0,3,0,23","ten":"250,250,250,250","oya":"0","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96","kawa0":"1,106,74","kawa1":"79,122,3","kawa2":"72,100,9","kawa3":"107,78,67"}"#,
+        r#"{"tag":"T120"}"#,
+    ] {
+        for captured in rejoined
+            .parse(Direction::Down, frame.as_bytes())
+            .into_captured()
+        {
+            rig.captured(captured);
+        }
+    }
+    assert_eq!(
+        rig.reply().await.control().unwrap().unwrap().source,
+        DecisionSource::Primary
+    );
+    for frame in [
+        r#"{"tag":"D14"}"#,
+        r#"{"tag":"INIT","seed":"1,0,0,3,0,23","ten":"250,250,250,250","oya":"1","hai":"14,18,22,36,37,48,52,57,58,61,89,93,96"}"#,
+        r#"{"tag":"T120"}"#,
+    ] {
+        for captured in rejoined
+            .parse(Direction::Down, frame.as_bytes())
+            .into_captured()
+        {
+            rig.captured(captured);
+        }
+    }
+    assert_eq!(
+        rig.reply().await.control().unwrap().unwrap().source,
+        DecisionSource::Primary
+    );
+    let delivered: Vec<_> = calls.lock().unwrap().iter().flatten().cloned().collect();
+    let count = |wanted: fn(&MjaiEvent) -> bool| delivered.iter().filter(|e| wanted(e)).count();
+    assert_eq!(count(|e| matches!(e, MjaiEvent::StartGame { .. })), 1);
+    assert_eq!(count(|e| matches!(e, MjaiEvent::StartKyoku { .. })), 2);
+    assert_eq!(count(|e| matches!(e, MjaiEvent::RestoreKyoku { .. })), 1);
+    let restore = delivered
+        .iter()
+        .position(|e| matches!(e, MjaiEvent::RestoreKyoku { .. }))
+        .unwrap();
+    assert!(
+        delivered[..restore]
+            .iter()
+            .any(|e| matches!(e, MjaiEvent::Dahai { .. })),
+        "the position follows the events already delivered"
+    );
+    let next_hand = delivered
+        .iter()
+        .rposition(|e| matches!(e, MjaiEvent::StartKyoku { .. }))
+        .unwrap();
+    assert!(
+        delivered[next_hand..]
+            .iter()
+            .all(|e| !matches!(e, MjaiEvent::ObservedDecision { .. })),
+        "the next deal is a complete trace again"
+    );
+}
+
+#[tokio::test]
 async fn invalid_reinit_uses_one_restricted_standby_and_never_invents_a_primary_context() {
     use crate::bridge::{Bridge, Direction, TenhouBridge};
     let primary = Primary::new(None);

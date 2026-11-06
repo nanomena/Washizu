@@ -342,6 +342,10 @@ impl TenhouBridge {
     fn on_go(&mut self, msg: &JsonValue) -> Vec<MjaiEvent> {
         self.state.go_type = parse_u32(msg, "type");
         self.state.lobby = parse_u32(msg, "lobby");
+        self.state.game_id = msg
+            .get("gpid")
+            .and_then(JsonValue::as_str)
+            .map(crate::bridge::stable_game_id);
         // A standard rule set has the published normal/fast clock in any
         // lobby: a private L-lobby without a csrule plays the public rules.
         // GO carries a csrule when a lobby customises them (clock overrides
@@ -612,7 +616,7 @@ impl TenhouBridge {
                 id: Some(self.state.seat as Actor),
                 num_players: self.state.num_players,
                 game_meta: Some(GameMeta {
-                    game_id: None,
+                    game_id: self.state.game_id,
                     match_mode: self
                         .state
                         .go_type
@@ -641,12 +645,14 @@ impl TenhouBridge {
     /// of `<INIT/>` when the client rejoins a game.
     ///
     /// It is a snapshot, not a log: each seat's river and calls are listed,
-    /// without the unique interleaving of calls/discards. Import the public
-    /// position explicitly; the primary starts a new temporal stream and
-    /// uses absent tokens for unknown history features. Subsequent real
-    /// windows carry an independent rules/provider-constrained legal set.
-    /// Invalid positions remain explicitly unavailable; no river ordering,
-    /// past decision or concealed draw is invented.
+    /// without the unique interleaving of calls/discards. The position goes
+    /// out as it is, and nothing here orders it: what stands between it and
+    /// the events already delivered is the engine's to answer for, in its
+    /// `meta.restoration`. The `start_game` carries `<GO/>`'s game name, so
+    /// a rejoin continues its game's session. A position that cannot be
+    /// imported names no game: that session ends with the next deal.
+    /// Subsequent real windows carry an independent
+    /// rules/provider-constrained legal set.
     ///
     /// Field layout mirrors `<INIT/>` (`seed` / `ten` / `oya` / `hai`, all
     /// wire-relative) plus per-seat `m<rel>` (comma-separated `<N m=…/>`
@@ -736,6 +742,7 @@ impl TenhouBridge {
         let roster = self.state.un_names.clone();
         let names = self.build_start_names();
         self.state.un_names = roster; // the next real INIT keeps the same observed roster
+        let position = restore::snapshot(&self.state, msg);
         let start = MjaiEvent::StartGame {
             names,
             kyoku_first: None,
@@ -743,7 +750,7 @@ impl TenhouBridge {
             id: Some(self.state.seat),
             num_players: self.state.num_players,
             game_meta: Some(GameMeta {
-                game_id: None,
+                game_id: self.state.game_id.filter(|_| position.is_ok()),
                 match_mode: self
                     .state
                     .go_type
@@ -757,10 +764,10 @@ impl TenhouBridge {
                 our_level: None,
             }),
         };
-        let restored = match restore::snapshot(&self.state, msg) {
+        let restored = match position {
             Ok(snapshot) => {
                 self.notify(Notification::warn("Tenhou: restoring the main model")
-                    .body("按服务器局面快照恢复本手主模型；缺失的历史特征明确置为未知，下一次真实决策经合法动作校验后接续。")
+                    .body("按服务器局面恢复本手主模型；没有看到的历史由引擎说明如何处理，下一次真实决策经合法动作校验后接续。")
                     .id("tenhou-reinit"));
                 MjaiEvent::RestoreKyoku {
                     snapshot: Box::new(snapshot),
@@ -2787,6 +2794,42 @@ mod tests {
         assert!(matches!(&events[0], MjaiEvent::Tsumo { actor: 0, pai } if pai == "?"));
         let events = parse_one(&mut b, r#"{"tag":"T9"}"#);
         assert!(matches!(&events[0], MjaiEvent::Tsumo { actor: 1, pai } if pai == "3m"));
+    }
+
+    /// Every connection to one game is told the same `gpid`; a rejoin's
+    /// `start_game` names the game the first flow named, and a position
+    /// carries each seat's riichi place.
+    #[test]
+    fn a_rejoin_names_the_game_the_first_flow_named() {
+        let game_of = |events: Vec<MjaiEvent>| {
+            events.into_iter().find_map(|event| match event {
+                MjaiEvent::StartGame { game_meta, .. } => game_meta.and_then(|meta| meta.game_id),
+                _ => None,
+            })
+        };
+        let go = r#"{"tag":"GO","type":"9","lobby":"0","gpid":"AAAAAAAA-BBBBBBBB"}"#;
+        let mut first = TenhouBridge::new(None, None);
+        parse_one(&mut first, go);
+        parse_one(&mut first, r#"{"tag":"TAIKYOKU","oya":"0"}"#);
+        let init = format!(
+            r#"{{"tag":"INIT","seed":"0,0,0,1,2,4","ten":"250,250,250,250","oya":"0","hai":"{HAND_NO_1M}"}}"#
+        );
+        let named = game_of(parse_one(&mut first, &init));
+        assert!(named.is_some());
+
+        let mut rejoined = TenhouBridge::new(None, None);
+        parse_one(&mut rejoined, go);
+        let reinit = format!(
+            r#"{{"tag":"REINIT","seed":"0,0,0,1,2,4","ten":"250,250,240,250","oya":"0","hai":"{HAND_NO_1M}","kawa0":"20","kawa2":"5,255,9"}}"#
+        );
+        let events = parse_one(&mut rejoined, &reinit);
+        let snapshot = events.iter().find_map(|event| match event {
+            MjaiEvent::RestoreKyoku { snapshot } => Some(snapshot.clone()),
+            _ => None,
+        });
+        assert_eq!(game_of(events), named);
+        let riichi = &snapshot.expect("a restored position").players[2];
+        assert_eq!((riichi.riichi, riichi.riichi_at), (true, Some(1)));
     }
 
     /// Akagi attached between hands (or the rejoin landed exactly on a kyoku

@@ -121,6 +121,17 @@ pub struct BridgeHooks {
     pub replay_dir: Option<std::path::PathBuf>,
 }
 
+/// A compact key for the provider's own name of a game, stable across the
+/// connections one game can span. FNV-1a; the provider's text stays local.
+pub(crate) fn stable_game_id(name: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in name.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Construct a bridge for the given platform.
 ///
 /// - `flow_log`: per-WS-flow text dump (one JSON line per parsed message).

@@ -83,7 +83,6 @@ fn tenhou_rejoin_without_taikyoku_keeps_our_seat_and_hand_intact() {
         feed(&mut flow1, &mut tracker, frame);
     }
     assert_eq!(our_tehai(&tracker), sorted_mjai(HAND_E1));
-    let seen_before_drop = tracker.events_seen;
     drop(flow1);
 
     // ---- Flow 2: the client rejoins. No TAIKYOKU, a REINIT snapshot. ----
@@ -91,9 +90,20 @@ fn tenhou_rejoin_without_taikyoku_keeps_our_seat_and_hand_intact() {
     let reinit = format!(
         r#"{{"tag":"REINIT","seed":"0,0,0,1,2,4","ten":"250,250,250,250","oya":"2","hai":"{HAND_E1}","kawa0":"20","kawa1":"33","kawa2":"5","kawa3":"9"}}"#
     );
-    assert!(feed(&mut flow2, &mut tracker, &reinit).is_empty());
+    let events = feed(&mut flow2, &mut tracker, &reinit);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                MjaiEvent::StartGame { id: Some(2), .. },
+                MjaiEvent::RestoreKyoku { .. }
+            ]
+        ),
+        "the position goes out as the server gave it: {events:?}"
+    );
+    assert_eq!(tracker.our_seat(), Some(2));
 
-    // The rest of this hand is withheld from the tracker entirely.
+    // The rest of this hand reaches the tracker on our real seat.
     for frame in [
         r#"{"tag":"V"}"#,
         r#"{"tag":"F40"}"#,
@@ -103,15 +113,13 @@ fn tenhou_rejoin_without_taikyoku_keeps_our_seat_and_hand_intact() {
         r#"{"tag":"D24"}"#,
         r#"{"tag":"U"}"#,
         r#"{"tag":"E48"}"#,
-        r#"{"tag":"AGARI","who":"2","fromWho":"2","sc":"250,-10,250,-10,250,30,250,-10","ba":"0,0"}"#,
     ] {
         assert!(
-            feed(&mut flow2, &mut tracker, frame).is_empty(),
-            "{frame} must not reach the tracker"
+            !feed(&mut flow2, &mut tracker, frame).is_empty(),
+            "{frame} is a real event of the restored hand"
         );
     }
-    assert_eq!(tracker.events_seen, seen_before_drop);
-    assert_eq!(our_tehai(&tracker), sorted_mjai(HAND_E1));
+    assert_eq!(tracker.our_seat(), Some(2));
 
     // ---- Next kyoku: E2, dealer wire-abs 1 (rel 3 from seat 2). ----
     let init = format!(

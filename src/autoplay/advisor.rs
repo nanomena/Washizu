@@ -31,6 +31,9 @@ pub struct Advisor {
     engine: Option<Engine>,
     /// Events seen since it was last asked; fed in when it is asked next.
     pending: Vec<MjaiEvent>,
+    /// A rejoin restored the hand in progress, which it cannot follow from
+    /// the position: it sits out until the next deal.
+    awaiting_deal: bool,
 }
 
 impl Advisor {
@@ -44,15 +47,22 @@ impl Advisor {
                 ..
             } => {
                 self.pending.clear();
+                self.awaiting_deal = false;
                 self.engine = native_bot::defaults::engine(*num_players, *seat).ok();
             }
+            MjaiEvent::RestoreKyoku { .. } | MjaiEvent::InterruptedKyoku { .. } => {
+                self.pending
+                    .retain(|event| matches!(event, MjaiEvent::StartGame { .. }));
+                self.awaiting_deal = true;
+            }
+            MjaiEvent::StartKyoku { .. } => self.awaiting_deal = false,
             MjaiEvent::EndGame { .. } => {
                 self.engine = None;
                 self.pending.clear();
             }
             _ => {}
         }
-        if self.engine.is_some() {
+        if self.engine.is_some() && !self.awaiting_deal {
             self.pending.push(ev.clone());
         }
     }
@@ -61,6 +71,9 @@ impl Advisor {
     /// chosen. `None` when the advisor is not following the game or is not at
     /// the decision the action answers.
     pub fn view(&mut self, action: &MjaiEvent) -> Option<HumanView> {
+        if self.awaiting_deal {
+            return None;
+        }
         let engine = self.engine.as_mut()?;
         let pending = std::mem::take(&mut self.pending);
         let decided = catch_unwind(AssertUnwindSafe(|| {
@@ -217,6 +230,22 @@ mod tests {
 
     /// The advisor is asked when a reply arrives, not when its events do: a
     /// view of a different kind of decision is a view of something else.
+    #[test]
+    fn a_restored_hand_is_sat_out_until_the_next_deal() {
+        let mut advisor = Advisor::default();
+        advisor.note(&start_game());
+        advisor.note(&MjaiEvent::InterruptedKyoku {
+            reason: "constructed".into(),
+        });
+        advisor.note(&played("9m"));
+        assert_eq!(advisor.pending.len(), 1, "only the game's start is kept");
+        assert!(advisor.view(&played("9m")).is_none());
+        assert_eq!(advisor.pending.len(), 1, "sitting out asks nothing");
+        advisor.note(&start_kyoku());
+        assert_eq!(advisor.pending.len(), 2);
+        assert!(!advisor.awaiting_deal);
+    }
+
     #[test]
     fn a_view_of_another_kind_of_decision_is_no_view() {
         let window = [(BotAction::Pass, 0.7), (BotAction::Kita, 0.3)];

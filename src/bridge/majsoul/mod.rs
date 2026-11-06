@@ -376,7 +376,9 @@ impl MajsoulBridge {
                     .get("game_uuid")
                     .and_then(JsonValue::as_str)
                     .map(str::to_string);
-                self.game_id = self.game_uuid.as_deref().map(stable_game_id);
+                // The raw UUID stays on the bridge and goes into the local
+                // history index through `MatchInfo` (never uploaded).
+                self.game_id = self.game_uuid.as_deref().map(super::stable_game_id);
                 if self.account_id.is_none() {
                     warn!(
                         target: "akagi::bridge::majsoul",
@@ -1661,18 +1663,6 @@ impl MajsoulBridge {
     }
 }
 
-fn stable_game_id(game_uuid: &str) -> u64 {
-    // FNV-1a gives a compact, stable reconnect key for the recorder's dedup.
-    // The raw UUID is kept separately on the bridge and persisted via
-    // `MatchInfo` into the local history index (never uploaded).
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in game_uuid.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 /// A `{id, score}` rank of an `Account` or a seated `PlayerGameView`; `None`
 /// when it names none (id 0: a ladder never played).
 fn level_of(value: Option<&JsonValue>) -> Option<Level> {
@@ -2732,7 +2722,7 @@ mod tests {
         match &events[0] {
             MjaiEvent::StartGame { game_meta, .. } => {
                 let meta = game_meta.as_ref().expect("Mahjong Soul metadata");
-                assert_eq!(meta.game_id, Some(stable_game_id(game_uuid)));
+                assert_eq!(meta.game_id, Some(crate::bridge::stable_game_id(game_uuid)));
                 assert_eq!(meta.match_mode, Some(2));
                 match &meta.match_info {
                     Some(MatchInfo::Majsoul {

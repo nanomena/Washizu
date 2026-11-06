@@ -57,19 +57,28 @@ impl Journal {
         if matches!(event, MjaiEvent::StartGame { .. }) && !events.is_empty() {
             // BotManager admits this path only for the same provider game id,
             // seat and player count. It never guesses identity from a hand.
-            let start = events
-                .iter()
-                .rposition(|e| matches!(e, MjaiEvent::StartKyoku { .. }))
-                .ok_or_else(|| anyhow::anyhow!("Rejoin has no known hand prefix"))?;
-            self.view = View::Replaying {
-                next: start,
-                end: events.len(),
-            };
+            let start = events.iter().rposition(|e| {
+                matches!(
+                    e,
+                    MjaiEvent::StartKyoku { .. } | MjaiEvent::RestoreKyoku { .. }
+                )
+            });
+            if let Some(start) = start {
+                self.view = View::Replaying {
+                    next: start,
+                    end: events.len(),
+                };
+            }
             return Ok(Delivery::Observe {
                 event: None,
                 through: events.len() as u64,
-                frontier: false,
+                frontier: start.is_none(),
             });
+        }
+        if let View::Replaying { next, .. } = &self.view {
+            if leaves_known_hand(events.get(*next), &event) {
+                self.view = View::Live;
+            }
         }
         if let View::Replaying { next, end } = &mut self.view {
             if events.get(*next) != Some(&event) {
@@ -95,6 +104,31 @@ impl Journal {
             through: events.len() as u64,
             frontier: true,
         })
+    }
+}
+
+/// A rejoin that goes on from what is known rather than restating it: a
+/// position of the hand in progress, or the deal of a later hand. The same
+/// hand dealt differently is a contradiction, and stays one.
+fn leaves_known_hand(known: Option<&MjaiEvent>, event: &MjaiEvent) -> bool {
+    match (known, event) {
+        (_, MjaiEvent::RestoreKyoku { .. }) => true,
+        (
+            Some(MjaiEvent::StartKyoku {
+                bakaze,
+                kyoku,
+                honba,
+                ..
+            }),
+            MjaiEvent::StartKyoku {
+                bakaze: dealt_wind,
+                kyoku: dealt_kyoku,
+                honba: dealt_honba,
+                ..
+            },
+        ) => (bakaze, kyoku, honba) != (dealt_wind, dealt_kyoku, dealt_honba),
+        (_, MjaiEvent::StartKyoku { .. }) => true,
+        _ => false,
     }
 }
 
@@ -148,5 +182,102 @@ mod tests {
         ));
         assert_eq!(journal.events.lock().unwrap().len(), 4);
         assert!(journal.ingest(context(2, 17), MjaiEvent::None).is_err());
+    }
+
+    fn deal(kyoku: u8) -> MjaiEvent {
+        event(&format!(
+            r#"{{"type":"start_kyoku","bakaze":"E","kyoku":{kyoku},"honba":0,"kyotaku":0,"oya":0,"dora_marker":"C","scores":[25000,25000,25000,25000],"tehais":[[],[],[],[]]}}"#
+        ))
+    }
+
+    fn position() -> MjaiEvent {
+        MjaiEvent::RestoreKyoku {
+            snapshot: Box::new(crate::schema::restore::KyokuRestore {
+                seat: 0,
+                bakaze: "E".into(),
+                kyoku: 1,
+                honba: 0,
+                kyotaku: 0,
+                oya: 0,
+                scores: [25000; 4],
+                hand: vec![],
+                dora_markers: vec!["C".into()],
+                players: Default::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_position_after_a_rejoin_extends_the_known_events() {
+        let start = event(r#"{"type":"start_game","id":0,"names":[]}"#);
+        let draw = event(r#"{"type":"tsumo","actor":0,"pai":"N"}"#);
+        let mut journal = Journal::new();
+        journal.ingest(context(1, 1), start.clone()).unwrap();
+        journal.ingest(context(1, 2), deal(1)).unwrap();
+        journal.ingest(context(1, 3), draw).unwrap();
+        journal.ingest(context(1, 4), start.clone()).unwrap();
+        assert!(matches!(
+            journal.ingest(context(1, 5), position()).unwrap(),
+            Delivery::Observe {
+                event: Some(_),
+                through: 4,
+                frontier: true,
+            }
+        ));
+        // A second rejoin in the same hand goes on from the position.
+        journal.ingest(context(1, 6), start).unwrap();
+        assert!(matches!(
+            journal.ingest(context(1, 7), position()).unwrap(),
+            Delivery::Observe {
+                event: Some(_),
+                through: 5,
+                frontier: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn a_rejoin_can_land_on_a_later_deal_but_not_on_this_hand_dealt_again() {
+        let start = event(r#"{"type":"start_game","id":0,"names":[]}"#);
+        let mut journal = Journal::new();
+        journal.ingest(context(1, 1), start.clone()).unwrap();
+        journal.ingest(context(1, 2), deal(1)).unwrap();
+        journal.ingest(context(1, 3), start.clone()).unwrap();
+        assert!(matches!(
+            journal.ingest(context(1, 4), deal(2)).unwrap(),
+            Delivery::Observe {
+                event: Some(_),
+                through: 3,
+                frontier: true,
+            }
+        ));
+        let dealt_again = event(
+            r#"{"type":"start_kyoku","bakaze":"E","kyoku":2,"honba":0,"kyotaku":1,"oya":0,"dora_marker":"C","scores":[25000,25000,25000,25000],"tehais":[[],[],[],[]]}"#,
+        );
+        journal.ingest(context(1, 5), start).unwrap();
+        assert!(journal.ingest(context(1, 6), dealt_again).is_err());
+    }
+
+    #[test]
+    fn a_rejoin_before_any_deal_has_nothing_to_restate() {
+        let start = event(r#"{"type":"start_game","id":0,"names":[]}"#);
+        let mut journal = Journal::new();
+        journal.ingest(context(1, 1), start.clone()).unwrap();
+        assert!(matches!(
+            journal.ingest(context(1, 2), start).unwrap(),
+            Delivery::Observe {
+                event: None,
+                through: 1,
+                frontier: true,
+            }
+        ));
+        assert!(matches!(
+            journal.ingest(context(1, 3), position()).unwrap(),
+            Delivery::Observe {
+                event: Some(_),
+                through: 2,
+                ..
+            }
+        ));
     }
 }
