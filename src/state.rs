@@ -5,7 +5,6 @@
 //! request from the shell; everything in it is an `Arc` or a channel sender.
 
 use crate::autoplay::AutoplayContext;
-use crate::capture::embedded::EmbeddedGame;
 use crate::config::AppConfig;
 use crate::event_bus::{
     self, AccountBus, BotResponseBus, BotStatusBus, CaptureStatusBus, MjaiBus, NotifyBus,
@@ -55,8 +54,6 @@ pub struct AppState {
     /// The player's own ranks, from capture to the monitor.
     pub account_bus: AccountBus,
 
-    /// The game view the shell has made, once it has told the core of one.
-    pub embedded_game: Arc<Mutex<Option<EmbeddedGame>>>,
     pub capture_control: Arc<Mutex<CaptureControl>>,
     /// The live mirror of the game. Autoplay reads it to place its input.
     pub game_tracker: Arc<Mutex<GameTracker>>,
@@ -95,7 +92,6 @@ impl AppState {
             capture_status_bus,
             notify_bus,
             account_bus: event_bus::account_bus(),
-            embedded_game: Arc::new(Mutex::new(None)),
             capture_control: Arc::new(Mutex::new(CaptureControl::default())),
             game_tracker,
             autoplay_context: Arc::new(AutoplayContext::new()),
