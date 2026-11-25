@@ -6,6 +6,11 @@
 //! over CDP, tracks it, asks the bot, plays the answer, and keeps the monitor
 //! snapshot the shell's interface draws.
 //!
+//! A platform without a web client (HoloMahjong) is captured instead through
+//! the account's local `CONNECT` proxy, which the shell asks for with
+//! `open_proxy`; an external redirector sends the native client's traffic to
+//! it. That platform is observed only: nothing is played.
+//!
 //! # Protocol
 //!
 //! JSON lines, one message a line. The shell writes requests to the core's
@@ -31,6 +36,16 @@
 //! | `set_user_pointer`     | `{window, active, x?, y?}` | `bool`            |
 //! | `set_monitor_autoplay` | `{enabled}`              | `null`            |
 //! | `open_game`            | `{port, target}`         | `null`            |
+//! | `open_proxy`           | —                        | `{listen}`        |
+//!
+//! `open_game` is for web platforms: capture moves to the shell's new game
+//! view. `open_proxy` is for HoloMahjong only: it checks that `[capture]
+//! listen` is a loopback address with a fixed port, binds it and starts
+//! capture there, and answers the address it listens on
+//! (`{"listen": "127.0.0.1:<port>"}`). A port it cannot bind is an error, as
+//! well as an `error` capture status and notice; while it runs the status is
+//! `running { descriptor: "proxy 127.0.0.1:<port>" }`. Either request stops
+//! whatever capture ran before.
 //!
 //! | Event             | Payload                                              |
 //! |-------------------|------------------------------------------------------|
@@ -57,7 +72,8 @@
 
 use crate::capture::cdp::EmbeddedPage;
 use crate::capture::embedded::{self, EmbeddedGame};
-use crate::capture::supervisor;
+use crate::capture::proxy;
+use crate::capture::supervisor::{self, Source};
 use crate::config::{self, AppConfig, MonitorConfig, Platform};
 use crate::monitor::MonitorSnapshot;
 use crate::state::AppState;
@@ -422,6 +438,7 @@ async fn answer(state: &AppState, method: &str, params: Value) -> Result<Value, 
             open_game(state, parse(params)?).await?;
             Ok(Value::Null)
         }
+        "open_proxy" => open_proxy(state).await,
         other => Err(format!("unknown method: {other}")),
     }
 }
@@ -443,6 +460,36 @@ async fn open_game(state: &AppState, game: Game) -> Result<(), String> {
         .await
         .map_err(|e| format!("{e:#}"))?;
 
+    stop_capture(state).await?;
+    let game = EmbeddedGame {
+        endpoint,
+        page: EmbeddedPage {
+            url: url.to_string(),
+            target: Some(game.target),
+        },
+    };
+    supervisor::start(state.clone(), Source::Embedded(game))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Capture from the native client whose traffic is redirected to this
+/// account's local proxy. Asked again, the proxy starts afresh.
+async fn open_proxy(state: &AppState) -> Result<Value, String> {
+    let config = state.config.read().await.clone();
+    if config.platform.kind != Platform::HoloMahjong {
+        return Err("这个平台使用内置网页客户端，不经本地代理采集。".into());
+    }
+    let listen = proxy::listen_addr(&config.capture.listen)?;
+    stop_capture(state).await?;
+    supervisor::start(state.clone(), Source::Proxy { listen })
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(json!({ "listen": listen.to_string() }))
+}
+
+/// Stop the capture that runs, so that another can start.
+async fn stop_capture(state: &AppState) -> Result<(), String> {
     supervisor::stop_and_wait(state, CAPTURE_STOP).await;
     if matches!(
         state.capture_control.lock().await.status,
@@ -450,16 +497,7 @@ async fn open_game(state: &AppState, game: Game) -> Result<(), String> {
     ) {
         return Err("采集仍在停止，请稍后重试。".into());
     }
-    *state.embedded_game.lock().await = Some(EmbeddedGame {
-        endpoint,
-        page: EmbeddedPage {
-            url: url.to_string(),
-            target: Some(game.target),
-        },
-    });
-    supervisor::start(state.clone())
-        .await
-        .map_err(|e| e.to_string())
+    Ok(())
 }
 
 /// Start the autoplay manager the first time autoplay is switched on in this
@@ -843,5 +881,115 @@ mod tests {
                 "version": "1.2.3",
             })
         );
+    }
+
+    /// A core for `platform` whose `[capture] listen` is `listen`.
+    fn proxy_state(platform: Platform, listen: &str) -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.platform.kind = platform;
+        cfg.capture.listen = listen.into();
+        let state = AppState::new(
+            cfg,
+            tmp.path().join("config.toml"),
+            crate::capture::test_session(),
+            Arc::new(history::HistoryStore::new(tmp.path().join("history")).unwrap()),
+            event_bus::mjai_bus(),
+            event_bus::bot_response_bus(),
+            event_bus::bot_status_bus(),
+            event_bus::capture_status_bus(),
+            event_bus::notify_bus(),
+            game_state::tracker::new_handle(),
+        );
+        (state, tmp)
+    }
+
+    async fn status(state: &AppState) -> schema::CaptureStatus {
+        state.capture_control.lock().await.status.clone()
+    }
+
+    /// A loopback port nothing listens on.
+    fn free_port() -> std::net::SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_proxy_listens_on_the_accounts_port_until_capture_stops() {
+        use tokio::io::AsyncReadExt;
+        let listen = free_port();
+        let (state, _tmp) = proxy_state(Platform::HoloMahjong, &listen.to_string());
+        let reply = answer(&state, "open_proxy", Value::Null).await.unwrap();
+        assert_eq!(reply, json!({ "listen": listen.to_string() }));
+        assert_eq!(
+            status(&state).await,
+            schema::CaptureStatus::Running {
+                descriptor: format!("proxy {listen}")
+            }
+        );
+
+        // A connection still waiting to send its CONNECT is closed by the stop.
+        let mut game = tokio::net::TcpStream::connect(listen).await.unwrap();
+        supervisor::stop_and_wait(&state, CAPTURE_STOP).await;
+        assert_eq!(status(&state).await, schema::CaptureStatus::Stopped);
+        let mut buf = [0u8; 8];
+        let read = tokio::time::timeout(Duration::from_secs(5), game.read(&mut buf))
+            .await
+            .expect("the connection is closed");
+        assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+        assert!(
+            tokio::net::TcpStream::connect(listen).await.is_err(),
+            "nothing listens after the stop"
+        );
+
+        // Asked again, it starts afresh on the same port.
+        answer(&state, "open_proxy", Value::Null).await.unwrap();
+        assert!(matches!(
+            status(&state).await,
+            schema::CaptureStatus::Running { .. }
+        ));
+        supervisor::stop_and_wait(&state, CAPTURE_STOP).await;
+    }
+
+    #[tokio::test]
+    async fn a_busy_port_is_an_error_and_an_error_status() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listen = taken.local_addr().unwrap();
+        let (state, _tmp) = proxy_state(Platform::HoloMahjong, &listen.to_string());
+        let mut notices = state.notify_bus.subscribe();
+        let error = answer(&state, "open_proxy", Value::Null).await.unwrap_err();
+        assert!(error.contains(&listen.to_string()), "{error}");
+        match status(&state).await {
+            schema::CaptureStatus::Error { descriptor, error } => {
+                assert_eq!(descriptor, Some(format!("proxy {listen}")));
+                assert!(!error.is_empty());
+            }
+            other => panic!("not an error status: {other:?}"),
+        }
+        assert_eq!(
+            notices.try_recv().unwrap().id.as_deref(),
+            Some("capture-error")
+        );
+        assert!(state.capture_control.lock().await.stop.is_none());
+    }
+
+    #[tokio::test]
+    async fn open_proxy_takes_only_a_loopback_port_and_only_for_holomahjong() {
+        for listen in ["", "0.0.0.0:23410", "192.0.2.10:23410", "127.0.0.1:0", "x"] {
+            let (state, _tmp) = proxy_state(Platform::HoloMahjong, listen);
+            assert!(
+                answer(&state, "open_proxy", Value::Null).await.is_err(),
+                "{listen:?}"
+            );
+            assert_eq!(status(&state).await, schema::CaptureStatus::Stopped);
+        }
+        let listen = free_port().to_string();
+        for platform in [Platform::Majsoul, Platform::Tenhou, Platform::RiichiCity] {
+            let (state, _tmp) = proxy_state(platform, &listen);
+            assert!(answer(&state, "open_proxy", Value::Null).await.is_err());
+            assert_eq!(status(&state).await, schema::CaptureStatus::Stopped);
+        }
     }
 }

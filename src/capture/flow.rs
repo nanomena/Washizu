@@ -1,17 +1,16 @@
-//! Per-WebSocket-flow bridge ownership map, generic over the flow key.
+//! Per-flow bridge ownership map, generic over the flow key.
 //!
-//! Both capture backends face the same problem: each WebSocket connection
-//! needs a fresh [`crate::bridge::Bridge`] instance because the parser's
-//! request/response correlation is per-connection. The hudsucker handler
-//! historically keyed by `SocketAddr`; the Chromium backend keys by
-//! `(sessionId, requestId)`.
+//! Every frame source faces the same problem: each connection needs a fresh
+//! [`crate::bridge::Bridge`] instance because the parser's request/response
+//! correlation is per-connection. The Chromium backend keys by
+//! `(targetId, requestId)`; the local proxy by its tunnel number.
 //!
-//! `FlowBridges<K>` lifts that pattern out so both backends share one
+//! `FlowBridges<K>` lifts that pattern out so every source shares one
 //! lazy-create + ref-count-clean-up implementation.
 
 use crate::bridge::{self, Bridge, BridgeHooks};
 use crate::config::Platform;
-use crate::logger::Session;
+use crate::logger::{FlowLogger, Session};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{
@@ -25,12 +24,18 @@ use tracing::warn;
 /// pending-request map lives inside the parser).
 pub type SharedBridge = Arc<StdMutex<Box<dyn Bridge>>>;
 
+/// Builds a flow's bridge: [`bridge::for_platform`], except in tests that
+/// watch what a source hands its bridge.
+pub type MakeBridge =
+    fn(Platform, Option<Arc<FlowLogger>>, Option<Arc<Session>>, BridgeHooks) -> Box<dyn Bridge>;
+
 pub struct FlowBridges<K> {
     session: Arc<Session>,
     platform: Platform,
     /// Autoplay's shared slots, handed to every bridge this map creates.
-    /// Empty when the backend has no autoplay context (MITM proxy).
+    /// Empty when the source has no autoplay context (the local proxy).
     hooks: BridgeHooks,
+    make: MakeBridge,
     map: StdMutex<HashMap<K, SharedBridge>>,
     next_flow_id: AtomicU64,
 }
@@ -44,9 +49,16 @@ where
             session,
             platform,
             hooks,
+            make: bridge::for_platform,
             map: StdMutex::new(HashMap::new()),
             next_flow_id: AtomicU64::new(1),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_maker(mut self, make: MakeBridge) -> Self {
+        self.make = make;
+        self
     }
 
     /// Get the bridge for `key`, creating it on first call. `slug` is a
@@ -70,7 +82,7 @@ where
                         None
                     }
                 };
-                Arc::new(StdMutex::new(bridge::for_platform(
+                Arc::new(StdMutex::new((self.make)(
                     self.platform,
                     flow_log,
                     Some(self.session.clone()),
