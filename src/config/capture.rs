@@ -9,6 +9,11 @@ pub struct CaptureConfig {
     /// platform over HTTPS (`capture::embedded::game_url`): the view is signed
     /// in to this account profile.
     pub url: String,
+    /// The loopback address of the local CONNECT proxy a native client's
+    /// traffic is redirected to (`127.0.0.1:<port>`). Read only by platforms
+    /// without a web client (HoloMahjong); the shell gives each such account
+    /// its own fixed port when the account is created.
+    pub listen: String,
     pub http: HttpCaptureConfig,
 }
 
@@ -16,6 +21,7 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             url: "https://game.maj-soul.com/1/".to_string(),
+            listen: String::new(),
             http: HttpCaptureConfig::default(),
         }
     }

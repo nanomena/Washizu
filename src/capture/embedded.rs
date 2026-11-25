@@ -59,7 +59,9 @@ pub fn game_url(platform: Platform, configured: &str) -> Result<reqwest::Url, St
     let allowed: &[&str] = match platform {
         Platform::Majsoul => &["mahjongsoul.com", "maj-soul.com", "majsoul.com"],
         Platform::Tenhou => &["tenhou.net"],
-        Platform::RiichiCity => return Err("这个平台没有内置网页客户端。".into()),
+        Platform::RiichiCity | Platform::HoloMahjong => {
+            return Err("这个平台没有内置网页客户端。".into())
+        }
     };
     if url.scheme() != "https"
         || !url.username().is_empty()

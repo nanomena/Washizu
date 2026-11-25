@@ -13,6 +13,10 @@ pub enum Platform {
     /// captured exclusively through the MITM proxy — the Chromium/CDP backend
     /// does not apply. Observe-only (no autoplay).
     RiichiCity,
+    /// HoloMahjong. A native client: its battle connection is read through
+    /// the local CONNECT proxy at `[capture] listen` (see `capture::proxy`),
+    /// and its window is mirrored by the shell. Observe-only (no autoplay).
+    HoloMahjong,
 }
 
 impl Platform {
@@ -23,6 +27,7 @@ impl Platform {
             Platform::Majsoul => "majsoul",
             Platform::Tenhou => "tenhou",
             Platform::RiichiCity => "riichi_city",
+            Platform::HoloMahjong => "holomahjong",
         }
     }
 }
@@ -36,6 +41,7 @@ impl From<Platform> for schema::Platform {
             Platform::Majsoul => schema::Platform::Majsoul,
             Platform::Tenhou => schema::Platform::Tenhou,
             Platform::RiichiCity => schema::Platform::RiichiCity,
+            Platform::HoloMahjong => schema::Platform::HoloMahjong,
         }
     }
 }
@@ -63,6 +69,10 @@ mod tests {
         assert_eq!(
             schema::Platform::from(Platform::RiichiCity),
             schema::Platform::RiichiCity
+        );
+        assert_eq!(
+            schema::Platform::from(Platform::HoloMahjong),
+            schema::Platform::HoloMahjong
         );
     }
 }
