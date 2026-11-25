@@ -4,6 +4,19 @@ import { ROOMS, roomName, figuresOf, roomOf, totalsOf, yakuName, type GameRecord
 import { rungOf, type AccountLevels } from '@/lib/ladder'
 import { signed, type MonitorConfig } from '@/lib/monitor'
 import { tr } from '@/lib/i18n'
+import type { Platform } from '@/lib/platform'
+
+/** What a platform's rank points are called: Tenhou's rule pt, calculated
+ *  here from its published rules, or the rank points a platform reports. */
+type RankWords = { section: string; total?: string; basis?: string; some: (games: number) => string; none: string; trend: string }
+function rankWords(platform: Platform | undefined): RankWords {
+  const reported: RankWords = { section: tr('段位分与顺位'), some: games => tr('{0} 场的段位分变化', games), none: tr('还没有记录到段位分'), trend: tr('段位分走势') }
+  switch (platform) {
+    case 'Tenhou': return { section: tr('段位pt与顺位'), total: tr('所选记录的累计规则pt变化'), basis: tr('按天凤规则计算'),
+      some: games => tr('规则pt · {0} 场', games), none: tr('还没有记录到段位pt'), trend: tr('段位pt走势') }
+    case 'Majsoul': case 'HoloMahjong': case undefined: return reported
+  }
+}
 
 /** Rank points game by game, summed as they go: one line, and where zero is. */
 function Spark({ points, label }: { points: number[]; label: string }) {
@@ -67,9 +80,10 @@ export function Statistics({ historyRevision, account, platform }: { historyRevi
   const t = useMemo(() => totalsOf(shown), [shown])
   const figures = useMemo(() => figuresOf(t), [t])
   const waiting = failed ? tr('读不到对局记录：{0}', failed) : records == null ? tr('正在读取对局记录') : null
+  const words = rankWords(platform)
 
   return <div className="md-page mstats">
-    <section className="mstat mstat-rank" aria-label={platform === 'Tenhou' ? tr('段位pt与顺位') : tr('段位分与顺位')}>
+    <section className="mstat mstat-rank" aria-label={words.section}>
       <header className="msec-head">
         <Ladder account={account} players={latest?.num_players ?? 4} />
         <select className="mselect" aria-label={tr('统计范围')} value={room} onChange={e => setPicked(e.target.value as Room | 'all')}>
@@ -79,13 +93,11 @@ export function Statistics({ historyRevision, account, platform }: { historyRevi
       </header>
       <div className="mstat-points">
         <p>
-          <strong title={platform === 'Tenhou' ? tr('所选记录的累计规则pt变化') : undefined}>{t.pointGames > 0 ? signed(t.points.at(-1)!) : '—'}</strong>
-          <small title={platform === 'Tenhou' ? tr('按天凤规则计算') : undefined}>{waiting ?? (platform === 'Tenhou'
-            ? t.pointGames > 0 ? tr('规则pt · {0} 场', t.pointGames) : tr('还没有记录到段位pt')
-            : t.pointGames > 0 ? tr('{0} 场的段位分变化', t.pointGames) : tr('还没有记录到段位分'))}</small>
+          <strong title={words.total}>{t.pointGames > 0 ? signed(t.points.at(-1)!) : '—'}</strong>
+          <small title={words.basis}>{waiting ?? (t.pointGames > 0 ? words.some(t.pointGames) : words.none)}</small>
         </p>
         <p className="mstat-sum"><span>{tr('平均顺位')} <b>{t.averagePlace != null ? t.averagePlace.toFixed(2) : '—'}</b></span><span>{tr('{0} 场', t.games)}</span></p>
-        <Spark points={t.points} label={platform === 'Tenhou' ? tr('段位pt走势') : tr('段位分走势')} />
+        <Spark points={t.points} label={words.trend} />
       </div>
       <ol className="mstat-places">
         {t.places.map((n, i) => <li key={i}>

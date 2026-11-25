@@ -3,11 +3,14 @@ import { pickShow, visibleItems } from '@/lib/botShow'
 import type { BotResponse, BotStatus, CaptureStatus, GameStateSnapshot, MahgenView, MeldSnapshot, MjaiEvent, ShowItem } from '@/types'
 import { localized, tr } from '@/lib/i18n'
 import type { AccountLevels } from '@/lib/ladder'
+import type { Platform } from '@/lib/platform'
 
 /** The shell's saved options and reported OBS sender state. */
 export type MonitorConfig = {
-  platform?: 'Majsoul' | 'Tenhou'
+  platform?: Platform
   profile_name?: string
+  /** A native client's local proxy address, fixed when its account was created (HoloMahjong only). */
+  capture_listen?: string
   pointer_trail?: boolean; pointer_lean?: boolean
   /** `auto_win`: switch the client's own auto-win on after a riichi or for a hand played dama (see the core's `autoplay::dama`). */
   quick_confirm?: boolean; auto_win?: boolean

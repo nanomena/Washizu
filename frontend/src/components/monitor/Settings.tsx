@@ -3,6 +3,7 @@ import { FolderOpen } from 'lucide-react'
 import { AutoplayRows, LanguageRow, Row, SettingsLayout, Switch } from './SettingsControls'
 import { factsOf, levelOf, linkOf, serverLine, type AutoplayLevel, type Health, type MonitorConfig, type MonitorSnapshot } from '@/lib/monitor'
 import { localized, tr } from '@/lib/i18n'
+import { capsOf, platformName } from '@/lib/platform'
 import { GROUPS, type Group } from '@/lib/settingsGroup'
 
 type Props = {
@@ -33,9 +34,11 @@ function ViewRows({ options, onObsOutput }: Props) {
   const about = options.obs_available === false ? `${status} · ${tr('只在 Windows 上可用')}` : status
   const setup = tr('Windows：在 OBS 添加 Spout2 源，选择「{0}」', options.obs_name ?? 'Washizu')
   return <>
-    <Row name={tr('OBS 输出')} about={about}
-      control={<Switch name={tr('OBS 输出')} on={!!options.obs_output} onChange={options.obs_available === true ? onObsOutput : null} />} />
-    <p className="mset-help" title={setup}>{setup}</p>
+    {capsOf(options.platform)?.obsOutput !== false && <>
+      <Row name={tr('OBS 输出')} about={about}
+        control={<Switch name={tr('OBS 输出')} on={!!options.obs_output} onChange={options.obs_available === true ? onObsOutput : null} />} />
+      <p className="mset-help" title={setup}>{setup}</p>
+    </>}
     <LanguageRow />
   </>
 }
@@ -93,7 +96,8 @@ function AppLines({ snapshot: s, options, onProfiles }: Props) {
   return <>
     <Line name={tr('版本')} value={options.version ?? '—'} />
     <Line name={tr('应用')} value="Washizu" />
-    <Line name={tr('平台')} value={options.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')} />
+    <Line name={tr('平台')} value={options.platform ? platformName(options.platform) : '—'} />
+    {capsOf(options.platform)?.captureListen && <Line name={tr('本地代理')} value={options.capture_listen ?? '—'} note={options.capture_listen} />}
     <Line name={tr('账号档案')} value={<button className="mbtn mset-account" aria-label={tr('显示账号选择器')} title={tr('显示账号选择器')} disabled={!onProfiles} onClick={() => onProfiles?.()}>
       <FolderOpen size={12} /><span>{options.profile_name ?? tr('打开')}</span>
     </button>} />
@@ -107,9 +111,12 @@ function AppLines({ snapshot: s, options, onProfiles }: Props) {
  *  a list on the left, the chosen one's settings on the right a line each, six in
  *  sight and the rest a scroll away, each with the line about it. The links are a group of their own, and the
  *  tab carries their one light. */
-export function Settings({ group, onGroup, ...props }: Props & { group: Group; onGroup: (group: Group) => void }) {
+export function Settings({ group: kept, onGroup, ...props }: Props & { group: Group; onGroup: (group: Group) => void }) {
   const names: Record<Group, string> = { autoplay: tr('自动操作'), view: tr('画面与输出'), link: tr('连接'), model: tr('引擎'), app: tr('应用') }
-  return <SettingsLayout groups={GROUPS} group={group} names={names} onGroup={onGroup} badges={{ link: <i className="mdot" data-tone={linkOf(props.health).tone} /> }}>
+  // A platform without autoplay has no group for it; the group kept stays kept for the next account.
+  const groups = capsOf(props.options.platform)?.autoplay === false ? GROUPS.filter(key => key !== 'autoplay') : GROUPS
+  const group = groups.includes(kept) ? kept : groups[0]
+  return <SettingsLayout groups={groups} group={group} names={names} onGroup={onGroup} badges={{ link: <i className="mdot" data-tone={linkOf(props.health).tone} /> }}>
       {group === 'autoplay' ? <div className="mset-grid"><AutoplayRows {...props} level={levelOf(props.snapshot, props.options)} /></div>
         : group === 'view' ? <div className="mset-grid"><ViewRows {...props} /></div>
         : group === 'link' ? <div className="mset-links"><LinkRows {...props} /></div>

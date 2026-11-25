@@ -2,6 +2,7 @@ import { type ReactNode } from 'react'
 import { AutoplayLevels } from '@/components/monitor/AutoplayLevel'
 import { levelAbout, type AutoplayLevel, type MonitorConfig } from '@/lib/monitor'
 import { LANGS, setLang, tr, useLang, type Lang } from '@/lib/i18n'
+import { capsOf } from '@/lib/platform'
 
 type Props = { options: MonitorConfig; onLevel: ((level: AutoplayLevel) => void) | null; onConfirm: ((on: boolean) => void) | null; onAutoWin: ((on: boolean) => void) | null; onLean: ((on: boolean) => void) | null; onTrail: ((on: boolean) => void) | null }
 
@@ -22,13 +23,15 @@ export function Row({ name, about, control }: { name: string; about: string; con
  *  it switches, then its pointer. */
 export function AutoplayRows({ level, options, onLevel, onConfirm, onAutoWin, onLean, onTrail }: Pick<Props, 'options' | 'onLevel' | 'onConfirm' | 'onAutoWin' | 'onLean' | 'onTrail'> & { level: AutoplayLevel | null }) {
   const sw = (name: string, on: boolean, onChange: ((on: boolean) => void) | null) => <Switch name={name} on={on} onChange={onChange} />
-  const tenhou = options.platform === 'Tenhou'
+  // Before the platform is known these read as they always have; a platform without autoplay never shows them.
+  const autoWin = capsOf(options.platform)?.clientAutoWin ?? 'switch'
   return <>
-    <Row name={tr('自动操作')} about={tenhou ? tr('天凤 Web：首次手动选房，连战沿用上一场实际大厅和规则。') : levelAbout(level ?? 'off')} control={<AutoplayLevels level={level} onLevel={onLevel} />} />
+    <Row name={tr('自动操作')} about={options.platform === 'Tenhou' ? tr('天凤 Web：首次手动选房，连战沿用上一场实际大厅和规则。') : levelAbout(level ?? 'off')} control={<AutoplayLevels level={level} onLevel={onLevel} />} />
     <Row name={tr('快速确认')} about={tr('和了或流局时，等确认按钮出现再点掉结算')} control={sw(tr('快速确认'), !!options.quick_confirm, onConfirm)} />
-    <Row name={tr('客户端自动和牌')}
-      about={tenhou ? tr('天凤尚未适配客户端自动和牌开关；模型选择的荣和、自摸仍由公共自动打牌流程执行。') : tr('立直或听牌、不到满贯时，某个时刻打开雀魂的自动和牌；没立直时各场第 4 局和西入后不开')}
-      control={tenhou ? <span>{tr('暂未适配')}</span> : sw(tr('客户端自动和牌'), !!options.auto_win, onAutoWin)} />
+    {autoWin === 'switch' && <Row name={tr('客户端自动和牌')} about={tr('立直或听牌、不到满贯时，某个时刻打开雀魂的自动和牌；没立直时各场第 4 局和西入后不开')}
+      control={sw(tr('客户端自动和牌'), !!options.auto_win, onAutoWin)} />}
+    {autoWin === 'unadapted' && <Row name={tr('客户端自动和牌')} about={tr('天凤尚未适配客户端自动和牌开关；模型选择的荣和、自摸仍由公共自动打牌流程执行。')}
+      control={<span>{tr('暂未适配')}</span>} />}
     <Row name={tr('预推理')} about={tr('别家行动时，光标停在下一手可能要打的牌上')} control={sw(tr('预推理'), !!options.pointer_lean, onLean)} />
     <Row name={tr('光标轨迹')} about={tr('在游戏画面上画出自动操作的光标和点击')} control={sw(tr('光标轨迹'), !!options.pointer_trail, onTrail)} />
   </>

@@ -5,7 +5,7 @@ clients, each with its own game view, dock and local DevTools port.
 
 ## Account profiles
 
-Opening Washizu shows saved accounts. Create a Mahjong Soul or Tenhou profile,
+Opening Washizu shows saved accounts. Create a Mahjong Soul, Tenhou or HoloMahjong profile,
 or manage and open one already saved. Management can rename a profile or remove
 its registration after confirmation; its browser storage, configuration and
 history remain on disk. Running or cleanup-unconfirmed profiles cannot be
@@ -162,6 +162,34 @@ sends where the pointer goes (`pointer` events) and the shell draws them in a
 transparent window of its own over the game view (`src/trail.*`), which takes
 no input: clicks pass through it to the game. Nothing is added to the game's
 page.
+
+## HoloMahjong: a native client, mirrored
+
+HoloMahjong (ホロじゃん) has no web client. Its account is observed only:
+`PLATFORMS` in `src/profiles.js` marks it `view: 'mirror'`. Creating one
+writes `[platform] kind = "HoloMahjong"` and `[capture] listen =
+"127.0.0.1:<port>"`, a loopback port chosen once from 20000–39999 that is free
+and held by no other account (deleted ones included), and never rewritten.
+The settings' app facts show it read-only. An external redirector sends the
+client's traffic to that address.
+
+On such an account `open_monitor_game` asks the core for `open_proxy` (no
+params; it answers `{ listen }`, which must be the account's address) instead
+of making an offscreen page and calling `open_game`, and starts the window
+mirror (`src/mirror.js`). The mirror alone owns its state: `searching` (no
+window yet; the window list is read every 2 s), `showing`, and `lost` (the
+window went, or the dock reported its picture ended), which goes back to
+`searching`. The dock learns it from `game-mirror` events (`get_game_mirror`
+after a reload), asks `getDisplayMedia` for the picture while `showing`, and
+reports an ended picture with `game_mirror_ended`. The display-media handler
+answers only the dock's own frame, video only, with the window the mirror
+shows, without a picker. The client's window is found by its exact title.
+
+A mirrored window is view only. There is no DevTools port, offscreen page,
+input forwarding, physical-pointer watch, pointer trail, GL watch, garbage
+collection or OBS output; the autoplay, auto-win, playing-on, confirmation,
+pre-inference, trail and OBS commands are refused, and the dock does not draw
+them (`frontend/src/lib/platform.ts`).
 
 ## OBS output and the offscreen game
 
