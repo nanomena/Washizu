@@ -944,8 +944,13 @@ mod tests {
             )
         };
         record(&result, secret);
+        let init = r#"{"tag":"INIT","seed":"fake-seed"}"#;
         result.shareable = true;
-        record(&result, r#"{"tag":"INIT","seed":"fake-seed"}"#);
+        result.parsed = Some(crate::schema::ParsedFrame {
+            method: "INIT".into(),
+            args: serde_json::from_str(init).unwrap(),
+        });
+        record(&result, init);
         let read = |name: &str| std::fs::read_to_string(tmp.path().join(name)).unwrap();
         let shared = read("inspector.jsonl");
         assert!(!shared.contains("fake-auth"), "{shared}");
