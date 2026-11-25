@@ -63,6 +63,32 @@ const METHODS_LOGIN: [&str; 3] = [
 const METHOD_FETCH_ACCOUNT_INFO: &str = ".lq.Lobby.fetchAccountInfo";
 /// The lobby call a replay opens with; its answer is the whole game record.
 const METHOD_FETCH_GAME_RECORD: &str = ".lq.Lobby.fetchGameRecord";
+
+/// Messages whose content may go into the shareable logs: the gameplay
+/// messages the bridge reads. Check a message carries no credentials before
+/// adding it: `ReqAuthGame` has `token`, so only the `authGame` response is
+/// here. The lobby messages the bridge also reads stay off the list — the
+/// login responses carry an access token, the others accounts and records.
+fn is_shareable(kind: &MessageType, method: &str) -> bool {
+    matches!(
+        (kind, method),
+        (MessageType::Response, METHOD_AUTH_GAME)
+            | (
+                MessageType::Request | MessageType::Response,
+                METHOD_SYNC_GAME
+                    | METHOD_ENTER_GAME
+                    | METHOD_INPUT_OPERATION
+                    | METHOD_INPUT_CHI_PENG_GANG
+                    | METHOD_CONFIRM_NEW_ROUND
+            )
+            | (
+                MessageType::Notify,
+                METHOD_ACTION_PROTOTYPE
+                    | METHOD_NOTIFY_GAME_END_RESULT
+                    | METHOD_NOTIFY_GAME_TERMINATE
+            )
+    )
+}
 const ACTION_NEW_ROUND: &str = "ActionNewRound";
 const ACTION_DEAL_TILE: &str = "ActionDealTile";
 const ACTION_DISCARD_TILE: &str = "ActionDiscardTile";
@@ -382,8 +408,7 @@ impl MajsoulBridge {
                 if self.account_id.is_none() {
                     warn!(
                         target: "akagi::bridge::majsoul",
-                        "authGame request missing account_id: {}",
-                        msg.payload
+                        "authGame request missing account_id"
                     );
                 }
                 Vec::new()
@@ -2032,21 +2057,28 @@ impl Bridge for MajsoulBridge {
                     .msg_id
                     .map(|i| format!("#{i}"))
                     .unwrap_or_else(|| "-".into());
+                let shareable = is_shareable(&msg.msg_type, &msg.method_name);
                 info!(
                     target: "akagi::bridge::majsoul",
                     "{} {kind} {id_str} {} {}",
                     direction.as_str(),
                     msg.method_name,
-                    msg.payload
+                    crate::bridge::shown(shareable, &msg.payload)
                 );
                 if let Some(log) = &self.flow_log {
+                    let payload = if shareable {
+                        msg.payload.clone()
+                    } else {
+                        json!(crate::bridge::WITHHELD)
+                    };
                     let line = json!({
                         "ts": Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                         "dir": direction.as_str(),
                         "type": kind,
                         "msg_id": msg.msg_id,
                         "method": msg.method_name.as_ref(),
-                        "payload": msg.payload,
+                        "len": content.len(),
+                        "payload": payload,
                     });
                     log.writeln(&line.to_string());
                 }
@@ -2080,6 +2112,7 @@ impl Bridge for MajsoulBridge {
                     events,
                     parsed,
                     window: self.window.map(crate::bot::control::InputWindow::Majsoul),
+                    shareable,
                 }
             }
             Err(e) => {
@@ -2107,6 +2140,146 @@ impl Bridge for MajsoulBridge {
     fn build(&mut self, _command: &MjaiEvent) -> Option<Vec<u8>> {
         None
     }
+}
+
+#[cfg(test)]
+mod shareable_tests {
+    use super::*;
+    use crate::logger::FlowLogger;
+    use parser::encode_frame;
+    use tempfile::TempDir;
+
+    fn bridge_with_flow_log(tmp: &TempDir) -> MajsoulBridge {
+        let log = FlowLogger::new(tmp.path(), "majsoul", "flow.log", "test").unwrap();
+        MajsoulBridge::new(Some(Arc::new(log)), None)
+    }
+
+    fn flow_log(tmp: &TempDir) -> String {
+        std::fs::read_to_string(tmp.path().join("majsoul/flow.log")).unwrap()
+    }
+
+    /// Regression: the authGame request carries the game-server token, and
+    /// its full payload used to go to the flow log and the inspector.
+    #[test]
+    fn auth_game_request_is_consumed_but_withheld() {
+        let tmp = TempDir::new().unwrap();
+        let mut b = bridge_with_flow_log(&tmp);
+        let frame = encode_frame(
+            MessageType::Request,
+            7,
+            METHOD_AUTH_GAME,
+            "lq.ReqAuthGame",
+            json!({ "account_id": 1001, "token": "fake-game-token", "game_uuid": "fake-uuid" }),
+        );
+        let r = b.parse(Direction::Up, &frame);
+        assert!(!r.shareable);
+        assert_eq!(b.account_id, Some(1001), "the bridge still reads it");
+        let log = flow_log(&tmp);
+        assert!(!log.contains("fake-game-token"), "flow log: {log}");
+        assert!(log.contains(WITHHELD_JSON) && log.contains(METHOD_AUTH_GAME));
+    }
+
+    #[test]
+    fn lobby_login_is_withheld() {
+        let tmp = TempDir::new().unwrap();
+        let mut b = bridge_with_flow_log(&tmp);
+        let frame = encode_frame(
+            MessageType::Request,
+            1,
+            ".lq.Lobby.login",
+            "lq.ReqLogin",
+            json!({ "account": "fake@example.invalid", "password": "fake-password" }),
+        );
+        let r = b.parse(Direction::Up, &frame);
+        assert!(!r.shareable);
+        assert!(r.parsed.is_some(), "the full view still goes to sensitive/");
+        let log = flow_log(&tmp);
+        assert!(!log.contains("fake-password") && !log.contains("fake@example.invalid"));
+    }
+
+    #[test]
+    fn gameplay_messages_are_shareable() {
+        let tmp = TempDir::new().unwrap();
+        let mut b = bridge_with_flow_log(&tmp);
+        let auth = encode_frame(
+            MessageType::Request,
+            7,
+            METHOD_AUTH_GAME,
+            "lq.ReqAuthGame",
+            json!({ "account_id": 1001 }),
+        );
+        b.parse(Direction::Up, &auth);
+        let resp = encode_frame(
+            MessageType::Response,
+            7,
+            METHOD_AUTH_GAME,
+            "lq.ResAuthGame",
+            json!({ "seat_list": [1001, 1002, 1003, 1004] }),
+        );
+        assert!(b.parse(Direction::Down, &resp).shareable);
+        let terminate = encode_frame(
+            MessageType::Notify,
+            0,
+            METHOD_NOTIFY_GAME_TERMINATE,
+            "lq.NotifyGameTerminate",
+            json!({ "reason": "fake-reason" }),
+        );
+        assert!(b.parse(Direction::Down, &terminate).shareable);
+        assert!(flow_log(&tmp).contains("fake-reason"));
+    }
+
+    #[test]
+    fn unparseable_frames_are_withheld() {
+        let mut b = MajsoulBridge::new(None, None);
+        assert!(!b.parse(Direction::Down, &[9, 9, 9]).shareable);
+    }
+
+    /// The lobby login answer carries an access token. The bridge still reads
+    /// the account id from it, but its content stays out of the flow log.
+    #[test]
+    fn login_response_is_consumed_but_withheld() {
+        let tmp = TempDir::new().unwrap();
+        let mut b = bridge_with_flow_log(&tmp);
+        let req = encode_frame(
+            MessageType::Request,
+            2,
+            ".lq.Lobby.oauth2Login",
+            "lq.ReqOauth2Login",
+            json!({ "access_token": "fake-oauth-token" }),
+        );
+        assert!(!b.parse(Direction::Up, &req).shareable);
+        let resp = encode_frame(
+            MessageType::Response,
+            2,
+            ".lq.Lobby.oauth2Login",
+            "lq.ResLogin",
+            json!({ "account_id": 1001, "access_token": "fake-access-token" }),
+        );
+        let r = b.parse(Direction::Down, &resp);
+        assert!(!r.shareable);
+        assert_eq!(b.account_id, Some(1001), "the bridge still reads it");
+        let log = flow_log(&tmp);
+        assert!(
+            !log.contains("fake-oauth-token") && !log.contains("fake-access-token"),
+            "flow log: {log}"
+        );
+        assert!(log.contains(".lq.Lobby.oauth2Login") && log.contains("\"len\""));
+    }
+
+    #[test]
+    fn confirm_new_round_is_shareable() {
+        let mut b = MajsoulBridge::new(None, None);
+        let req = encode_frame(
+            MessageType::Request,
+            3,
+            METHOD_CONFIRM_NEW_ROUND,
+            "lq.ReqCommon",
+            json!({}),
+        );
+        assert!(b.parse(Direction::Up, &req).shareable);
+    }
+
+    const WITHHELD_JSON: &str = "\"<withheld>\"";
 }
 
 #[cfg(test)]

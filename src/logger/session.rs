@@ -90,6 +90,13 @@ impl LogTarget {
     }
 }
 
+const SENSITIVE_README: &str = "\
+Files in this folder hold every captured WebSocket frame and HTTP exchange
+in full, which can include login tokens and other account credentials. Do
+not post them publicly. The rest of the session folder leaves them out and
+is what to attach to a bug report.
+";
+
 /// Active logging session. Holds the session directory and the
 /// tracing-appender worker guards (must stay alive for log flushing).
 pub struct Session {
@@ -183,9 +190,14 @@ impl Session {
         // (frames, mjai events, bot reactions), not application logs —
         // and conflating them would multiply file size and complicate
         // filtering on either side.
+        let sensitive = dir.join(super::SENSITIVE_DIR);
+        std::fs::create_dir_all(&sensitive)
+            .with_context(|| format!("Failed to create {}", sensitive.display()))?;
+        let _ = std::fs::write(sensitive.join("README.txt"), SENSITIVE_README);
         let inspector_path = dir.join("inspector.jsonl");
-        let (inspector_writer, inspector_bus) = InspectorWriter::open(&inspector_path, 1024)
-            .with_context(|| format!("Failed to open {}", inspector_path.display()))?;
+        let (inspector_writer, inspector_bus) =
+            InspectorWriter::open(&inspector_path, &sensitive.join("inspector.jsonl"), 1024)
+                .with_context(|| format!("Failed to open {}", inspector_path.display()))?;
 
         // Per-target files.
         for t in targets {

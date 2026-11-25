@@ -5,12 +5,12 @@ edition = "2021"
 
 # What this tree carries of Akagi: the version and commit of the upstream
 # branch it has been followed to. This tree's own version, above, says
-# nothing about that. See "Versions and upstream" in README.md.
+# nothing about that.
 [package.metadata.upstream]
 repository = "https://github.com/shinkuan/Akagi"
 branch = "v3"
-version = "3.7.1"
-commit = "cd68865f9e93eddcda6451cd18874a6f68c5fb49"
+version = "3.9.0"
+commit = "c560cb4c2e82ad8e5ea9521d82136d987e9a05ed"
 
 [lib]
 name = "akagi"

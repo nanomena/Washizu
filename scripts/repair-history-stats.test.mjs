@@ -77,6 +77,13 @@ test('native recovery matches game/round/seat and rejects contradictory result m
   fs.writeFileSync(file,[auth,restored,hule].map(JSON.stringify).join('\n'));
   const recovered=await nativeScores(temp,[soul]);
   assert.deepEqual(recovered.scores.get('uuid|S:3:1|0').yaku,[[2,1]]);
+  // A run with a sensitive/ copy is read from it, not from the shareable file.
+  const withheld={...frame('.lq.FastTest.authGame',null),direction:'up',raw:{format:'withheld'}};
+  fs.writeFileSync(file,[withheld,restored,hule].map(JSON.stringify).join('\n'));
+  assert.equal((await nativeScores(temp,[soul])).scores.size,0);
+  fs.mkdirSync(path.join(temp,'logs','run','sensitive'));
+  fs.writeFileSync(path.join(temp,'logs','run','sensitive','inspector.jsonl'),[auth,restored,hule].map(JSON.stringify).join('\n'));
+  assert.deepEqual((await nativeScores(temp,[soul])).scores.get('uuid|S:3:1|0').yaku,[[2,1]]);
 });
 test('offline application backs up bytes and rejects changed history or changed identity',async t=>{
   const temp=fs.mkdtempSync(path.join(os.tmpdir(),'washizu-stat-apply-'));

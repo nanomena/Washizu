@@ -49,6 +49,10 @@ pub struct ParseResult {
     pub window: Option<crate::bot::control::InputWindow>,
     pub events: Vec<MjaiEvent>,
     pub parsed: Option<ParsedFrame>,
+    /// The frame is on the bridge's allowlist, so its content may go into the
+    /// shareable logs. Anything else is recorded in full only under the
+    /// session's `sensitive/` directory. See "Shareable frames" in the README.
+    pub shareable: bool,
 }
 
 impl ParseResult {
@@ -57,9 +61,8 @@ impl ParseResult {
     }
     pub fn just_events(events: Vec<MjaiEvent>) -> Self {
         Self {
-            window: None,
             events,
-            parsed: None,
+            ..Self::default()
         }
     }
 
@@ -72,6 +75,17 @@ impl ParseResult {
                 event,
                 window: (Some(i) == last).then_some(self.window).flatten(),
             })
+    }
+}
+
+pub use crate::schema::WITHHELD;
+
+/// `content` if the frame is shareable, else [`WITHHELD`]. For log lines.
+pub fn shown(shareable: bool, content: &serde_json::Value) -> &dyn std::fmt::Display {
+    if shareable {
+        content
+    } else {
+        &WITHHELD
     }
 }
 
@@ -185,6 +199,7 @@ mod envelope_tests {
             let captured: Vec<_> = ParseResult {
                 events: vec![MjaiEvent::None, last],
                 parsed: None,
+                shareable: false,
                 window: Some(window),
             }
             .into_captured()

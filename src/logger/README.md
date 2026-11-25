@@ -16,13 +16,34 @@ Structured text logging built on [`tracing`](https://crates.io/crates/tracing) a
 <log_root>/<YYYYMMDD-HHMMSS>/
 ├── all.log              # every event from every target
 ├── bot.log              # one file per LogTarget (filtered by tracing target prefix)
-├── inspector.jsonl      # frames, mjai events and bot reactions, in order
+├── inspector.jsonl      # shareable timeline: frames, mjai events, bot reactions
 ├── majsoul/             # one subdir per platform (FlowLogger)
 │   ├── 000001-gateway.log                # one file per WS flow: <id:06>-<uri-slug>.log
 │   ├── 000002-game-gateway.log
 │   └── majsoul_<ts>.mjai.jsonl          # one file per game: emitted MjaiEvents
-└── ...
+└── sensitive/           # may hold account credentials (SENSITIVE_DIR)
+    ├── README.txt       # says so to whoever opens the folder
+    └── inspector.jsonl  # the full timeline, every frame and HTTP exchange
 ```
+
+## Shareable vs. sensitive
+
+Everything outside `sensitive/` is meant to be shareable. Frame content gets
+there only for frames on the bridge's allowlist (see "Shareable frames" in
+`src/bridge/README.md`); any other frame is written as method, direction and
+size. Two rules keep it that way when you add logging:
+
+- Don't log a frame payload, a URL query or an HTTP header value unless the
+  bridge marked the frame shareable. Use `bridge::shown(shareable, &payload)`
+  for payloads and `util::redact_query` for URLs.
+- Record inspector entries with `InspectorWriter::record_as(entry, shareable)`
+  (or `record_sensitive`). `record` is only for content known to be safe; an
+  HTTP exchange recorded with it still loses its credential headers, and all
+  its content unless a recognizer annotated it.
+
+Anything that reads frame content back from a session (scripts, the
+`replay_majsoul` example) reads `sensitive/inspector.jsonl`, falling back to
+`inspector.jsonl` for sessions recorded before the split.
 
 `log_root` is `logging.dir`, under the home the shell gives the core (`util::resolve_dir`).
 
@@ -63,7 +84,8 @@ Each call to `Session::flow_logger` opens a fresh file at
 full filename including extension, so the same logger handles `.log`,
 `.mjai.jsonl`, etc.). Capture opens one per WebSocket
 and hands the resulting `Arc<FlowLogger>` to
-`bridge::for_platform`. Every parsed message gets written as a JSON line.
+`bridge::for_platform`. Every parsed message gets written as a JSON line,
+its payload withheld unless the frame is shareable.
 When all references drop (both directions of the WS exit), the file
 closes.
 

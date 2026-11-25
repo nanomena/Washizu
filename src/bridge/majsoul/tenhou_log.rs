@@ -128,7 +128,8 @@ pub fn from_record(response: &JsonValue) -> Result<TenhouLog> {
     let head = response.get("head").context("record has no head")?;
     let data = text(response, "data");
     if data.is_empty() {
-        let url = text(response, "data_url");
+        // The error reaches the shareable log; a query could be a signature.
+        let url = crate::util::redact_query(text(response, "data_url"));
         bail!("record is not inline (data_url {url:?}); open it again to fetch it");
     }
     let blob = BASE64.decode(data).context("record data is not base64")?;
@@ -1393,9 +1394,12 @@ mod tests {
 
     #[test]
     fn a_record_behind_a_url_is_reported() {
-        let response =
-            json!({"head": {"uuid": "x"}, "data": "", "data_url": "https://example.invalid/r"});
-        let err = from_record(&response).unwrap_err();
-        assert!(err.to_string().contains("not inline"));
+        let response = json!({"head": {"uuid": "x"}, "data": "", "data_url": "https://example.invalid/r?sig=fake"});
+        let err = from_record(&response).unwrap_err().to_string();
+        assert!(err.contains("not inline"));
+        assert!(
+            err.contains("example.invalid/r") && !err.contains("fake"),
+            "{err}"
+        );
     }
 }
