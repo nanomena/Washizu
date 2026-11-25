@@ -23,8 +23,8 @@ import { defaultEngine } from './engines.js'
 export const PLATFORMS = Object.freeze({
   Majsoul: { name: '雀魂', view: 'page', url: 'https://game.maj-soul.com/1/' },
   Tenhou: { name: '天凤', view: 'page', url: 'https://tenhou.net/3/' },
-  // TODO: confirm against the installed client: the exact title of the game's window.
-  HoloMahjong: { name: 'ホロじゃん', view: 'mirror', windowTitles: Object.freeze(['ホロライブ麻雀 -ホロじゃん-']) },
+  // The Windows client (HoloMahjong.exe) titles its game window in Latin letters.
+  HoloMahjong: { name: 'ホロじゃん', view: 'mirror', windowTitles: Object.freeze(['HoloMahjong']) },
 })
 /** @typedef {keyof typeof PLATFORMS} Platform */
 /** @typedef {{ id: string, name: string, platform: Platform, lastOpened: string | null, proxy: import('./profile-proxy.js').GameProxy }} AccountProfile */
