@@ -160,7 +160,7 @@ function startText(platform: Platform): { about: string; card: string; open: str
   switch (platform) {
     case 'Majsoul': return { about: tr('上面登录雀魂并对局，下面核对模型建议和雀魂的实际动作。'), card: tr('游戏使用独立的登录资料，只在这个窗口里用。'), open: tr('打开雀魂') }
     case 'Tenhou': return { about: tr('登录这个档案的天凤账号，登录资料和记录单独保存。'), card: tr('游戏使用独立的登录资料，只在这个窗口里用。'), open: tr('打开天凤') }
-    case 'HoloMahjong': return { about: tr('在 ホロじゃん 客户端里对局，下面核对模型建议和实际动作。'), card: tr('这里只显示 ホロじゃん 窗口的画面，不能在这里操作。'), open: tr('打开ホロじゃん') }
+    case 'HoloMahjong': return { about: tr('在 HoloM 客户端里对局，下面核对模型建议和实际动作。'), card: tr('这里只显示 HoloM 窗口的画面，不能在这里操作。'), open: tr('打开 HoloM') }
   }
 }
 

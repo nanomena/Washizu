@@ -47,6 +47,6 @@ export function platformName(platform: Platform): string {
   switch (platform) {
     case 'Majsoul': return tr('雀魂')
     case 'Tenhou': return tr('天凤')
-    case 'HoloMahjong': return tr('ホロじゃん')
+    case 'HoloMahjong': return tr('HoloM')
   }
 }

@@ -17,8 +17,8 @@ describe('the platforms', () => {
   })
 
   it.each([
-    ['zh-CN', ['雀魂', '天凤', 'ホロじゃん']], ['zh-TW', ['雀魂', '天鳳', 'ホロじゃん']],
-    ['ja', ['雀魂', '天鳳', 'ホロじゃん']], ['en', ['Mahjong Soul', 'Tenhou', 'HoloMahjong']],
+    ['zh-CN', ['雀魂', '天凤', 'HoloM']], ['zh-TW', ['雀魂', '天鳳', 'HoloM']],
+    ['ja', ['雀魂', '天鳳', 'HoloM']], ['en', ['Mahjong Soul', 'Tenhou', 'HoloM']],
   ] as const)('names every platform as itself in %s', (lang, names) => {
     setLang(lang)
     expect(PLATFORMS.map(platformName)).toEqual(names)

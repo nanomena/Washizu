@@ -928,15 +928,15 @@ describe('a HoloMahjong account', () => {
     fixture.holdOpen = true
     const { unmount } = render(<Monitor />)
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'open_monitor_game')).toBe(true))
-    expect(screen.getByRole('heading', { name: 'Washizu · ホロじゃん' })).toBeTruthy()
-    expect(screen.getByText('这里只显示 ホロじゃん 窗口的画面，不能在这里操作。')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Washizu · HoloM' })).toBeTruthy()
+    expect(screen.getByText('这里只显示 HoloM 窗口的画面，不能在这里操作。')).toBeTruthy()
     expect(screen.queryByText(/雀魂/)).toBeNull()
     unmount()
     fixture.holdOpen = false
     fixture.calls = []
     render(<Monitor />)
     // Opened: the stage is the mirror's, and nothing of the start card stays.
-    await waitFor(() => expect(screen.getByText('等待 ホロじゃん 窗口')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('等待 HoloM 窗口')).toBeTruthy())
     expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
   })
 
@@ -963,7 +963,7 @@ describe('a HoloMahjong account', () => {
     expect(line.parentElement!.className).toBe('mset-facts')
     expect(within(line as HTMLElement).getByText('127.0.0.1:23456')).toBeTruthy()
     expect(line.querySelector('input, button, select')).toBeNull()
-    expect(screen.getByText('ホロじゃん')).toBeTruthy()
+    expect(screen.getByText('HoloM')).toBeTruthy()
   })
 
   it('mirrors the client window view only, through the shell-owned mirror states', async () => {
@@ -974,7 +974,7 @@ describe('a HoloMahjong account', () => {
     const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
     render(<Monitor />)
     await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_game_mirror')).toBe(true))
-    expect(screen.getByText('等待 ホロじゃん 窗口')).toBeTruthy()
+    expect(screen.getByText('等待 HoloM 窗口')).toBeTruthy()
     expect(document.getElementById('akagi-game-view')).toBeNull()
     expect(screen.queryByRole('textbox', { name: '向游戏输入' })).toBeNull()
     const say = (payload: unknown) => act(() => fixture.listeners.get('game-mirror')!(payload))
@@ -990,11 +990,11 @@ describe('a HoloMahjong account', () => {
     act(() => { track.dispatchEvent(new Event('ended')) })
     await waitFor(() => expect(fixture.calls).toContainEqual(['game_mirror_ended', { source: 'window:42:0' }]))
     say({ state: 'lost', source: null })
-    expect(screen.getByText('ホロじゃん 窗口已关闭或最小化')).toBeTruthy()
+    expect(screen.getByText('HoloM 窗口已关闭或最小化')).toBeTruthy()
     expect(track.stop).toHaveBeenCalled()
     expect(video.srcObject).toBeNull()
     say({ state: 'searching', source: null })
-    expect(screen.getByText('等待 ホロじゃん 窗口')).toBeTruthy()
+    expect(screen.getByText('等待 HoloM 窗口')).toBeTruthy()
     expect(getDisplayMedia).toHaveBeenCalledTimes(1)
     play.mockRestore()
   })
@@ -1012,7 +1012,7 @@ describe('a HoloMahjong account', () => {
 
 describe('the platform a page names', () => {
   afterEach(() => { cleanup(); setLang('zh-CN'); fixture.holdOpen = false })
-  it.each([['zh-CN', 'ホロじゃん'], ['zh-TW', 'ホロじゃん'], ['ja', 'ホロじゃん'], ['en', 'HoloMahjong']] as const)('in %s, names HoloMahjong as %s on the stage and in the app facts', async (lang, name) => {
+  it.each([['zh-CN', 'HoloM'], ['zh-TW', 'HoloM'], ['ja', 'HoloM'], ['en', 'HoloM']] as const)('in %s, names HoloMahjong as %s on the stage and in the app facts', async (lang, name) => {
     setLang(lang)
     fixture.options = { platform: 'HoloMahjong', capture_listen: '127.0.0.1:23456' }
     fixture.snapshot = { ...state(), decision: null, capture: { state: 'stopped' }, game_ended: true, round_ended: true }

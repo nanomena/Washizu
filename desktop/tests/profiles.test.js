@@ -234,7 +234,7 @@ test('a HoloMahjong account gets its proxy address once, at creation, and keeps 
   const store = new ProfileStore(root).load()
   const before = fs.readFileSync(store.file, 'utf8')
   assert.equal(platformKind('HoloMahjong'), 'HoloMahjong')
-  assert.throws(() => platformKind('RiichiCity'), /请选择雀魂、天凤或ホロじゃん/)
+  assert.throws(() => platformKind('RiichiCity'), /请选择雀魂、天凤或 HoloM/)
   assert.throws(() => store.create('Holo', 'HoloMahjong'), /本地代理地址/, 'a native client needs its address')
   assert.throws(() => store.create('Web', 'Majsoul', '127.0.0.1:23456'), /本地代理地址/, 'a web client has none')
   for (const bad of ['0.0.0.0:23456', '127.0.0.1:80', '127.0.0.1:70000', 'localhost:23456', '127.0.0.1:023456']) {
@@ -296,7 +296,7 @@ test('a HoloMahjong home without its address is refused, not given another', t =
   const root = temporary(t)
   fs.writeFileSync(path.join(root, 'config.toml'), '[platform]\nkind = "HoloMahjong"\n')
   const store = new ProfileStore(root).load()
-  assert.equal(store.get('existing').name, 'ホロじゃん · 原有账号')
+  assert.equal(store.get('existing').name, 'HoloM · 原有账号')
   assert.throws(() => homeCaptureListen(root), /capture\.listen/)
   assert.throws(() => store.listenPorts(), /capture\.listen/)
   assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), '[platform]\nkind = "HoloMahjong"\n')

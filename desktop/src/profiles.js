@@ -24,7 +24,7 @@ export const PLATFORMS = Object.freeze({
   Majsoul: { name: '雀魂', view: 'page', url: 'https://game.maj-soul.com/1/' },
   Tenhou: { name: '天凤', view: 'page', url: 'https://tenhou.net/3/' },
   // The Windows client (HoloMahjong.exe) titles its game window in Latin letters.
-  HoloMahjong: { name: 'ホロじゃん', view: 'mirror', windowTitles: Object.freeze(['HoloMahjong']) },
+  HoloMahjong: { name: 'HoloM', view: 'mirror', windowTitles: Object.freeze(['HoloMahjong']) },
 })
 /** @typedef {keyof typeof PLATFORMS} Platform */
 /** @typedef {{ id: string, name: string, platform: Platform, lastOpened: string | null, proxy: import('./profile-proxy.js').GameProxy }} AccountProfile */
@@ -32,7 +32,7 @@ export const PLATFORMS = Object.freeze({
 
 /** @param {unknown} value @returns {Platform} */
 export function platformKind(value) {
-  if (value !== 'Majsoul' && value !== 'Tenhou' && value !== 'HoloMahjong') throw new Error('请选择雀魂、天凤或ホロじゃん。')
+  if (value !== 'Majsoul' && value !== 'Tenhou' && value !== 'HoloMahjong') throw new Error('请选择雀魂、天凤或 HoloM。')
   return value
 }
 

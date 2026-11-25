@@ -198,14 +198,14 @@ describe('a HoloMahjong account in the chooser', () => {
     fireEvent.click(screen.getByRole('button', { name: '新建档案' }))
     const form = within(screen.getByRole('dialog'))
     const select = form.getByLabelText('平台') as HTMLSelectElement
-    expect([...select.options].map(option => [option.value, option.textContent])).toEqual([['Majsoul', '雀魂'], ['Tenhou', '天凤'], ['HoloMahjong', 'ホロじゃん']])
+    expect([...select.options].map(option => [option.value, option.textContent])).toEqual([['Majsoul', '雀魂'], ['Tenhou', '天凤'], ['HoloMahjong', 'HoloM']])
     fireEvent.change(form.getByLabelText('档案名称'), { target: { value: 'Player A' } })
     fireEvent.change(select, { target: { value: 'HoloMahjong' } })
     fireEvent.click(form.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(screen.getByText('Player A')).toBeTruthy())
     expect(fixture.calls).toContainEqual(['create_profile', { name: 'Player A', platform: 'HoloMahjong' }])
     const row = screen.getByText('Player A').closest('tr')!
-    expect(within(row).getByText('ホロじゃん')).toBeTruthy()
+    expect(within(row).getByText('HoloM')).toBeTruthy()
     expect(within(row).queryByText('雀魂')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '管理 Player A' }))
     const editor = within(screen.getByRole('dialog'))
@@ -221,10 +221,10 @@ describe('a HoloMahjong account in the chooser', () => {
     fireEvent.click(screen.getByRole('button', { name: '设置' }))
     expect(screen.getByRole('button', { name: '雀魂' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '天凤' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'ホロじゃん' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'HoloM' })).toBeNull()
   })
 
-  it.each([['en', 'HoloMahjong'], ['ja', 'ホロじゃん'], ['zh-TW', 'ホロじゃん']] as const)('names it in %s as %s', async (lang, name) => {
+  it.each([['en', 'HoloM'], ['ja', 'HoloM'], ['zh-TW', 'HoloM']] as const)('names it in %s as %s', async (lang, name) => {
     fixture.state!.profiles.push({ id: 'holo', name: 'Player A', platform: 'HoloMahjong', lastOpened: null, proxy: { mode: 'system', server: '' } })
     setLang(lang)
     render(<Profiles />); await waitFor(() => expect(screen.getByText('Player A')).toBeTruthy())
