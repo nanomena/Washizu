@@ -14,12 +14,18 @@ const fixture = vi.hoisted(() => ({
   optionsListener: null as ((options: MonitorConfig) => void) | null,
   obsFailure: '',
   inputs: [] as unknown[],
+  /** What the shell's mirror says when asked (`get_game_mirror`), and who listens for what it says unasked. */
+  mirror: null as unknown,
+  /** Whether opening the game never answers, so that the stage keeps showing what it says before. */
+  holdOpen: false,
+  listeners: new Map<string, (payload: unknown) => void>(),
 }))
 vi.mock('@/hooks/useMonitor', () => ({ useMonitor: () => ({ snapshot: fixture.snapshot, error: null }) }))
 vi.mock('@/lib/host', () => ({
   listen: vi.fn((name: string, callback: (options: MonitorConfig) => void) => {
     if (name === 'monitor-options') fixture.optionsListener = callback
-    return () => { if (name === 'monitor-options') fixture.optionsListener = null }
+    fixture.listeners.set(name, callback as (payload: unknown) => void)
+    return () => { if (name === 'monitor-options') fixture.optionsListener = null; fixture.listeners.delete(name) }
   }),
   gameInput: vi.fn((input: unknown) => fixture.inputs.push(input)),
   invoke: vi.fn(async (cmd: string, args?: unknown) => {
@@ -36,6 +42,8 @@ vi.mock('@/lib/host', () => ({
     }
     if (cmd === 'get_hand_events') return fixture.handEvents
     if (cmd === 'get_history') return fixture.history
+    if (cmd === 'get_game_mirror') return fixture.mirror
+    if (cmd === 'open_monitor_game' && fixture.holdOpen) return new Promise(() => {})
     return ['get_monitor_options', 'set_monitor_trail', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_obs_output'].includes(cmd) ? fixture.options : undefined
   }),
 }))
@@ -903,5 +911,116 @@ describe('another language', () => {
     expect(screen.queryByRole('tab', { name: '设置' })).toBeNull()
     expect(localStorage.getItem('akagi.language')).toBe('ja')
     expect(document.querySelector('.mon')?.getAttribute('data-lang')).toBe('ja')
+  })
+})
+
+describe('a HoloMahjong account', () => {
+  const stageLine = () => document.querySelector('.mon-game-wait')
+  const holo: MonitorConfig = { platform: 'HoloMahjong', profile_name: 'Player A', capture_listen: '127.0.0.1:23456', version: 'test',
+    pointer_lean: false, pointer_trail: false, quick_confirm: false, auto_win: false, auto_continue: false }
+  beforeEach(() => {
+    fixture.snapshot = { ...state(), autoplay_enabled: false }; fixture.options = holo; fixture.calls = []; fixture.inputs = []; fixture.mirror = null
+  })
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); fixture.holdOpen = false })
+
+  it('names its platform and opens the window mirror by itself', async () => {
+    fixture.snapshot = { ...state(), decision: null, capture: { state: 'stopped' }, game_ended: true, round_ended: true }
+    fixture.holdOpen = true
+    const { unmount } = render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'open_monitor_game')).toBe(true))
+    expect(screen.getByRole('heading', { name: 'Washizu · ホロじゃん' })).toBeTruthy()
+    expect(screen.getByText('这里只显示 ホロじゃん 窗口的画面，不能在这里操作。')).toBeTruthy()
+    expect(screen.queryByText(/雀魂/)).toBeNull()
+    unmount()
+    fixture.holdOpen = false
+    fixture.calls = []
+    render(<Monitor />)
+    // Opened: the stage is the mirror's, and nothing of the start card stays.
+    await waitFor(() => expect(screen.getByText('等待 ホロじゃん 窗口')).toBeTruthy())
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull()
+  })
+
+  it('offers no autoplay, client auto-win, playing on, pointer trail or OBS output', async () => {
+    render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
+    expect(screen.queryByRole('radiogroup', { name: '自动操作' })).toBeNull()
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    expect(screen.queryByRole('button', { name: '自动操作' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '画面与输出' }))
+    expect(screen.getByRole('combobox', { name: '界面语言' })).toBeTruthy()
+    for (const name of ['OBS 输出', '客户端自动和牌', '光标轨迹', '预推理', '快速确认']) expect(screen.queryByRole('switch', { name })).toBeNull()
+    expect(screen.queryByText(/Spout2/)).toBeNull()
+    expect(screen.queryByRole('radio', { name: '连战' })).toBeNull()
+    expect(fixture.calls.some(([cmd]) => /^set_(monitor|obs)_/.test(cmd))).toBe(false)
+  })
+
+  it('shows its fixed local proxy address as one read-only line among the app facts', async () => {
+    render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_monitor_options')).toBe(true))
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '应用' }))
+    const line = screen.getByText('本地代理').closest('.mfact')!
+    expect(line.parentElement!.className).toBe('mset-facts')
+    expect(within(line as HTMLElement).getByText('127.0.0.1:23456')).toBeTruthy()
+    expect(line.querySelector('input, button, select')).toBeNull()
+    expect(screen.getByText('ホロじゃん')).toBeTruthy()
+  })
+
+  it('mirrors the client window view only, through the shell-owned mirror states', async () => {
+    const track = Object.assign(new EventTarget(), { stop: vi.fn() })
+    const stream = { getTracks: () => [track], getVideoTracks: () => [track] } as unknown as MediaStream
+    const getDisplayMedia = vi.fn(async () => stream)
+    vi.stubGlobal('navigator', Object.assign(Object.create(navigator), { mediaDevices: { getDisplayMedia } }))
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'get_game_mirror')).toBe(true))
+    expect(screen.getByText('等待 ホロじゃん 窗口')).toBeTruthy()
+    expect(document.getElementById('akagi-game-view')).toBeNull()
+    expect(screen.queryByRole('textbox', { name: '向游戏输入' })).toBeNull()
+    const say = (payload: unknown) => act(() => fixture.listeners.get('game-mirror')!(payload))
+    say({ state: 'showing', source: 'window:42:0' })
+    await waitFor(() => expect(getDisplayMedia).toHaveBeenCalledWith({ video: true, audio: false }))
+    const video = document.querySelector('video')!
+    expect(video.className).toContain('mon-game-video--fit')
+    await waitFor(() => expect(video.srcObject).toBe(stream))
+    expect(stageLine()).toBeNull()
+    const stage = video.parentElement!
+    for (const event of ['mouseDown', 'mouseMove', 'mouseUp', 'wheel', 'keyDown'] as const) fireEvent[event](stage)
+    expect(fixture.inputs).toEqual([])
+    act(() => { track.dispatchEvent(new Event('ended')) })
+    await waitFor(() => expect(fixture.calls).toContainEqual(['game_mirror_ended', { source: 'window:42:0' }]))
+    say({ state: 'lost', source: null })
+    expect(screen.getByText('ホロじゃん 窗口已关闭或最小化')).toBeTruthy()
+    expect(track.stop).toHaveBeenCalled()
+    expect(video.srcObject).toBeNull()
+    say({ state: 'searching', source: null })
+    expect(screen.getByText('等待 ホロじゃん 窗口')).toBeTruthy()
+    expect(getDisplayMedia).toHaveBeenCalledTimes(1)
+    play.mockRestore()
+  })
+
+  it('reports a picture that could not be had instead of showing it as there', async () => {
+    vi.stubGlobal('navigator', Object.assign(Object.create(navigator), { mediaDevices: { getDisplayMedia: vi.fn(async () => { throw new Error('NotAllowedError: denied') }) } }))
+    fixture.mirror = { state: 'showing', source: 'window:42:0' }
+    render(<Monitor />)
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('NotAllowedError: denied'))
+    expect(stageLine()).toBeNull()
+    expect(document.querySelector('video')!.srcObject ?? null).toBeNull()
+    expect(fixture.calls.some(([cmd]) => cmd === 'game_mirror_ended')).toBe(false)
+  })
+})
+
+describe('the platform a page names', () => {
+  afterEach(() => { cleanup(); setLang('zh-CN'); fixture.holdOpen = false })
+  it.each([['zh-CN', 'ホロじゃん'], ['zh-TW', 'ホロじゃん'], ['ja', 'ホロじゃん'], ['en', 'HoloMahjong']] as const)('in %s, names HoloMahjong as %s on the stage and in the app facts', async (lang, name) => {
+    setLang(lang)
+    fixture.options = { platform: 'HoloMahjong', capture_listen: '127.0.0.1:23456' }
+    fixture.snapshot = { ...state(), decision: null, capture: { state: 'stopped' }, game_ended: true, round_ended: true }
+    fixture.calls = []
+    fixture.holdOpen = true
+    render(<Monitor />)
+    await waitFor(() => expect(fixture.calls.some(([cmd]) => cmd === 'open_monitor_game')).toBe(true))
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe(`Washizu · ${name}`)
+    expect(document.body.textContent).not.toMatch(/雀魂|Mahjong Soul|天[凤鳳]|Tenhou/)
   })
 })

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { setLang } from '@/lib/i18n'
-import type { ProfileState } from '@/lib/profiles'
+import type { AccountProfile, ProfileState } from '@/lib/profiles'
 
 const fixture = vi.hoisted(() => ({ state: null as ProfileState | null, initial: null as Promise<ProfileState> | null,
   listener: null as ((state: ProfileState) => void) | null, calls: [] as Array<[string, Record<string, unknown> | undefined]>, failure: '' }))
@@ -13,7 +13,7 @@ vi.mock('@/lib/host', () => ({
     if (fixture.failure) throw fixture.failure
     const next = structuredClone(fixture.state!)
     next.revision++
-    if (method === 'create_profile') next.profiles.push({ id: 'new-id', name: String(args!.name), platform: args!.platform as 'Tenhou', lastOpened: null, proxy: { mode: 'system', server: '' } })
+    if (method === 'create_profile') next.profiles.push({ id: 'new-id', name: String(args!.name), platform: args!.platform as AccountProfile['platform'], lastOpened: null, proxy: { mode: 'system', server: '' } })
     if (method === 'save_profile') next.profiles = next.profiles.map(p => p.id === args!.id ? { ...p, name: String(args!.name), proxy: args!.proxy as typeof p.proxy } : p)
     if (method === 'reorder_profiles') next.profiles = (args!.ids as string[]).map(id => next.profiles.find(p => p.id === id)!)
     if (method === 'open_profile' && !next.clients.some(c => c.id === args!.id)) next.clients.push({ id: String(args!.id), state: 'starting', cleanup: 'unconfirmed', error: '' })
@@ -189,5 +189,45 @@ describe('account profiles', () => {
     const form = screen.getByRole('dialog')
     expect(form.textContent).toContain('Profile name')
     expect(form.textContent).not.toMatch(/[\u3400-\u9fff]/)
+  })
+})
+
+describe('a HoloMahjong account in the chooser', () => {
+  it('is created as a third platform, listed by its own name, and has no game proxy to set', async () => {
+    render(<Profiles />); await ready()
+    fireEvent.click(screen.getByRole('button', { name: '新建档案' }))
+    const form = within(screen.getByRole('dialog'))
+    const select = form.getByLabelText('平台') as HTMLSelectElement
+    expect([...select.options].map(option => [option.value, option.textContent])).toEqual([['Majsoul', '雀魂'], ['Tenhou', '天凤'], ['HoloMahjong', 'ホロじゃん']])
+    fireEvent.change(form.getByLabelText('档案名称'), { target: { value: 'Player A' } })
+    fireEvent.change(select, { target: { value: 'HoloMahjong' } })
+    fireEvent.click(form.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(screen.getByText('Player A')).toBeTruthy())
+    expect(fixture.calls).toContainEqual(['create_profile', { name: 'Player A', platform: 'HoloMahjong' }])
+    const row = screen.getByText('Player A').closest('tr')!
+    expect(within(row).getByText('ホロじゃん')).toBeTruthy()
+    expect(within(row).queryByText('雀魂')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '管理 Player A' }))
+    const editor = within(screen.getByRole('dialog'))
+    expect(editor.queryByText('游戏代理')).toBeNull()
+    expect(editor.queryByLabelText('代理地址')).toBeNull()
+    fireEvent.click(editor.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(fixture.calls.some(([method]) => method === 'save_profile')).toBe(true))
+    expect(fixture.calls.find(([method]) => method === 'save_profile')![1]).toEqual({ id: 'new-id', name: 'Player A', proxy: { mode: 'system', server: '' } })
+  })
+
+  it('keeps new-account defaults for the web clients only', async () => {
+    render(<Profiles />); await ready()
+    fireEvent.click(screen.getByRole('button', { name: '设置' }))
+    expect(screen.getByRole('button', { name: '雀魂' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '天凤' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'ホロじゃん' })).toBeNull()
+  })
+
+  it.each([['en', 'HoloMahjong'], ['ja', 'ホロじゃん'], ['zh-TW', 'ホロじゃん']] as const)('names it in %s as %s', async (lang, name) => {
+    fixture.state!.profiles.push({ id: 'holo', name: 'Player A', platform: 'HoloMahjong', lastOpened: null, proxy: { mode: 'system', server: '' } })
+    setLang(lang)
+    render(<Profiles />); await waitFor(() => expect(screen.getByText('Player A')).toBeTruthy())
+    expect(within(screen.getByText('Player A').closest('tr')!).getByText(name)).toBeTruthy()
   })
 })

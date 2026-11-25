@@ -456,4 +456,11 @@ export const en: Record<string, string> = {
   "场风 西": "Round wind: West",
   "自风 北": "Seat wind: North",
   "场风 北": "Round wind: North",
+  "ホロじゃん": "HoloMahjong",
+  "在 ホロじゃん 客户端里对局，下面核对模型建议和实际动作。": "Play in the HoloMahjong client; below, check the model’s suggestions against what was actually played.",
+  "这里只显示 ホロじゃん 窗口的画面，不能在这里操作。": "This shows the HoloMahjong window’s picture only; it cannot be played from here.",
+  "打开ホロじゃん": "Open HoloMahjong",
+  "等待 {0} 窗口": "Waiting for the {0} window",
+  "{0} 窗口已关闭或最小化": "The {0} window is closed or minimized",
+  "本地代理": "Local proxy",
 }

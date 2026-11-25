@@ -12,7 +12,8 @@ and language tables as the monitor. The chooser subscribes before reading its
 initial state and uses `revision` to discard late snapshots.
 
 Chooser Settings reuses the monitor's controls for application language and
-per-platform defaults for future profiles. Saving a default does not change
+per-platform defaults for future profiles (the web clients only: a HoloMahjong
+account has none of these settings). Saving a default does not change
 an existing or running profile. Manage offers rename and confirmed removal
 from the account list while preserving local data; a live or
 cleanup-unconfirmed profile cannot be removed. Toolbar and row actions share
@@ -56,6 +57,12 @@ Two rules the page keeps:
 - **The bot's words as written.** Numbers and captions a bot supplies are shown
   as they are; the page neither rescales nor explains them — nor translates
   them.
+
+What each platform offers is one table, `src/lib/platform.ts`: HoloMahjong's
+game area is a view-only mirror of its own window (`MirrorStage`), and it has
+no autoplay, client auto-win, playing on, pointer trail, OBS output or game
+proxy, so those controls are not drawn for it. Platform names always come from
+`platformName`; no platform is shown under another's name.
 
 ## Languages
 
