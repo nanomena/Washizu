@@ -75,8 +75,11 @@ export async function nativeScores(home, records) {
   };
   const logs = path.join(home, 'logs');
   for (const run of fs.readdirSync(logs, { withFileTypes: true }).filter(x => x.isDirectory()).map(x => x.name).sort()) {
-    const file = path.join(logs, run, 'inspector.jsonl');
-    if (!fs.existsSync(file)) continue;
+    // The full timeline: the shareable copy beside it withholds the
+    // authGame request this reads the game uuid from. Older runs have
+    // only the one file.
+    const file = [path.join(logs, run, 'sensitive', 'inspector.jsonl'), path.join(logs, run, 'inspector.jsonl')].find(f => fs.existsSync(f));
+    if (!file) continue;
     const flows = new Map();
     const lines = readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
     for await (const line of lines) {

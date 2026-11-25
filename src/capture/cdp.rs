@@ -31,6 +31,7 @@ use crate::schema::{
     CaptureSource, FrameDirection, FrameRaw, HttpBody, HttpExchange, HttpHeader, HttpPhase,
     InspectorEntry,
 };
+use crate::util::redact_query;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use chromiumoxide::handler::HandlerConfig;
@@ -426,7 +427,7 @@ async fn rewrite_paused_script(
             // is deliberately loose enough to catch the client whatever
             // version it is served under, so it also catches its neighbours;
             // that is expected, not a fault.
-            debug!("CDP: no body for {url}: {e:#}");
+            debug!("CDP: no body for {}: {e:#}", redact_query(url));
             None
         }
     };
@@ -436,7 +437,10 @@ async fn rewrite_paused_script(
         // Not the client at all — the URL pattern matches its neighbours
         // too (`inflate_min.js`, the `latest.js` redirect). Nothing to say.
         Some(Err(inject::RewriteError::NotClient)) => {
-            debug!("CDP: {url} is not the Tenhou client; passing through");
+            debug!(
+                "CDP: {} is not the Tenhou client; passing through",
+                redact_query(url)
+            );
             None
         }
         // It *is* the client — it registers a discard handler — but the
@@ -444,7 +448,10 @@ async fn rewrite_paused_script(
         // shape, which is the one failure here that cannot be diagnosed from
         // logs alone, so ask for a report.
         Some(Err(e)) => {
-            warn!("CDP: cannot instrument the Tenhou client ({url}): {e}");
+            warn!(
+                "CDP: cannot instrument the Tenhou client ({}): {e}",
+                redact_query(url)
+            );
             let _ = notify.send(
                 crate::schema::Notification::warn("Tenhou autoplay unavailable")
                     .body(format!(
@@ -482,7 +489,7 @@ async fn rewrite_paused_script(
                         warn!("CDP: could not serve the instrumented client: {e:#}");
                         false
                     } else {
-                        info!("CDP: Tenhou client instrumented ({url})");
+                        info!("CDP: Tenhou client instrumented ({})", redact_query(url));
                         true
                     }
                 }
@@ -576,10 +583,11 @@ async fn attach_page(
                         target: target_id.clone(),
                         request: ev.request_id.inner().clone(),
                     };
-                    let label = format!("ws {}", ev.url);
-                    let slug = slugify(&ev.url);
+                    let shown_url = redact_query(&ev.url);
+                    let label = format!("ws {shown_url}");
+                    let slug = slugify(ws_url_path(&ev.url));
                     let _ = bridges.acquire(key, &slug, &label);
-                    debug!("ws created: {} (target {target_id} request {})", ev.url, ev.request_id.inner());
+                    debug!("ws created: {shown_url} (target {target_id} request {})", ev.request_id.inner());
 
                     // If this is the platform's WS (Majsoul), capture
                     // the owning page so autoplay can dispatch input
@@ -602,8 +610,7 @@ async fn attach_page(
                                 // tab; refreshing the handle is a no-op and
                                 // must not spam warnings.
                                 debug!(
-                                    "autoplay: page handle refreshed on new WS for target {target_id} ({})",
-                                    ev.url
+                                    "autoplay: page handle refreshed on new WS for target {target_id} ({shown_url})"
                                 );
                             } else {
                                 if let Some(prev) = &prev_target {
@@ -617,8 +624,7 @@ async fn attach_page(
                                     *ctx.canvas_rect.write().await = None;
                                 }
                                 info!(
-                                    "autoplay: page handle bound to target {target_id} via WS {}",
-                                    ev.url
+                                    "autoplay: page handle bound to target {target_id} via WS {shown_url}"
                                 );
                             }
                         }
@@ -730,10 +736,14 @@ async fn attach_page(
                             "recognized {} {}", a.kind, a.summary,
                         );
                     }
-                    if !http_cfg.record_all && annotations.is_empty() {
+                    // An exchange no recognizer understood is recorded
+                    // only under `sensitive/`: its headers and query may
+                    // carry credentials.
+                    let recognized = !annotations.is_empty();
+                    if !http_cfg.record_all && !recognized {
                         continue;
                     }
-                    inspector.record(InspectorEntry::Http {
+                    inspector.record_as(InspectorEntry::Http {
                         ts_ms: Local::now().timestamp_millis(),
                         source: CaptureSource::Chromium,
                         exchange: HttpExchange {
@@ -750,7 +760,7 @@ async fn attach_page(
                             body: None,
                             annotations,
                         },
-                    });
+                    }, recognized);
                 }
                 Some(ev) = on_response.next() => {
                     if !http_cfg.record_all {
@@ -759,7 +769,7 @@ async fn attach_page(
                     if is_static_asset(Some(&ev.r#type)) && !http_cfg.static_assets {
                         continue;
                     }
-                    inspector.record(InspectorEntry::Http {
+                    inspector.record_sensitive(InspectorEntry::Http {
                         ts_ms: Local::now().timestamp_millis(),
                         source: CaptureSource::Chromium,
                         exchange: HttpExchange {
@@ -867,20 +877,81 @@ fn record_frame(
     } else {
         FrameRaw::Binary(payload_data.to_string())
     };
-    inspector.record(InspectorEntry::WsFrame {
-        ts_ms: Local::now().timestamp_millis(),
-        direction,
-        flow_id,
-        size: payload.len(),
-        raw,
-        parsed: result.parsed.clone(),
-        emitted: result.events.len(),
-    });
+    inspector.record_as(
+        InspectorEntry::WsFrame {
+            ts_ms: Local::now().timestamp_millis(),
+            direction,
+            flow_id,
+            size: payload.len(),
+            raw,
+            parsed: result.parsed.clone(),
+            emitted: result.events.len(),
+        },
+        result.shareable,
+    );
+}
+
+/// A socket URL up to its path, for the flow log's file name: the query can
+/// carry a token.
+fn ws_url_path(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a socket URL's query (a session token on some gateways)
+    /// used to reach the flow log's file name and the shareable logs.
+    #[test]
+    fn a_socket_query_stays_out_of_the_flow_log_name() {
+        let url = "wss://example.invalid/gateway?token=fake-token#x";
+        assert_eq!(slugify(ws_url_path(url)), "wss___example_invalid_gateway");
+        assert_eq!(
+            slugify(ws_url_path("wss://example.invalid/g")),
+            "wss___example_invalid_g"
+        );
+    }
+
+    /// Frames off the bridge's allowlist keep only metadata in the shareable
+    /// inspector file; the full frame goes under `sensitive/`.
+    #[test]
+    fn record_frame_follows_the_bridge_allowlist() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (inspector, _) = InspectorWriter::open(
+            &tmp.path().join("inspector.jsonl"),
+            &tmp.path().join("full.jsonl"),
+            8,
+        )
+        .unwrap();
+        let secret = r#"{"tag":"HELO","auth":"fake-auth"}"#;
+        let mut result = crate::bridge::ParseResult {
+            parsed: Some(crate::schema::ParsedFrame {
+                method: "HELO".into(),
+                args: serde_json::from_str(secret).unwrap(),
+            }),
+            ..Default::default()
+        };
+        let record = |result: &crate::bridge::ParseResult, raw: &str| {
+            record_frame(
+                &inspector,
+                FrameDirection::Down,
+                "ws:1".into(),
+                1,
+                raw.as_bytes(),
+                raw,
+                result,
+            )
+        };
+        record(&result, secret);
+        result.shareable = true;
+        record(&result, r#"{"tag":"INIT","seed":"fake-seed"}"#);
+        let read = |name: &str| std::fs::read_to_string(tmp.path().join(name)).unwrap();
+        let shared = read("inspector.jsonl");
+        assert!(!shared.contains("fake-auth"), "{shared}");
+        assert!(shared.contains("HELO") && shared.contains("fake-seed"));
+        assert!(read("full.jsonl").contains("fake-auth"));
+    }
 
     #[test]
     fn decode_payload_ok() {

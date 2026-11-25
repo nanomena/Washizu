@@ -18,7 +18,7 @@ pub use history::{
 };
 pub use inspector::{
     BotReaction, CaptureSource, FrameDirection, FrameRaw, HttpAnnotation, HttpBody, HttpExchange,
-    HttpHeader, HttpPhase, InspectorEntry, ParsedFrame,
+    HttpHeader, HttpPhase, InspectorEntry, ParsedFrame, WITHHELD,
 };
 pub use mjai::{GameEndReason, GameMeta, MjaiEvent};
 pub use status::{BotStatus, CaptureStatus, LoadStage, LogEntry, Notification, NotifyLevel};

@@ -1,5 +1,9 @@
 //! Replay a local inspector capture through the real bridge, without a client or network.
 //!
+//! Give it a session's full timeline, `<session>/sensitive/inspector.jsonl`:
+//! the shareable `inspector.jsonl` beside it withholds the frames the bridge
+//! needs to start a game (the `authGame` request among them).
+//!
 //! With a second argument, every replay opened during the capture is exported
 //! there as a tenhou.net/6 log and NAGA's order-form lines, as the app does.
 use akagi::bridge::{Bridge, Direction, MajsoulBridge};
@@ -17,7 +21,7 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let path = args
         .next()
-        .context("usage: replay_majsoul <inspector.jsonl> [replay-dir]")?;
+        .context("usage: replay_majsoul <session>/sensitive/inspector.jsonl [replay-dir]")?;
     let replay_dir = args.next().map(PathBuf::from);
     let mut bridges = HashMap::new();
     for line in BufReader::new(File::open(path)?).lines() {

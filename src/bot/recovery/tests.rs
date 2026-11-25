@@ -392,9 +392,13 @@ impl Rig {
         let output = bot_response_bus();
         let receiver = output.subscribe();
         let directory = tempfile::tempdir().unwrap();
-        let inspector = InspectorWriter::open(&directory.path().join("inspector.jsonl"), 32)
-            .unwrap()
-            .0;
+        let inspector = InspectorWriter::open(
+            &directory.path().join("inspector.jsonl"),
+            &directory.path().join("full.jsonl"),
+            32,
+        )
+        .unwrap()
+        .0;
         let handle = RecoveryHandle::spawn(
             primary,
             0,
@@ -939,6 +943,7 @@ async fn a_queued_original_window_is_never_rebound_to_a_newer_capture_slot() {
     for event in (crate::bridge::ParseResult {
         events: opening(),
         parsed: None,
+        shareable: false,
         window: Some(InputWindow::Majsoul(old)),
     })
     .into_captured()
@@ -975,6 +980,7 @@ async fn a_frame_ending_in_dora_and_its_restored_prefix_keep_their_original_wind
         let parsed = crate::bridge::ParseResult {
             events: events.clone(),
             parsed: None,
+            shareable: false,
             window: Some(InputWindow::Majsoul(original)),
         };
         for event in parsed.into_captured() {
@@ -1023,6 +1029,7 @@ async fn a_post_pon_frame_ending_in_dora_still_opens_its_discard_decision() {
     for event in (crate::bridge::ParseResult {
         events,
         parsed: None,
+        shareable: false,
         window: Some(InputWindow::Majsoul(b)),
     })
     .into_captured()

@@ -2,6 +2,11 @@ mod flow;
 mod session;
 mod stream;
 
+/// Session subdirectory for everything that may hold account credentials:
+/// the full `inspector.jsonl`, with every captured frame and HTTP exchange.
+/// The rest of a session is shareable.
+pub const SENSITIVE_DIR: &str = "sensitive";
+
 pub use flow::FlowLogger;
 pub use session::{LogTarget, Session};
 pub use stream::LogStreamHandle;
