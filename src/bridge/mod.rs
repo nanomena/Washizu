@@ -178,7 +178,9 @@ pub fn for_platform(
         crate::config::Platform::RiichiCity => {
             Box::new(RiichiCityBridge::new(flow_log, session).with_inject(hooks.riichi_inject))
         }
-        crate::config::Platform::HoloMahjong => Box::new(HoloMahjongBridge::new(flow_log, session)),
+        crate::config::Platform::HoloMahjong => {
+            Box::new(HoloMahjongBridge::new(flow_log, session).with_time_budget(hooks.time_budget))
+        }
     }
 }
 

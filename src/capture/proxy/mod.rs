@@ -102,8 +102,11 @@ impl ProxyCapture {
 
     /// Relay until `shutdown`; then close the listener and every tunnel.
     pub async fn run(self, ctx: CaptureCtx, shutdown: ShutdownToken) -> Result<()> {
-        // Observe-only: no autoplay slot reaches this platform's bridge.
+        // Observe-only: the bridge writes the server's clock to the
+        // time-budget slot, which bounds inference; nothing else of
+        // autoplay reaches it.
         let hooks = BridgeHooks {
+            time_budget: ctx.autoplay.as_ref().map(|a| a.time_budget.clone()),
             notify: Some(ctx.notify_bus.clone()),
             account: Some(ctx.account_bus.clone()),
             ..BridgeHooks::default()

@@ -33,8 +33,10 @@ pub struct AutoplayContext {
     pub page: Arc<RwLock<Option<Page>>>,
     pub canvas_rect: Arc<RwLock<Option<CanvasRect>>>,
     /// Server-granted time budget for the current decision window.
-    /// Written by the Majsoul bridge (see `autoplay::budget`), read by
-    /// the manager's delay model. Uses a `std::sync::RwLock` (not tokio)
+    /// Written by the bridge of the platform this account plays (Majsoul,
+    /// or HoloMahjong, whose window only bounds inference; see
+    /// `autoplay::budget`), read by the manager's delay model and the
+    /// decision coordinator. Uses a `std::sync::RwLock` (not tokio)
     /// because the writer is the bridge's synchronous `parse()` path.
     pub time_budget: crate::autoplay::budget::SharedTimeBudget,
     /// Counter of the client's own uplink input commands, bumped by both

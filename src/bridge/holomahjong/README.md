@@ -59,6 +59,19 @@ do; history counts an exact repeat once. The yaku are named by display string,
 not by a provider id, so no hand score is attached. A draw's `ryukyoku`
 carries the hands it showed.
 
+## Decision windows
+
+Draws, discards and calls end with the server's clock,
+`[opened_ms, deadline_ms, fixed_ms, bank_ms]`: the base time and what is left
+of the bank, with a zero deadline when this client has nothing to answer
+(another seat's draw, our own discard). A non-zero deadline opens an
+`InputWindow::HoloMahjong` with those two numbers; whether our seat really
+has a choice in it is the tracker's to say. The window is also written to the
+account's time-budget slot, which is how the decision coordinator knows it is
+still current. It bounds inference only; there is no input on this platform.
+The end of a hand or game closes the window. The timers on the deal, the game
+start and the result screens are for those screens, not for a decision.
+
 ## Notation
 
 Tiles, hands and melds use majiang-core's notation (see `tile.rs`): `m`/`p`/`s`/`z`

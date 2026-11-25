@@ -1739,3 +1739,162 @@ fn account_bearing_messages_never_reach_the_flow_log() {
     assert_eq!(log.matches(crate::bridge::WITHHELD).count(), 5, "{log}");
     assert!(log.contains("OnZimo"));
 }
+
+/// A deal seating us at seat 2 (wind 2), with the shared slot attached.
+fn seated_with_slot() -> (HoloMahjongBridge, SharedTimeBudget) {
+    let slot = SharedTimeBudget::default();
+    let mut b = bridge().with_time_budget(Some(slot.clone()));
+    feed(
+        &mut b,
+        &[
+            kaiju(2),
+            qipai(
+                2,
+                field(0, 0, 0, 0, "s1"),
+                [0, 1, 2, 3],
+                [25000; 4],
+                MY_DEAL,
+            ),
+        ],
+    );
+    (b, slot)
+}
+
+fn clocked(method: i64, mut body: Vec<JsonValue>, deadline: i64, fixed: i64, bank: i64) -> Vec<u8> {
+    body.push(json!([1_700_000_000_000i64, deadline, fixed, bank]));
+    push(method, JsonValue::Array(body))
+}
+
+fn draw(seat: u8, t: &str, deadline: i64, fixed: i64, bank: i64) -> Vec<u8> {
+    clocked(
+        hub::ON_ZIMO,
+        vec![
+            json!(null),
+            json!(seat),
+            json!(t),
+            json!([]),
+            json!([]),
+            json!([0]),
+        ],
+        deadline,
+        fixed,
+        bank,
+    )
+}
+
+fn discard(seat: u8, d: &str, deadline: i64, fixed: i64, bank: i64) -> Vec<u8> {
+    clocked(
+        hub::ON_DAPAI,
+        vec![
+            json!(null),
+            json!(seat),
+            json!(d),
+            json!([]),
+            json!([]),
+            json!([]),
+            json!([0]),
+            json!(""),
+            json!(0),
+            json!(""),
+        ],
+        deadline,
+        fixed,
+        bank,
+    )
+}
+
+fn budget_of(window: Option<InputWindow>) -> Option<(u32, u32, BudgetSource)> {
+    match window? {
+        InputWindow::HoloMahjong(b) => Some((b.fixed_ms, b.add_ms, b.source)),
+        other => panic!("not a HoloMahjong window: {other:?}"),
+    }
+}
+
+#[test]
+fn our_draw_opens_a_window_with_the_servers_base_time_and_bank() {
+    let (mut b, slot) = seated_with_slot();
+    let r = b.parse(
+        Direction::Down,
+        &draw(2, "s4", 1_700_000_025_000, 5_000, 20_000),
+    );
+    assert_eq!(
+        budget_of(r.window),
+        Some((5_000, 20_000, BudgetSource::DealTile))
+    );
+    let shared = slot.read().unwrap().expect("the slot follows the window");
+    assert_eq!((shared.fixed_ms, shared.add_ms), (5_000, 20_000));
+    // Our discard has a zero deadline: nothing is ours to answer any more.
+    let r = b.parse(Direction::Down, &discard(2, "m1", 0, 0, 0));
+    assert_eq!(r.window, None);
+    assert!(slot.read().unwrap().is_none());
+}
+
+#[test]
+fn another_seats_discard_opens_a_claim_window_and_their_draw_closes_it() {
+    let (mut b, slot) = seated_with_slot();
+    let r = b.parse(
+        Direction::Down,
+        &discard(1, "p7", 1_700_000_025_000, 5_000, 15_000),
+    );
+    assert_eq!(
+        budget_of(r.window),
+        Some((5_000, 15_000, BudgetSource::DiscardTile))
+    );
+    let r = b.parse(Direction::Down, &draw(3, "", 0, 0, 0));
+    assert_eq!(r.window, None);
+    assert!(slot.read().unwrap().is_none());
+}
+
+#[test]
+fn the_result_screens_timer_is_not_a_decision() {
+    let (mut b, slot) = seated_with_slot();
+    b.parse(
+        Direction::Down,
+        &draw(2, "s4", 1_700_000_025_000, 5_000, 20_000),
+    );
+    assert!(slot.read().unwrap().is_some());
+    let r = b.parse(
+        Direction::Down,
+        &push(
+            hub::ON_PINGJU,
+            json!([
+                null,
+                [],
+                [],
+                [1_700_000_000_000i64, 1_700_000_045_000i64, 45_000, 0]
+            ]),
+        ),
+    );
+    assert_eq!(r.window, None);
+    assert!(slot.read().unwrap().is_none());
+}
+
+#[test]
+fn a_draw_without_its_clock_opens_no_window() {
+    let (mut b, slot) = seated_with_slot();
+    b.parse(
+        Direction::Down,
+        &draw(2, "s4", 1_700_000_025_000, 5_000, 20_000),
+    );
+    let r = b.parse(Direction::Down, &push(hub::ON_ZIMO, json!([null, 2, "s5"])));
+    assert_eq!(r.window, None);
+    assert!(slot.read().unwrap().is_none());
+}
+
+#[test]
+fn a_connection_without_our_seat_writes_no_window() {
+    let slot = SharedTimeBudget::default();
+    *slot.write().unwrap() = Some(TimeBudget {
+        fixed_ms: 5_000,
+        add_ms: 0,
+        opened_at: Instant::now(),
+        source: BudgetSource::DealTile,
+    });
+    let mut b = bridge().with_time_budget(Some(slot.clone()));
+    let r = b.parse(Direction::Down, &draw(0, "", 0, 0, 0));
+    assert_eq!(r.window, None);
+    assert!(
+        slot.read().unwrap().is_some(),
+        "another connection's window stays"
+    );
+}

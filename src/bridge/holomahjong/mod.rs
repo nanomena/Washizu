@@ -29,6 +29,8 @@ pub mod tile;
 
 use super::{shown, Bridge, Direction, ParseResult};
 use crate::{
+    autoplay::{budget::SharedTimeBudget, BudgetSource, TimeBudget},
+    bot::control::InputWindow,
     config::Platform,
     logger::{FlowLogger, Session},
     schema::{mjai::Tile, MjaiEvent, ParsedFrame},
@@ -36,7 +38,7 @@ use crate::{
 use chrono::Local;
 use hub::HubMessage;
 use serde_json::{json, Value as JsonValue};
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use tile::Meld;
 use tracing::{debug, info, warn};
 
@@ -67,6 +69,12 @@ pub struct HoloMahjongBridge {
     /// every hand since. A reconnect's game is not a complete record, so its
     /// end goes out as terminated, as the Tenhou bridge does for a rejoin.
     complete: bool,
+    /// The decision the server is waiting on us for, from the clock on its
+    /// last draw, discard or call (see [`window_change`]).
+    window: Option<TimeBudget>,
+    /// The account's shared time-budget slot, mirrored from `window` so the
+    /// decision coordinator can tell a current window from a closed one.
+    time_budget: Option<SharedTimeBudget>,
     flow_log: Option<Arc<FlowLogger>>,
     session: Option<Arc<Session>>,
     mjai_log: Option<Arc<FlowLogger>>,
@@ -84,9 +92,34 @@ impl HoloMahjongBridge {
             game_open: false,
             kyoku_open: false,
             complete: false,
+            window: None,
+            time_budget: None,
             flow_log,
             session,
             mjai_log: None,
+        }
+    }
+
+    pub fn with_time_budget(mut self, slot: Option<SharedTimeBudget>) -> Self {
+        self.time_budget = slot;
+        self
+    }
+
+    /// Follow the server's clock: a broadcast that opens, keeps or closes a
+    /// decision of ours updates `window` and the shared slot. A connection
+    /// that never learned our seat owns no decision and writes nothing.
+    fn follow_clock(&mut self, msg: &HubMessage, now: Instant) {
+        if self.my_seat.is_none() {
+            return;
+        }
+        let Some(window) = window_change(msg.method, &msg.body, now) else {
+            return;
+        };
+        self.window = window;
+        if let Some(slot) = &self.time_budget {
+            if let Ok(mut guard) = slot.write() {
+                *guard = window;
+            }
         }
     }
 
@@ -184,6 +217,8 @@ impl HoloMahjongBridge {
             complete: from_start,
             flow_log: self.flow_log.take(),
             session: self.session.take(),
+            // The account's slot outlives a game; the window itself does not.
+            time_budget: self.time_budget.take(),
             ..Self::new(None, None)
         };
         info!(
@@ -674,6 +709,57 @@ impl HoloMahjongBridge {
     }
 }
 
+/// How a broadcast changes the decision the server waits on us for.
+///
+/// Draws, discards and calls end with the server's clock,
+/// `[opened_ms, deadline_ms, fixed_ms, bank_ms]`; the deadline is zero when
+/// this client has nothing to answer (another seat's draw, our own discard).
+/// A non-zero deadline opens a window with the base time and what is left
+/// of the bank; whether our seat really has a choice in it is the tracker's
+/// to say. The end of a hand or game closes it. The timers on the deal, the
+/// game start and the results are for their screens, not for a decision,
+/// and anything else leaves the window as it was (`None`).
+fn window_change(method: i64, body: &JsonValue, now: Instant) -> Option<Option<TimeBudget>> {
+    let source = match method {
+        hub::ON_ZIMO => BudgetSource::DealTile,
+        hub::ON_DAPAI => BudgetSource::DiscardTile,
+        hub::ON_FULOU | hub::ON_AN_GANG_ADD_GANG => BudgetSource::ChiPengGang,
+        hub::ON_BABEI => BudgetSource::BaBei,
+        hub::ON_KAIJU
+        | hub::ON_QIPAI
+        | hub::ON_HULE
+        | hub::ON_PINGJU
+        | hub::ON_JIEJU
+        | hub::ON_UPDATE_END_GAME_VOTE
+        | hub::ON_SYSTEM_CALL_EVENT
+        | hub::ON_CHONGXIN_LIANJIE_CHENGGONG => return Some(None),
+        _ => return None,
+    };
+    let clock = body
+        .as_array()
+        .and_then(|b| b.last())
+        .and_then(JsonValue::as_array)
+        .filter(|c| c.len() == 4)
+        .and_then(|c| c.iter().map(|v| v.as_i64()).collect::<Option<Vec<i64>>>());
+    let Some(clock) = clock else {
+        warn!(target: LOG, "a {} without the server's clock; no decision window", hub::method_name(method).unwrap_or("message"));
+        return Some(None);
+    };
+    if clock[1] <= 0 {
+        return Some(None);
+    }
+    let (Ok(fixed_ms), Ok(add_ms)) = (u32::try_from(clock[2]), u32::try_from(clock[3])) else {
+        warn!(target: LOG, "a clock with out-of-range times {clock:?}; no decision window");
+        return Some(None);
+    };
+    Some(Some(TimeBudget {
+        fixed_ms,
+        add_ms,
+        opened_at: now,
+        source,
+    }))
+}
+
 /// A seat index; anything past a 4-player table is rejected.
 fn seat_of(v: &JsonValue) -> Option<u8> {
     v.as_u64()
@@ -764,7 +850,9 @@ impl Bridge for HoloMahjongBridge {
         // Only broadcasts drive play; requests, responses and our own calls
         // are recorded but carry nothing the broadcasts don't.
         let events = if direction == Direction::Down && msg.message_id.is_none() {
-            self.dispatch(&msg)
+            let events = self.dispatch(&msg);
+            self.follow_clock(&msg, Instant::now());
+            events
         } else {
             Vec::new()
         };
@@ -774,7 +862,7 @@ impl Bridge for HoloMahjongBridge {
             _ => msg.label(),
         };
         ParseResult {
-            window: None,
+            window: self.window.map(InputWindow::HoloMahjong),
             events,
             parsed: Some(ParsedFrame {
                 method,

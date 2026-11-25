@@ -78,7 +78,7 @@ export type RunnerHealth =
   | { state: 'recovering' | 'blocked'; through: number; reason: string }
 export type DecisionControl = {
   context: DecisionContext
-  window: { platform: 'majsoul'; opened_ns: string } | { platform: 'tenhou'; opened_ns: string; ops: number } | null
+  window: { platform: 'majsoul'; opened_ns: string } | { platform: 'tenhou'; opened_ns: string; ops: number } | { platform: 'holo_mahjong'; opened_ns: string } | null
   source: 'primary' | 'native_standby' | 'unavailable'
   primary: RunnerHealth
   standby: RunnerHealth

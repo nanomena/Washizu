@@ -32,6 +32,9 @@ pub enum RunnerHealth {
 pub enum InputWindow {
     Majsoul(crate::autoplay::TimeBudget),
     Tenhou(crate::autoplay::tenhou_state::DecisionWindow),
+    /// The server's clock on a HoloMahjong draw, discard or call that is
+    /// ours to answer. Observe-only: it bounds inference, never input.
+    HoloMahjong(crate::autoplay::TimeBudget),
 }
 
 impl InputWindow {
@@ -44,13 +47,13 @@ impl InputWindow {
     ) -> Vec<crate::schema::MjaiEvent> {
         match self {
             Self::Tenhou(window) => crate::bridge::tenhou::observed_actions(event, seat, window),
-            Self::Majsoul(_) => Vec::new(),
+            Self::Majsoul(_) | Self::HoloMahjong(_) => Vec::new(),
         }
     }
     /// Known base-clock fact from this original window, never a newer slot.
     pub fn fixed_ms(self) -> Option<u32> {
         match self {
-            Self::Majsoul(b) => Some(b.fixed_ms),
+            Self::Majsoul(b) | Self::HoloMahjong(b) => Some(b.fixed_ms),
             Self::Tenhou(w) => w.clock.map(|clock| clock.fixed_ms),
         }
     }
@@ -63,6 +66,9 @@ impl InputWindow {
             Self::Tenhou(w) => WindowProof::Tenhou {
                 opened_ns: instant_token(w.opened_at),
                 ops: w.ops,
+            },
+            Self::HoloMahjong(b) => WindowProof::HoloMahjong {
+                opened_ns: instant_token(b.opened_at),
             },
         }
     }
@@ -99,6 +105,10 @@ pub enum WindowProof {
         opened_ns: i64,
         ops: u32,
     },
+    HoloMahjong {
+        #[serde(with = "window_nanos")]
+        opened_ns: i64,
+    },
 }
 
 // Decimal strings preserve nanoseconds through JavaScript and JSON viewers.
@@ -119,17 +129,29 @@ impl WindowProof {
         let platform = match self {
             Self::Majsoul { .. } => Platform::Majsoul,
             Self::Tenhou { .. } => Platform::Tenhou,
+            Self::HoloMahjong { .. } => Platform::HoloMahjong,
         };
         Self::capture(ctx, platform) == Some(self)
     }
     pub fn capture(ctx: &AutoplayContext, platform: Platform) -> Option<Self> {
         match platform {
+            // One account plays one platform, so the time-budget slot is
+            // written by that platform's bridge alone.
             Platform::Majsoul => {
                 ctx.time_budget
                     .read()
                     .ok()
                     .and_then(|g| *g)
                     .map(|b| Self::Majsoul {
+                        opened_ns: instant_token(b.opened_at),
+                    })
+            }
+            Platform::HoloMahjong => {
+                ctx.time_budget
+                    .read()
+                    .ok()
+                    .and_then(|g| *g)
+                    .map(|b| Self::HoloMahjong {
                         opened_ns: instant_token(b.opened_at),
                     })
             }
@@ -168,5 +190,33 @@ mod tests {
         let json = serde_json::to_value(proof).unwrap();
         assert_eq!(json["opened_ns"], (i64::MIN + 1).to_string());
         assert_eq!(serde_json::from_value::<WindowProof>(json).unwrap(), proof);
+    }
+
+    #[test]
+    fn a_holomahjong_window_is_current_while_its_bridge_holds_it() {
+        use crate::autoplay::{BudgetSource, TimeBudget};
+        let ctx = AutoplayContext::new();
+        let budget = TimeBudget {
+            fixed_ms: 5_000,
+            add_ms: 20_000,
+            opened_at: Instant::now(),
+            source: BudgetSource::DealTile,
+        };
+        let window = InputWindow::HoloMahjong(budget);
+        assert_eq!(window.fixed_ms(), Some(5_000));
+        let proof = window.proof();
+        assert_eq!(
+            serde_json::to_value(proof).unwrap()["platform"],
+            "holo_mahjong"
+        );
+        assert!(!proof.is_current(&ctx), "nothing in the slot yet");
+        *ctx.time_budget.write().unwrap() = Some(budget);
+        assert!(proof.is_current(&ctx));
+        assert_eq!(
+            WindowProof::capture(&ctx, Platform::HoloMahjong),
+            Some(proof)
+        );
+        *ctx.time_budget.write().unwrap() = None;
+        assert!(!proof.is_current(&ctx), "a closed window is stale");
     }
 }
