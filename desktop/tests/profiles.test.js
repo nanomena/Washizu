@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { ProfileStore, defaultProfileRoot, homePlatform } from '../src/profiles.js'
+import { LISTEN_PORTS, ProfileStore, chooseListen, defaultProfileRoot, homeCaptureListen, homePlatform, platformKind, validListen } from '../src/profiles.js'
 import { spoutSenderName } from '../src/view-preferences.js'
 
 test('ordering persists every stable profile and rejects stale membership without touching account data', t => {
@@ -227,4 +227,77 @@ test('new account defaults import portable controls per site, persist edits, and
   assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), original)
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(again.home(created.id), 'obs.json'), 'utf8')), { enabled: false })
   assert.throws(() => store.saveDefaults({ ...defaults, Tenhou: { ...defaults.Tenhou, auto_win: true } }), /无效/)
+})
+
+test('a HoloMahjong account gets its proxy address once, at creation, and keeps it', async t => {
+  const root = temporary(t)
+  const store = new ProfileStore(root).load()
+  const before = fs.readFileSync(store.file, 'utf8')
+  assert.equal(platformKind('HoloMahjong'), 'HoloMahjong')
+  assert.throws(() => platformKind('RiichiCity'), /请选择雀魂、天凤或 HoloM/)
+  assert.throws(() => store.create('Holo', 'HoloMahjong'), /本地代理地址/, 'a native client needs its address')
+  assert.throws(() => store.create('Web', 'Majsoul', '127.0.0.1:23456'), /本地代理地址/, 'a web client has none')
+  for (const bad of ['0.0.0.0:23456', '127.0.0.1:80', '127.0.0.1:70000', 'localhost:23456', '127.0.0.1:023456']) {
+    assert.throws(() => store.create('Holo', 'HoloMahjong', bad), /127\.0\.0\.1/, bad)
+  }
+  assert.equal(fs.readFileSync(store.file, 'utf8'), before, 'a refused account leaves the registry as it was')
+  const listen = await chooseListen({ taken: store.listenPorts() })
+  const port = Number(listen.split(':')[1])
+  assert.ok(port >= LISTEN_PORTS.first && port <= LISTEN_PORTS.last)
+  const holo = store.create('Holo', 'HoloMahjong', listen)
+  assert.equal(holo.platform, 'HoloMahjong')
+  const home = store.home(holo.id)
+  const config = fs.readFileSync(path.join(home, 'config.toml'), 'utf8')
+  assert.match(config, /^\[platform\]\nkind = "HoloMahjong"\n/)
+  assert.match(config, new RegExp(`\\[capture\\]\\nlisten = "${listen.replaceAll('.', '\\.')}"\\n`))
+  assert.doesNotMatch(config, /^url\s*=/m, 'a native client has no web address')
+  assert.match(config, /\[autoplay\]\nenabled = false\n/)
+  for (const key of ['quick_confirm', 'pointer_lean', 'pointer_trail', 'auto_win', 'auto_continue']) assert.match(config, new RegExp(`^${key} = false$`, 'm'))
+  assert.equal(fs.existsSync(path.join(home, 'obs.json')), false, 'a mirrored window has no OBS output')
+  assert.equal(homePlatform(home), 'HoloMahjong')
+  assert.equal(homeCaptureListen(home), listen)
+  assert.deepEqual(store.listenPorts(), new Set([port]))
+
+  // Reloading, renaming, opening and reordering never touch the address.
+  const again = new ProfileStore(root).load()
+  again.update(holo.id, 'Holo renamed', again.get(holo.id).proxy)
+  again.opened(holo.id)
+  const web = again.create('Web', 'Tenhou')
+  again.reorder([web.id, holo.id])
+  assert.equal(fs.readFileSync(path.join(home, 'config.toml'), 'utf8'), config)
+  assert.equal(homeCaptureListen(again.home(holo.id)), listen)
+  assert.throws(() => again.create('Second', 'HoloMahjong', listen), /另一份档案/, 'no two accounts share a port')
+  assert.throws(() => again.create('Holo renamed', 'HoloMahjong', '127.0.0.1:39999'), /同名/)
+
+  // A deleted account keeps its home, and its port stays its own.
+  again.delete(holo.id)
+  assert.deepEqual(again.listenPorts(), new Set([port]))
+  assert.throws(() => again.create('Third', 'HoloMahjong', listen), /另一份档案/)
+  assert.deepEqual(again.defaults(), new ProfileStore(root).load().defaults(), 'web defaults are unchanged by a native account')
+  assert.deepEqual(Object.keys(again.defaults()).sort(), ['Majsoul', 'Tenhou'])
+})
+
+test('the proxy port is chosen among free ones that no account holds', async () => {
+  /** @type {number[]} */
+  const tried = []
+  const draws = [0, 0, 0.5, 0.75]
+  const listen = await chooseListen({
+    taken: new Set([LISTEN_PORTS.first]),
+    free: async port => { tried.push(port); return port !== LISTEN_PORTS.first + 10000 },
+    random: () => /** @type {number} */ (draws.shift()),
+  })
+  assert.deepEqual(tried, [LISTEN_PORTS.first + 10000, LISTEN_PORTS.first + 15000], 'a held port is not even probed')
+  assert.equal(listen, `127.0.0.1:${LISTEN_PORTS.first + 15000}`)
+  await assert.rejects(chooseListen({ taken: new Set(), free: async () => false, attempts: 3 }), /找不到可用的本地代理端口/)
+  assert.equal(validListen('127.0.0.1:20000'), '127.0.0.1:20000')
+})
+
+test('a HoloMahjong home without its address is refused, not given another', t => {
+  const root = temporary(t)
+  fs.writeFileSync(path.join(root, 'config.toml'), '[platform]\nkind = "HoloMahjong"\n')
+  const store = new ProfileStore(root).load()
+  assert.equal(store.get('existing').name, 'HoloM · 原有账号')
+  assert.throws(() => homeCaptureListen(root), /capture\.listen/)
+  assert.throws(() => store.listenPorts(), /capture\.listen/)
+  assert.equal(fs.readFileSync(path.join(root, 'config.toml'), 'utf8'), '[platform]\nkind = "HoloMahjong"\n')
 })

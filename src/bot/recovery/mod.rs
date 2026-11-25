@@ -446,7 +446,7 @@ fn inference_deadline(
     );
     let reserve = timing.inference_reserve_ms(cfg.autoplay.delay.safety_margin_ms);
     let remaining = match window {
-        Some(InputWindow::Majsoul(b)) => Some({
+        Some(InputWindow::Majsoul(b) | InputWindow::HoloMahjong(b)) => Some({
             b.fixed_ms
                 .saturating_add(
                     ((f64::from(b.add_ms) * cfg.autoplay.delay.bank_use_fraction) as u32)

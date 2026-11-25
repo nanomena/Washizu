@@ -23,13 +23,13 @@
 use crate::autoplay::AutoplayContext;
 use crate::bridge::Direction;
 use crate::capture::flow::{slugify, FlowBridges};
+use crate::capture::frame;
 use crate::config::HttpCaptureConfig;
 use crate::event_bus::{MjaiBus, NotifyBus};
 use crate::inspector::annotate::{self, RequestView};
 use crate::inspector::InspectorWriter;
 use crate::schema::{
-    CaptureSource, FrameDirection, FrameRaw, HttpBody, HttpExchange, HttpHeader, HttpPhase,
-    InspectorEntry,
+    CaptureSource, FrameRaw, HttpBody, HttpExchange, HttpHeader, HttpPhase, InspectorEntry,
 };
 use crate::util::redact_query;
 use anyhow::{anyhow, Context, Result};
@@ -646,22 +646,15 @@ async fn attach_page(
                     };
                     let flow_id = format_flow_id(&key);
                     let bridge = bridges.acquire(key, "ws", "ws frame");
-                    let result = {
-                        let mut b = bridge.lock().expect("bridge mutex poisoned");
-                        b.parse(Direction::Down, &payload)
-                    };
-                    record_frame(
-                        &inspector,
-                        FrameDirection::Down,
-                        flow_id,
-                        opcode,
+                    frame::deliver(
+                        &bridge,
+                        Direction::Down,
                         &payload,
-                        &ev.response.payload_data,
-                        &result,
+                        frame_raw(opcode, &ev.response.payload_data),
+                        flow_id,
+                        &inspector,
+                        &mjai_bus,
                     );
-                    for e in result.into_captured() {
-                        let _ = mjai_bus.send(e);
-                    }
                 }
                 Some(ev) = on_sent.next() => {
                     let opcode = ev.response.opcode as i64;
@@ -679,22 +672,15 @@ async fn attach_page(
                     };
                     let flow_id = format_flow_id(&key);
                     let bridge = bridges.acquire(key, "ws", "ws frame");
-                    let result = {
-                        let mut b = bridge.lock().expect("bridge mutex poisoned");
-                        b.parse(Direction::Up, &payload)
-                    };
-                    record_frame(
-                        &inspector,
-                        FrameDirection::Up,
-                        flow_id,
-                        opcode,
+                    frame::deliver(
+                        &bridge,
+                        Direction::Up,
                         &payload,
-                        &ev.response.payload_data,
-                        &result,
+                        frame_raw(opcode, &ev.response.payload_data),
+                        flow_id,
+                        &inspector,
+                        &mjai_bus,
                     );
-                    for e in result.into_captured() {
-                        let _ = mjai_bus.send(e);
-                    }
                 }
                 Some(ev) = on_closed.next() => {
                     let key = FlowKey {
@@ -857,38 +843,16 @@ fn format_flow_id(key: &FlowKey) -> String {
     format!("ws:{trim}")
 }
 
-/// Record one inspector `WsFrame` entry for a parsed frame. For text
-/// frames (`opcode == 1`) `payload_data` is the original UTF-8 string —
-/// we use it verbatim so the JSONL stays human-readable. For binary
-/// frames (`opcode == 2`) we re-emit the original base64 (`payload_data`)
-/// rather than re-encoding `payload`, which is identical content but
-/// avoids a copy.
-fn record_frame(
-    inspector: &InspectorWriter,
-    direction: FrameDirection,
-    flow_id: String,
-    opcode: i64,
-    payload: &[u8],
-    payload_data: &str,
-    result: &crate::bridge::ParseResult,
-) {
-    let raw = if opcode == 1 {
+/// A frame's raw form for the inspector. For text frames (`opcode == 1`)
+/// `payload_data` is the original UTF-8 string, kept verbatim so the JSONL
+/// stays human-readable; for binary frames it is already base64, re-emitted
+/// as is rather than re-encoding the decoded bytes.
+fn frame_raw(opcode: i64, payload_data: &str) -> FrameRaw {
+    if opcode == 1 {
         FrameRaw::Text(payload_data.to_string())
     } else {
         FrameRaw::Binary(payload_data.to_string())
-    };
-    inspector.record_as(
-        InspectorEntry::WsFrame {
-            ts_ms: Local::now().timestamp_millis(),
-            direction,
-            flow_id,
-            size: payload.len(),
-            raw,
-            parsed: result.parsed.clone(),
-            emitted: result.events.len(),
-        },
-        result.shareable,
-    );
+    }
 }
 
 /// A socket URL up to its path, for the flow log's file name: the query can
@@ -911,51 +875,6 @@ mod tests {
             slugify(ws_url_path("wss://example.invalid/g")),
             "wss___example_invalid_g"
         );
-    }
-
-    /// Frames off the bridge's allowlist keep only metadata in the shareable
-    /// inspector file; the full frame goes under `sensitive/`.
-    #[test]
-    fn record_frame_follows_the_bridge_allowlist() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let (inspector, _) = InspectorWriter::open(
-            &tmp.path().join("inspector.jsonl"),
-            &tmp.path().join("full.jsonl"),
-            8,
-        )
-        .unwrap();
-        let secret = r#"{"tag":"HELO","auth":"fake-auth"}"#;
-        let mut result = crate::bridge::ParseResult {
-            parsed: Some(crate::schema::ParsedFrame {
-                method: "HELO".into(),
-                args: serde_json::from_str(secret).unwrap(),
-            }),
-            ..Default::default()
-        };
-        let record = |result: &crate::bridge::ParseResult, raw: &str| {
-            record_frame(
-                &inspector,
-                FrameDirection::Down,
-                "ws:1".into(),
-                1,
-                raw.as_bytes(),
-                raw,
-                result,
-            )
-        };
-        record(&result, secret);
-        let init = r#"{"tag":"INIT","seed":"fake-seed"}"#;
-        result.shareable = true;
-        result.parsed = Some(crate::schema::ParsedFrame {
-            method: "INIT".into(),
-            args: serde_json::from_str(init).unwrap(),
-        });
-        record(&result, init);
-        let read = |name: &str| std::fs::read_to_string(tmp.path().join(name)).unwrap();
-        let shared = read("inspector.jsonl");
-        assert!(!shared.contains("fake-auth"), "{shared}");
-        assert!(shared.contains("HELO") && shared.contains("fake-seed"));
-        assert!(read("full.jsonl").contains("fake-auth"));
     }
 
     #[test]

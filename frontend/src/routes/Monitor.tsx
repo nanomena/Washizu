@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import { LoaderCircle, X } from 'lucide-react'
 import { CandidateList, DecisionCard } from '@/components/monitor/Decision'
 import { GameStage } from '@/components/monitor/GameStage'
+import { MirrorStage } from '@/components/monitor/MirrorStage'
 import { HandStrip, ResultCard, ScoreStrip, SeatColumns } from '@/components/monitor/Table'
 import { AutoplayLevels } from '@/components/monitor/AutoplayLevel'
 import { FaultCard } from '@/components/monitor/Details'
@@ -18,6 +19,7 @@ import {
   type Alert, type AutoplayLevel, type Candidate, type DecisionView, type Health, type MonitorConfig, type MonitorSnapshot,
 } from '@/lib/monitor'
 import { invoke, listen } from '@/lib/host'
+import { capsOf, platformName, type Platform } from '@/lib/platform'
 import './Monitor.css'
 import { localized, tr, useLang } from '@/lib/i18n'
 
@@ -97,6 +99,7 @@ type DockProps = {
 }
 function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onConfirm, onAutoWin, onObsOutput, onProfiles }: DockProps) {
   const { s, view } = m
+  const caps = capsOf(options.platform)
   const game = s?.game ?? null
   const link = linkOf(m.health)
   // A tab shows what it holds while the pointer rests on it; a click keeps it.
@@ -118,7 +121,8 @@ function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onCon
       <Round s={s} />
       <div className="md-controls">
         {/* The control is the setting, and says so by its colour: how far the model's actions may be carried out — not that one has been. */}
-        <span className="md-level"><span aria-hidden>{tr('自动操作')}</span><AutoplayLevels level={levelOf(s, options)} onLevel={onLevel} /></span>
+        {/* A platform without autoplay has none to set; its place stays. */}
+        {caps?.autoplay !== false && <span className="md-level"><span aria-hidden>{tr('自动操作')}</span><AutoplayLevels level={levelOf(s, options)} onLevel={onLevel} /></span>}
       </div>
       <nav className="md-tabs" role="tablist" aria-label={tr('监视内容')}>
         {/* The links have one light, on the settings' tab, where they are: everything behind it is run by this window. */}
@@ -151,6 +155,15 @@ function Dock({ m, tab: chosen, setTab, options, onLevel, onTrail, onLean, onCon
   </aside>
 }
 
+/** What the stage says before the game is open, by platform. */
+function startText(platform: Platform): { about: string; card: string; open: string } {
+  switch (platform) {
+    case 'Majsoul': return { about: tr('上面登录雀魂并对局，下面核对模型建议和雀魂的实际动作。'), card: tr('游戏使用独立的登录资料，只在这个窗口里用。'), open: tr('打开雀魂') }
+    case 'Tenhou': return { about: tr('登录这个档案的天凤账号，登录资料和记录单独保存。'), card: tr('游戏使用独立的登录资料，只在这个窗口里用。'), open: tr('打开天凤') }
+    case 'HoloMahjong': return { about: tr('在 HoloM 客户端里对局，下面核对模型建议和实际动作。'), card: tr('这里只显示 HoloM 窗口的画面，不能在这里操作。'), open: tr('打开 HoloM') }
+  }
+}
+
 export function Monitor() {
   const { snapshot: s, error: bridgeError } = useMonitor()
   // Everything below is drawn in the language of the moment; the dock, which
@@ -163,6 +176,8 @@ export function Monitor() {
   const [opened, setOpened] = useState(false)
   const [uiError, setUiError] = useState<string | null>(null)
   const stage = useRef<HTMLDivElement>(null)
+  const caps = capsOf(options.platform)
+  const start = options.platform ? startText(options.platform) : null
 
   useEffect(() => {
     let cancelled = false
@@ -260,14 +275,15 @@ export function Monitor() {
     <div className="mon-fit">
       <div className="mon-stage" ref={stage}>
         <div className="mon-canvas mon-canvas--stage">
-          {embedded ? <GameStage />
+          {embedded ? (options.platform && caps?.view === 'mirror' ? <MirrorStage name={platformName(options.platform)} onError={setUiError} /> : <GameStage />)
             : <div className="mon-stage-start">
-              <h2>Washizu · {options.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')}</h2>
-              <p>{options.platform === 'Tenhou' ? tr('登录这个档案的天凤账号，登录资料和记录单独保存。') : tr('上面登录雀魂并对局，下面核对模型建议和雀魂的实际动作。')}</p>
+              {/* Until the shell has named the platform, no platform is claimed. */}
+              <h2>{options.platform ? `Washizu · ${platformName(options.platform)}` : 'Washizu'}</h2>
+              <p>{start?.about}</p>
               <div className="mon-start-card">
-                <p>{tr('游戏使用独立的登录资料，只在这个窗口里用。')}</p>
+                <p>{start?.card}</p>
                 <button className="mbtn mbtn--primary" disabled={!ready || busy} onClick={() => void openGame()}>
-                  {busy ? <><LoaderCircle size={16} className="mspin" />{tr('正在连接游戏视图…')}</> : options.platform === 'Tenhou' ? tr('打开天凤') : tr('打开雀魂')}
+                  {busy ? <><LoaderCircle size={16} className="mspin" />{tr('正在连接游戏视图…')}</> : start?.open ?? tr('打开')}
                 </button>
               </div>
             </div>}
@@ -276,13 +292,13 @@ export function Monitor() {
 
       <div className="mon-canvas mon-canvas--dock">
         <Dock key={lang} m={m} tab={tab} setTab={setTab} options={options}
-          onLevel={ready && !busy ? level => void setLevel(level) : null}
-          onTrail={ready && !busy ? enabled => void choose('set_monitor_trail', enabled) : null}
-          onLean={ready && !busy ? enabled => void choose('set_monitor_lean', enabled) : null}
-          onConfirm={ready && !busy ? enabled => void choose('set_monitor_confirm', enabled) : null}
-          onAutoWin={ready && !busy && options.platform !== 'Tenhou' ? enabled => void choose('set_monitor_auto_win', enabled) : null}
+          onLevel={ready && !busy && caps?.autoplay !== false ? level => void setLevel(level) : null}
+          onTrail={ready && !busy && caps?.autoplay !== false ? enabled => void choose('set_monitor_trail', enabled) : null}
+          onLean={ready && !busy && caps?.autoplay !== false ? enabled => void choose('set_monitor_lean', enabled) : null}
+          onConfirm={ready && !busy && caps?.autoplay !== false ? enabled => void choose('set_monitor_confirm', enabled) : null}
+          onAutoWin={ready && !busy && (caps === null || caps.autoplay && caps.clientAutoWin === 'switch') ? enabled => void choose('set_monitor_auto_win', enabled) : null}
           onProfiles={ready && !busy ? () => void invoke('return_to_profiles').catch(error => setUiError(String(error))) : null}
-          onObsOutput={ready && !busy ? enabled => void choose('set_obs_output', enabled) : null} />
+          onObsOutput={ready && !busy && caps?.obsOutput !== false ? enabled => void choose('set_obs_output', enabled) : null} />
         {local.length > 0 && <div className="mtoast" role="alert">
           <div><strong>{local[0].title}</strong><p>{local[0].message}</p></div>
           {uiError && <button aria-label={tr('知道了')} onClick={() => setUiError(null)}><X size={13} /></button>}

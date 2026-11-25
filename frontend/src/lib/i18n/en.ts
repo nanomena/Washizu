@@ -456,4 +456,11 @@ export const en: Record<string, string> = {
   "场风 西": "Round wind: West",
   "自风 北": "Seat wind: North",
   "场风 北": "Round wind: North",
+  "HoloM": "HoloM",
+  "在 HoloM 客户端里对局，下面核对模型建议和实际动作。": "Play in the HoloM client; below, check the model’s suggestions against what was actually played.",
+  "这里只显示 HoloM 窗口的画面，不能在这里操作。": "This shows the HoloM window’s picture only; it cannot be played from here.",
+  "打开 HoloM": "Open HoloM",
+  "等待 {0} 窗口": "Waiting for the {0} window",
+  "{0} 窗口已关闭或最小化": "The {0} window is closed or minimized",
+  "本地代理": "Local proxy",
 }

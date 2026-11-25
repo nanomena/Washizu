@@ -13,11 +13,15 @@
 //   --spout=<file>    the Spout sender (Windows; default: the packaged one)
 // Each can also be given as AKAGI_DATA, AKAGI_CORE, AKAGI_DOCK, AKAGI_CDP_PORT, AKAGI_SPOUT.
 //
-// The game is always drawn offscreen at fixed 1280 × 720 CSS pixels and scale 2.
-// GPU textures go to the dock and, while OBS output is enabled, the Windows
-// Spout sender. Window size and display scaling never change the game's canvas.
+// A web client's game is always drawn offscreen at fixed 1280 × 720 CSS pixels
+// and scale 2. GPU textures go to the dock and, while OBS output is enabled, the
+// Windows Spout sender. Window size and display scaling never change the game's canvas.
+//
+// A native client's game (HoloMahjong) runs in its own window. The game area
+// mirrors that window, view only (`mirror.js`): no input goes to it, and there
+// is no offscreen page, DevTools port, pointer trail, GL watch or OBS output.
 
-import { BaseWindow, BrowserWindow, Menu, WebContentsView, app, clipboard, dialog, ipcMain, screen, sharedTexture } from 'electron'
+import { BaseWindow, BrowserWindow, Menu, WebContentsView, app, clipboard, desktopCapturer, dialog, ipcMain, screen, sharedTexture } from 'electron'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import { createServer } from 'node:net'
@@ -33,7 +37,8 @@ import { Relay, SpoutTaker, pageTaker } from './relay.js'
 import { COLLECT_AFTER_MS, FrameMeter, GL_STATE, GlWatch, HUNG_MS, RELOAD_QUIET_MS, WATCH_MS, WEBGL_CONTEXTS, processLine, worthKeeping } from './watch.js'
 import { keepWorkersRunning } from './workers.js'
 import { contentSize, holdRatio, presentWindow } from './window-frame.js'
-import { ProfileStore, PLATFORMS, homePlatform } from './profiles.js'
+import { ProfileStore, PLATFORMS, homeCaptureListen, homePlatform } from './profiles.js'
+import { MirrorWatch, mirrorPayload } from './mirror.js'
 import { readObsPreference, saveObsPreference, spoutSenderName } from './view-preferences.js'
 import { applyGameProxy } from './profile-proxy.js'
 
@@ -54,6 +59,15 @@ const profileStore = new ProfileStore(path.resolve(option('data'))).load()
 const PROFILE = profileStore.get(option('profile'))
 const DATA = profileStore.home(PROFILE.id)
 if (homePlatform(DATA) !== PROFILE.platform) throw new Error('档案的平台与配置不一致，资料未作更改。')
+/** How the game reaches this window: a web client's offscreen page, or a native client's mirrored window. */
+const PLATFORM = PLATFORMS[PROFILE.platform]
+/** The native client's local proxy address, fixed when the account was created; shown read-only. */
+const CAPTURE_LISTEN = PLATFORM.view === 'mirror' ? homeCaptureListen(DATA) : null
+/**
+ * What a mirrored window cannot have: everything that presses the game or sends
+ * its page's frames on. Refused here, whatever asks.
+ */
+const PAGE_ONLY = new Set(['set_monitor_autoplay', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_monitor_trail', 'set_obs_output'])
 const CORE = path.resolve(option('core') || (app.isPackaged ? path.join(process.resourcesPath, 'core', CORE_NAME) : path.join(HERE, '..', '..', 'target', 'release', CORE_NAME)))
 const DOCK_FILES = path.resolve(option('dock') || (app.isPackaged ? path.join(process.resourcesPath, 'dock') : path.join(HERE, '..', '..', 'frontend', 'dist')))
 const WINDOW_STATE = path.join(DATA, 'window.json')
@@ -101,6 +115,16 @@ let core = null
 /** Autoplay's pointer, drawn over the game while the option is on. */
 /** @type {BrowserWindow | null} */
 let trail = null
+/** The mirror of a native client's window; none for a web client. */
+const mirror = PLATFORM.view === 'mirror' ? new MirrorWatch({
+  list: () => desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false }),
+  titles: PLATFORM.windowTitles,
+  onState: state => dock?.webContents.send('akagi:event', 'game-mirror', mirrorPayload(state)),
+  log: message => note(message),
+}) : null
+/** The core's proxy being opened for the mirror, while it is; a second ask waits for the same one. */
+/** @type {Promise<void> | null} */
+let proxyOpening = null
 const physicalPointer = new PhysicalPointerObserver(params => running().call('set_user_pointer', params), error => note(`physical pointer ownership unavailable: ${error}`))
 /** Where the game view is in the window's content, while it is shown. */
 /** @type {import('./layout.js').Rect | null} */
@@ -111,12 +135,13 @@ let gameAt = null
  *   quick_confirm?: boolean, auto_win?: boolean, auto_continue?: boolean,
  *   version?: string, obs_output?: boolean, obs_available?: boolean,
  *   obs_state?: 'off' | 'starting' | 'sending' | 'failed' | 'stopped',
- *   obs_name?: string, platform?: 'Majsoul' | 'Tenhou', profile_name?: string }} Options
+ *   obs_name?: string, platform?: import('./profiles.js').Platform, profile_name?: string,
+ *   capture_listen?: string }} Options
  */
 /** @type {Options} */
 let options = {}
-/** The account's only output preference; the renderer always remains offscreen. */
-let obsEnabled = readObsPreference(DATA)
+/** The account's only output preference; the renderer always remains offscreen. A mirrored window has no output. */
+let obsEnabled = PLATFORM.view === 'page' && readObsPreference(DATA)
 /** Whether a Windows Spout2 sender is installed. */
 const SPOUT_AVAILABLE = process.platform === 'win32' && fs.existsSync(SPOUT)
 let cdpPort = 0
@@ -145,6 +170,7 @@ function readJson(/** @type {string} */ file) {
 
 /** The shell-owned output settings; no output address or rendering mode exists. @returns {Options} */
 function obsOptions() {
+  if (PLATFORM.view === 'mirror') return {}
   return {
     obs_output: obsEnabled, obs_available: SPOUT_AVAILABLE, obs_name: SPOUT_NAME,
     obs_state: !obsEnabled ? 'off' : !SPOUT_AVAILABLE ? 'failed' : spout?.state ?? (relay ? 'starting' : 'stopped'),
@@ -165,7 +191,8 @@ function showWindow() {
 /** @param {import('./core.js').Ready} ready */
 function openWindow(ready) {
   if (ready.platform !== PROFILE.platform) throw new Error('core 返回的平台与账号档案不一致。')
-  options = { ...ready.monitor, version: ready.version, ...obsOptions(), platform: PROFILE.platform, profile_name: PROFILE.name }
+  options = { ...ready.monitor, version: ready.version, ...obsOptions(), platform: PROFILE.platform, profile_name: PROFILE.name,
+    ...(CAPTURE_LISTEN === null ? {} : { capture_listen: CAPTURE_LISTEN }) }
   const saved = restoredBounds(readJson(WINDOW_STATE), screen.getAllDisplays().map(display => display.workArea))
   const size = saved ?? openingSize(screen.getPrimaryDisplay().workAreaSize)
   const frame = window = new BaseWindow({
@@ -175,7 +202,7 @@ function openWindow(ready) {
     useContentSize: true,
     minWidth: MIN.width,
     minHeight: MIN.height,
-    title: `Washizu · ${PROFILE.name} · ${PLATFORMS[PROFILE.platform].name}`,
+    title: `Washizu · ${PROFILE.name} · ${PLATFORM.name}`,
     // A maximized or full-screen window cannot keep the canvas's ratio.
     maximizable: false,
     fullscreenable: false,
@@ -194,12 +221,23 @@ function openWindow(ready) {
   frame.on('move', placeTrail)
   frame.on('resize', placeTrail)
   // The user's hand on the mouse over the game: autoplay holds its presses
-  // until it rests, so that the two do not get in each other's way.
-  const watch = setInterval(watchCursor, 50)
-  frame.on('closed', () => clearInterval(watch))
+  // until it rests, so that the two do not get in each other's way. A
+  // mirrored window has no autoplay.
+  if (PLATFORM.view === 'page') {
+    const watch = setInterval(watchCursor, 50)
+    frame.on('closed', () => clearInterval(watch))
+  }
 
   // The interface is one page of our own files: it goes nowhere and opens nothing.
   const page = view.webContents
+  // The mirror's picture: given to this page's own request only, and only the
+  // window the mirror shows, without a picker. Anything else is refused.
+  if (mirror) page.session.setDisplayMediaRequestHandler((request, answer) => {
+    const frame = request.frame
+    const own = !!frame && !page.isDestroyed() && frame.processId === page.mainFrame.processId && frame.routingId === page.mainFrame.routingId
+    const source = own && request.videoRequested && !request.audioRequested ? mirror.granted() : null
+    answer(source ? { video: { id: source.id, name: source.name } } : null)
+  })
   page.setWindowOpenHandler(() => ({ action: 'deny' }))
   page.on('will-navigate', (event, url) => { if (!url.startsWith(DOCK)) event.preventDefault() })
   page.on('render-process-gone', () => page.reload())
@@ -218,6 +256,7 @@ function openWindow(ready) {
   })
   frame.on('closed', () => {
     clearTimeout(gpuReload)
+    mirror?.stop()
     stopSpout()
     // Views outlive the window they were in unless they are closed.
     offscreenGame?.destroy()
@@ -556,11 +595,33 @@ const commands = {
     if (!relay) return null
     return { frames: relay.frames, passed: relay.passed, takers: Object.fromEntries(relay.counts), obs: spout ? { state: spout.state, detail: spout.detail } : null }
   },
+  /** The mirror's state, for a dock that has just loaded; null until it runs. */
+  async get_game_mirror() {
+    if (!mirror) throw new Error(`${PLATFORM.name} 的游戏画面不是窗口镜像。`)
+    return mirror.running ? mirrorPayload(mirror.mirror) : null
+  },
+  /** The dock's report that the mirrored picture it played has ended. */
+  async game_mirror_ended({ source }) {
+    if (!mirror) throw new Error(`${PLATFORM.name} 的游戏画面不是窗口镜像。`)
+    mirror.ended(source)
+  },
   async resize_monitor_game({ bounds }) {
     placeGame(bounds)
   },
   async open_monitor_game({ bounds }) {
     gameBounds(bounds)
+    if (mirror) {
+      // The native client plays in its own window: the core's proxy reads its
+      // traffic, and the game area mirrors the window.
+      if (mirror.running || !window) return
+      const watch = mirror
+      proxyOpening ??= running().call('open_proxy').then(answer => {
+        const reply = /** @type {{ listen?: unknown } | null} */ (answer)
+        if (reply?.listen !== CAPTURE_LISTEN) throw new Error(`core 的本地代理地址（${String(reply?.listen)}）与档案（${CAPTURE_LISTEN}）不一致。`)
+        watch.start()
+      }).finally(() => { proxyOpening = null })
+      return proxyOpening
+    }
     if (offscreenGame || !window) return
     offscreenGame = createOffscreenGame()
     const page = offscreenGame.webContents
@@ -592,12 +653,15 @@ async function prepare() {
   // The game sees an ordinary Chromium: no application's name in the user agent.
   const named = new RegExp(` (Electron|${app.getName().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})/\\S+`, 'g')
   app.userAgentFallback = app.userAgentFallback.replace(named, '')
-  cdpPort = Number(option('cdp-port')) || await freePort()
-  note(`account ${PROFILE.id}: local DevTools port ${cdpPort}`)
-  app.commandLine.appendSwitch('remote-debugging-port', String(cdpPort))
-  app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1')
-  // Room for the WebGL contexts the game's client leaves behind (see `WEBGL_CONTEXTS`).
-  app.commandLine.appendSwitch('max-active-webgl-contexts', String(WEBGL_CONTEXTS))
+  // A native client's account has no game page: no DevTools port is opened for it.
+  if (PLATFORM.view === 'page') {
+    cdpPort = Number(option('cdp-port')) || await freePort()
+    note(`account ${PROFILE.id}: local DevTools port ${cdpPort}`)
+    app.commandLine.appendSwitch('remote-debugging-port', String(cdpPort))
+    app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1')
+    // Room for the WebGL contexts the game's client leaves behind (see `WEBGL_CONTEXTS`).
+    app.commandLine.appendSwitch('max-active-webgl-contexts', String(WEBGL_CONTEXTS))
+  } else note(`account ${PROFILE.id}: ${PLATFORM.name} window mirror, local proxy ${CAPTURE_LISTEN}`)
   registerDockScheme()
 
   app.on('second-instance', showWindow)
@@ -654,6 +718,7 @@ async function prepare() {
       if (!dock || event.sender !== dock.webContents) throw new Error('Only the interface can ask this.')
       const run = Object.hasOwn(commands, command) ? commands[command] : null
       if (!run) throw new Error(`Unknown command: ${command}`)
+      if (PLATFORM.view === 'mirror' && PAGE_ONLY.has(command)) throw new Error(`${PLATFORM.name} 只显示窗口画面，没有自动操作或 OBS 输出。`)
       return { ok: true, value: await run(args && typeof args === 'object' ? args : {}) }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -666,7 +731,7 @@ async function start() {
   Menu.setApplicationMenu(null)
   serveDock(DOCK_FILES)
   // Before the game's page opens: its service worker is let run from its first start (see `workers.js`).
-  void keepWorkersRunning(cdpPort, note)
+  if (PLATFORM.view === 'page') void keepWorkersRunning(cdpPort, note)
 
   const child = core = new Core(CORE, ['--home', DATA, '--engines', path.resolve(option('data'), 'engines'), '--account', PROFILE.id], { cwd: DATA })
   let gameEnded = true
@@ -706,7 +771,7 @@ if (!hasChromiumLog(process.argv)) {
   app.exit(0)
 } else if (app.requestSingleInstanceLock()) {
   // Persist the one-way import only after owning this account's home.
-  saveObsPreference(DATA, obsEnabled)
+  if (PLATFORM.view === 'page') saveObsPreference(DATA, obsEnabled)
   prune(LOGS)
   note(`shell ${app.getVersion()} started: Electron ${process.versions.electron}, Chromium ${process.versions.chrome}`)
   await prepare()

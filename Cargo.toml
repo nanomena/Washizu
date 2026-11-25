@@ -54,6 +54,9 @@ chromiumoxide = "0.9.1"
 ulid = { version = "1", features = ["serde"] }
 rand = "0.9"
 http = "1"
+# HoloMahjong: MessagePack bodies, and the HPACK headers of its HTTP/2 tunnel.
+rmpv = "1.3.1"
+loona-hpack = "0.4.3"
 form_urlencoded = "1.2.2"
 # Tenhou `<UN/>` roster names are bare percent-encoded UTF-8 (no `+`-as-space
 # form semantics, so `form_urlencoded` would be wrong for them).

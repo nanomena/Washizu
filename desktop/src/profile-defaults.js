@@ -6,7 +6,9 @@ import path from 'node:path'
 import { readObsPreference } from './view-preferences.js'
 
 /** @typedef {{ autoplay: 'off' | 'play' | 'continue', quick_confirm: boolean, pointer_lean: boolean, pointer_trail: boolean, auto_win: boolean, obs_output: boolean }} GameDefaults */
-/** @typedef {{ Majsoul: GameDefaults, Tenhou: GameDefaults }} ProfileDefaults */
+/** The web clients' templates only: a HoloMahjong account is observed only and
+ * has none of these settings, so it has no template (`profiles.js` `mirrorConfig`).
+ * @typedef {{ Majsoul: GameDefaults, Tenhou: GameDefaults }} ProfileDefaults */
 
 /** @param {string | null} home @param {'Majsoul' | 'Tenhou'} platform @returns {GameDefaults} */
 export function importDefaults(home, platform) {

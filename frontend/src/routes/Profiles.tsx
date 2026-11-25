@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type DragEvent, type FormEvent } from 'rea
 import { invoke, listen } from '@/lib/host'
 import { tr, useLang, type Lang } from '@/lib/i18n'
 import type { AccountProfile, GameProxy, ProfileClient, ProfileDefaults, ProfileState } from '@/lib/profiles'
+import { CAPABILITIES, PLATFORMS, platformName, type Platform } from '@/lib/platform'
 import { ProfileSettings } from '@/components/monitor/ProfileSettings'
 import './Monitor.css'
 import './Profiles.css'
@@ -125,7 +126,7 @@ export function Profiles() {
             onDragOver={event => { if (drag.current && !blocked) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDropTarget(drag.current.id === profile.id ? null : { id: profile.id, side: sideAt(event) }) } }}
             onDrop={event => drop(event, profile.id)} onDragEnd={endDrag}>
           <td><span className="accounts-name" title={profile.name}>{profile.name}</span><span className="accounts-meta">{client && <span className="accounts-client" data-error={client.state === 'failed'} role={client.state === 'failed' ? 'alert' : undefined} title={client.error || label}>{label}{client.error ? ` · ${client.error}` : ''}</span>}{profile.id === 'existing' && <span className="accounts-original">{tr('原有资料')}</span>}{profile.lastOpened && <span title={new Date(profile.lastOpened).toLocaleString(lang)}>{tr('最近打开')} {new Date(profile.lastOpened).toLocaleDateString(lang)}</span>}</span></td>
-          <td>{profile.platform === 'Tenhou' ? tr('天凤') : tr('雀魂')}</td>
+          <td>{platformName(profile.platform)}</td>
           <td><div className="accounts-row-tools">
             <button className="mbtn accounts-rename" disabled={!!blocked} aria-label={tr('管理 {0}', profile.name)} onClick={() => openEditor(profile)}>{tr('管理')}</button>
             <button className="mbtn mbtn--primary" disabled={pending.has(`open:${profile.id}`) || !!locked(client)} aria-label={tr('打开 {0}', profile.name)} onClick={() => void request('open_profile', { id: profile.id })}>{client?.state === 'active' ? words.show : tr('打开')}</button>
@@ -140,8 +141,9 @@ export function Profiles() {
         <h2 id="editor-title">{editor?.id ? tr('管理档案') : tr('新建档案')}</h2>
         <div className="accounts-editor-fields">
         <label>{tr('档案名称')}<input id="name" ref={nameInput} value={editor?.name ?? ''} onChange={event => setEditor(current => current && { ...current, name: event.target.value })} required maxLength={48} autoComplete="off" /></label>
-        {!editor?.id && <label>{tr('平台')}<select id="platform" value={editor?.platform ?? 'Majsoul'} onChange={event => setEditor(current => current && { ...current, platform: event.target.value as AccountProfile['platform'] })}><option value="Majsoul">{tr('雀魂')}</option><option value="Tenhou">{tr('天凤')}</option></select></label>}
-        {editor?.id && <fieldset className="accounts-proxy" disabled={busy}>
+        {!editor?.id && <label>{tr('平台')}<select id="platform" value={editor?.platform ?? 'Majsoul'} onChange={event => setEditor(current => current && { ...current, platform: event.target.value as Platform })}>{PLATFORMS.map(key => <option key={key} value={key}>{platformName(key)}</option>)}</select></label>}
+        {/* A native client's traffic does not go through the shell: it has no game proxy to set. */}
+        {editor?.id && CAPABILITIES[editor.platform].gameProxy && <fieldset className="accounts-proxy" disabled={busy}>
           <legend>{tr('游戏代理')}</legend>
           <label>{tr('连接方式')}<select value={editor.proxy.mode} onChange={event => setEditor(current => current && { ...current, proxy: { ...current.proxy, mode: event.target.value as GameProxy['mode'] } })}>
             <option value="system">{tr('跟随系统')}</option><option value="direct">{tr('直连')}</option><option value="custom">{tr('指定代理')}</option>

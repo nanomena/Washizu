@@ -595,6 +595,8 @@
 /* The game drawn offscreen: its frames fill the stage, which is its exact ratio. */
 .mon-game { position: absolute; inset: 0; background: #000; touch-action: none; user-select: none; }
 .mon-game-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
+/* A mirrored native window keeps its own shape inside the stage. */
+.mon-game-video--fit { object-fit: contain; }
 .mon-game-wait { position: absolute; inset: 0; display: grid; place-items: center; color: hsl(0 0% 70%); font-size: 14px; pointer-events: none; }
 /* Holds the keyboard, and where an input method composes, without being seen. */
 .mon-game-keys { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; resize: none; overflow: hidden; pointer-events: none; }

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { AutoplayRows, LanguageRow, Row, SettingsLayout, Switch } from './SettingsControls'
 import type { GameDefaults, ProfileDefaults } from '@/lib/profiles'
 import { tr } from '@/lib/i18n'
+import { DEFAULT_PLATFORMS, platformName } from '@/lib/platform'
 
 export function ProfileSettings({ defaults, onChange }: { defaults: ProfileDefaults; onChange: ((value: ProfileDefaults) => void) | null }) {
   const [group, setGroup] = useState<'app' | keyof ProfileDefaults>('app')
@@ -9,7 +10,7 @@ export function ProfileSettings({ defaults, onChange }: { defaults: ProfileDefau
   const update = (patch: Partial<GameDefaults>) => { if (platform) onChange?.({ ...defaults, [platform]: { ...defaults[platform], ...patch } }) }
   const selected = platform && defaults[platform]
   return <div className="accounts-settings">
-    <SettingsLayout groups={['app', 'Majsoul', 'Tenhou']} group={group} onGroup={setGroup} names={{ app: tr('应用'), Majsoul: tr('雀魂'), Tenhou: tr('天凤') }}>
+    <SettingsLayout groups={['app', ...DEFAULT_PLATFORMS]} group={group} onGroup={setGroup} names={{ app: tr('应用'), Majsoul: platformName('Majsoul'), Tenhou: platformName('Tenhou') }}>
       <div className="mset-grid">
         {selected && platform ? <>
           <AutoplayRows level={selected.autoplay} options={{ ...selected, platform }}

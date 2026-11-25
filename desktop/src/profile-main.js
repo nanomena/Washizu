@@ -6,7 +6,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, screen } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { ProfileStore } from './profiles.js'
+import { PLATFORMS, ProfileStore, chooseListen, platformKind } from './profiles.js'
 import { ProfileSessions } from './profile-session.js'
 import { registerDockScheme, serveDock } from './dock.js'
 import { guideSize } from './profile-layout.js'
@@ -66,11 +66,17 @@ export async function startProfiles(root) {
     try { store.opened(id) } catch (cause) { error = `最近使用时间未保存：${cause instanceof Error ? cause.message : String(cause)}` }
   })
   sessions.on('closed', show)
-  ipcMain.handle('washizu:profiles', (event, method, args) => {
+  ipcMain.handle('washizu:profiles', async (event, method, args) => {
     try {
       if (!window || event.sender !== window.webContents) throw new Error('只有账号档案页可以执行此操作。')
       const values = args && typeof args === 'object' ? args : {}
-      if (method === 'create_profile') { store.create(values.name, values.platform); fitGuide() }
+      if (method === 'create_profile') {
+        // A native client's account is given its proxy port once, here, and keeps it.
+        const platform = platformKind(values.platform)
+        const listen = PLATFORMS[platform].view === 'mirror' ? await chooseListen({ taken: store.listenPorts() }) : null
+        store.create(values.name, platform, listen)
+        fitGuide()
+      }
       else if (method === 'save_profile') store.update(values.id, values.name, values.proxy)
       else if (method === 'reorder_profiles') store.reorder(values.ids)
       else if (method === 'delete_profile') { const profile = store.get(values.id); sessions.remove(profile.id, () => store.delete(profile.id)); fitGuide() }

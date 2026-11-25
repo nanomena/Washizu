@@ -15,6 +15,8 @@ import * as input from '../src/input.js'
 import * as physicalPointer from '../src/physical-pointer.js'
 import * as preferences from '../src/view-preferences.js'
 import * as profileProxy from '../src/profile-proxy.js'
+import * as mirrorModule from '../src/mirror.js'
+import { PLATFORMS } from '../src/profiles.js'
 import { presentWindow } from '../src/window-frame.js'
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'washizu-obs-test-'))
@@ -29,6 +31,13 @@ const windows = [], views = [], senders = [], errors = [], calls = []
 const presentation = [], messages = []
 const optionEvents = []
 const monitorOptionsOnly = process.env.MONITOR_OPTIONS_ONLY === '1'
+// PROBE_PLATFORM=HoloMahjong runs the same module as a native client's account: a mirrored window.
+const platform = process.env.PROBE_PLATFORM || 'Majsoul'
+const LISTEN = '127.0.0.1:23456'
+const appended = []
+const dockEvents = []
+/** The windows the stand-in desktopCapturer lists. */
+let listed = []
 const savedMonitor = { pointer_lean: false, quick_confirm: false, auto_win: false, auto_continue: false, pointer_trail: false }
 let rejectMonitorSave = false
 const handlers = new Map()
@@ -38,15 +47,17 @@ const screen = Object.assign(new EventEmitter(), {
   getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }),
 })
 class Page extends EventEmitter {
-  session = { async setProxy() {}, setPermissionRequestHandler() {}, setPermissionCheckHandler() {} }
+  session = { async setProxy() {}, setPermissionRequestHandler() {}, setPermissionCheckHandler() {},
+    setDisplayMediaRequestHandler: handler => { this.displayMedia = handler } }
   debugger = { attach() {}, detach() {}, sendCommand: async () => ({ targetInfo: { targetId: 'offscreen-game' } }) }
-  mainFrame = {}
+  mainFrame = { processId: 7, routingId: 1 }
   reloads = 0
   destroyed = false
   setWindowOpenHandler() {}
   setFrameRate() {}
   send(channel, event, value) {
     if (channel === 'akagi:event' && event === 'monitor-options') optionEvents.push(structuredClone(value))
+    if (channel === 'akagi:event' && event === 'game-mirror') dockEvents.push(structuredClone(value))
   }
   loadURL() { return Promise.resolve() }
   isDestroyed() { return this.destroyed }
@@ -80,9 +91,11 @@ class View {
   setBounds() {}
 }
 class Core extends EventEmitter {
-  ready = Promise.resolve({ platform: 'Majsoul', monitor: {}, version: 'test' })
+  ready = Promise.resolve({ platform, monitor: {}, version: 'test' })
   call(method, params) {
     calls.push({ method, params })
+    // A stand-in for the core's `open_proxy`: no params, the bound address back.
+    if (method === 'open_proxy') return Promise.resolve({ listen: LISTEN })
     if (monitorOptionsOnly) {
       const key = { set_monitor_lean: 'pointer_lean', set_monitor_confirm: 'quick_confirm', set_monitor_auto_win: 'auto_win', set_monitor_continue: 'auto_continue', set_monitor_trail: 'pointer_trail' }[method]
       if (key) {
@@ -96,14 +109,15 @@ class Core extends EventEmitter {
 }
 const switches = { data: home, profile: 'existing', spout: sender, 'cdp-port': '33333', run: 'test' }
 const app = Object.assign(new EventEmitter(), {
-  commandLine: { getSwitchValue: name => switches[name] ?? '', appendSwitch() {} },
+  commandLine: { getSwitchValue: name => switches[name] ?? '', appendSwitch: name => appended.push(name) },
   isPackaged: false, userAgentFallback: 'Chromium', getName: () => 'Washizu', getVersion: () => 'test',
-  setPath() {}, requestSingleInstanceLock: () => true,
+  setPath() {}, requestSingleInstanceLock: () => true, quit() {},
   whenReady: () => ({ then(callback) { start = callback; return Promise.resolve() } }),
 })
 const namespaces = {
   electron: { app, screen, BaseWindow: Window, BrowserWindow: Browser, WebContentsView: View,
     Menu: { setApplicationMenu() {} }, clipboard: {}, sharedTexture: {},
+    desktopCapturer: { getSources: async options => { assert.equal(options.types.join(), 'window'); return structuredClone(listed) } },
     dialog: { showErrorBox: (...args) => errors.push(args) },
     ipcMain: { on() {}, handle: (name, callback) => handlers.set(name, callback) } },
   'node:child_process': { spawn: (...args) => {
@@ -117,8 +131,12 @@ const namespaces = {
     HUNG_MS: 1000, RELOAD_QUIET_MS: 1000, WATCH_MS: 1000, WEBGL_CONTEXTS: 16, processLine() {}, worthKeeping() {} },
   './workers.js': { keepWorkersRunning: async () => {} },
   './window-frame.js': { contentSize: () => ({ width: 1000, height: 750 }), holdRatio() {}, presentWindow },
-  './profiles.js': { ProfileStore: class { load() { return this } get() { return { id: 'existing', name: 'Original', platform: 'Majsoul', proxy: { mode: 'system', server: '' } } } home() { return home } },
-    PLATFORMS: { Majsoul: { name: 'Mahjong Soul' } }, homePlatform: () => 'Majsoul' },
+  './profiles.js': { ProfileStore: class { load() { return this } get() { return { id: 'existing', name: 'Original', platform, proxy: { mode: 'system', server: '' } } } home() { return home } },
+    PLATFORMS, homePlatform: () => platform, homeCaptureListen: () => LISTEN },
+  // The mirror's polls run on this probe's timers, fired by hand below.
+  './mirror.js': { ...mirrorModule, MirrorWatch: class extends mirrorModule.MirrorWatch {
+    constructor(options) { super({ ...options, setTimer: context.setTimeout, clearTimer: context.clearTimeout }) }
+  } },
   './view-preferences.js': preferences,
   './profile-proxy.js': profileProxy,
 }
@@ -173,6 +191,12 @@ try {
   }
   const invoke = (command, args = {}) => handlers.get('akagi:invoke')({ sender: views[0].webContents }, command, args)
   const options = async () => (await invoke('get_monitor_options')).value
+  if (platform === 'HoloMahjong') {
+    await mirrorRun(invoke, options)
+    console.log('Native client mirror: proxy, view-only window, explicit mirror states: passed')
+    return
+  }
+  assert.equal(appended.includes('remote-debugging-port'), true)
   if (monitorOptionsOnly) {
     // A caller other than React's own onClick must update the mounted view,
     // not just the cached get_monitor_options response.
@@ -258,4 +282,73 @@ try {
   fs.rmSync(home, { recursive: true, force: true })
 }
 }
+/** The window of a native client's account: the proxy instead of a game page, and a mirror that only shows. */
+async function mirrorRun(invoke, options) {
+  const TITLE = PLATFORMS.HoloMahjong.windowTitles[0]
+  const settle = () => new Promise(done => setImmediate(done))
+  const poll = async () => {
+    const due = [...timers.entries()].filter(([, timer]) => timer.delay === mirrorModule.MIRROR_POLL_MS)
+    assert.equal(due.length, 1, 'one poll is pending at a time')
+    timers.delete(due[0][0])
+    due[0][1].callback()
+    await settle()
+  }
+  const dock = views[0].webContents
+  const ask = (frame, extra = {}) => {
+    let answer
+    dock.displayMedia({ frame, securityOrigin: 'app://dock', videoRequested: true, audioRequested: false, userGesture: false, ...extra }, streams => { answer = structuredClone(streams) })
+    return answer
+  }
+  assert.equal(appended.includes('remote-debugging-port'), false, 'no DevTools port is opened for a native client')
+  const saved = await options()
+  assert.equal(saved.platform, 'HoloMahjong')
+  assert.equal(saved.capture_listen, LISTEN)
+  assert.equal(Object.keys(saved).some(key => key.startsWith('obs_')), false, 'a mirrored window has no OBS output')
+  assert.equal(fs.existsSync(path.join(home, 'obs.json')), false)
+  assert.equal((await invoke('get_game_mirror')).value, null, 'the mirror runs only once the game is opened')
+  assert.equal(ask(dock.mainFrame), null, 'nothing is shown before the mirror runs')
+
+  const bounds = { x: 0, y: 0, width: 880, height: 495, visible: true }
+  const opened = await Promise.all([invoke('open_monitor_game', { bounds }), invoke('open_monitor_game', { bounds })])
+  assert.deepEqual(opened.map(reply => reply.ok), [true, true])
+  assert.deepEqual(calls.map(call => call.method), ['open_proxy'], 'two asks at once open the proxy once')
+  assert.equal(calls[0].params, undefined, 'open_proxy takes no params')
+  assert.equal(windows.some(window => window.options.webPreferences?.offscreen), false, 'no offscreen game page')
+  await settle()
+  assert.deepEqual(dockEvents, [{ state: 'searching', source: null }])
+
+  listed = [{ id: 'window:9:0', name: 'Another window' }]
+  await poll()
+  assert.deepEqual(dockEvents.at(-1), { state: 'searching', source: null })
+  assert.equal(dockEvents.length, 1, 'an unchanged state is not said again')
+  listed = [{ id: 'window:9:0', name: 'Another window' }, { id: 'window:42:0', name: TITLE }]
+  await poll()
+  assert.deepEqual(dockEvents.at(-1), { state: 'showing', source: 'window:42:0' })
+  assert.deepEqual((await invoke('get_game_mirror')).value, { state: 'showing', source: 'window:42:0' })
+  assert.deepEqual(ask(dock.mainFrame), { video: { id: 'window:42:0', name: TITLE } })
+  assert.equal(ask({ processId: 7, routingId: 99 }), null, 'only the dock\'s own page is answered')
+  assert.equal(ask(null), null)
+  assert.equal(ask(dock.mainFrame, { audioRequested: true }), null, 'no sound is captured')
+
+  assert.equal((await invoke('game_mirror_ended', { source: 'window:9:0' })).ok, true)
+  assert.equal(dockEvents.at(-1).state, 'showing', 'a report about another picture is stale')
+  await invoke('game_mirror_ended', { source: 'window:42:0' })
+  assert.deepEqual(dockEvents.at(-1), { state: 'lost', source: null })
+  assert.equal(ask(dock.mainFrame), null)
+  listed = []
+  await poll()
+  assert.deepEqual(dockEvents.at(-1), { state: 'searching', source: null })
+
+  assert.equal((await invoke('open_monitor_game', { bounds: { x: 0, y: 0, width: 880, height: 495, visible: true } })).ok, true)
+  assert.equal(calls.filter(call => call.method === 'open_proxy').length, 1, 'the proxy is opened once')
+  for (const command of ['set_monitor_autoplay', 'set_monitor_lean', 'set_monitor_confirm', 'set_monitor_auto_win', 'set_monitor_continue', 'set_monitor_trail', 'set_obs_output']) {
+    const reply = await invoke(command, { enabled: true })
+    assert.equal(reply.ok, false, command)
+    assert.match(reply.error, /只显示窗口画面/)
+  }
+  assert.equal(calls.some(call => call.method !== 'open_proxy'), false, 'nothing reached the core but the proxy')
+  windows[0].emit('closed')
+  assert.equal([...timers.values()].some(timer => timer.delay === mirrorModule.MIRROR_POLL_MS), false, 'closing the window stops the mirror')
+}
+
 await probe()
