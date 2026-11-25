@@ -68,7 +68,7 @@ and nobody can know in advance which frames a platform puts credentials in.
 So a frame's content reaches them only when the bridge says so:
 `ParseResult::shareable` is `false` by default, and each bridge sets it from an
 explicit allowlist of gameplay messages (`is_shareable` in `majsoul/`,
-`tenhou/`, `riichi_city/`). Everything else is logged as method, direction and
+`tenhou/`, `riichi_city/`, `holomahjong/`). Everything else is logged as method, direction and
 size; the full frame is still recorded in `sensitive/inspector.jsonl`.
 
 To allow a message, check it carries no credentials (tokens, passwords, login
@@ -93,3 +93,6 @@ it. Bridges must not log payloads of frames off the list themselves; see
   drives the client's own input instead. See `tenhou/README.md`.
 - `riichi_city/` — Riichi City (JSON inside a 15-byte binary header).
   Observe-only. See `riichi_city/README.md`.
+- `holomahjong/` — HoloMahjong (MagicOnion StreamingHub messages, MessagePack
+  over gRPC on cleartext HTTP/2); `parse` receives one hub message per call
+  from the capture proxy. Observe-only. See `holomahjong/README.md`.
